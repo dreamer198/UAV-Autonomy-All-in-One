@@ -1,0 +1,14 @@
+.git
+.github
+docs
+README.md
+runtime
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.cache
+**/.catkin_tools
+**/build
+**/devel
+**/logs
+**/*.bag
