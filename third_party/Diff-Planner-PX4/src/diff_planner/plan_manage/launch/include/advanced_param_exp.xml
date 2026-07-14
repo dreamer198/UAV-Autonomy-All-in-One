@@ -85,8 +85,8 @@
         <param name="grid_map/local_update_range_z" value="$(arg local_map_size_z)" /> <!-- different meaning between grid_map.cpp and grid_map_bigmap.cpp -->
         <param name="grid_map/obstacles_inflation" value="$(arg inflation_size)" />
         <param name="grid_map/enable_virtual_wall" value="$(arg enable_virtual_wall)"/>
-        <param name="grid_map/virtual_ceil" value="3.0"/>
-        <param name="grid_map/virtual_ground" value="-0.1"/>
+        <param name="grid_map/virtual_ceil" value="$(arg virtual_ceil)"/>
+        <param name="grid_map/virtual_ground" value="$(arg virtual_ground)"/>
         <param name="grid_map/ground_height" value="-0.01"/>
         <!-- camera parameter -->
         <param name="grid_map/cx" value="$(arg cx)"/>

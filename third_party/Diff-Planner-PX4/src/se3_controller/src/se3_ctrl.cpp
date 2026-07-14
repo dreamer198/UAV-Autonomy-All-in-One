@@ -42,6 +42,8 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     nh_.param<double>("geo_fence/x", geo_fence_[0], 10.0);
     nh_.param<double>("geo_fence/y", geo_fence_[1], 10.0);
     nh_.param<double>("geo_fence/z", geo_fence_[2], 4.0);
+    nh_.param<double>("ki_pz", ki_pz_, 0.0);
+    nh_.param<double>("int_limit_z", int_limit_z_, 5.0);
 
     enu_frame_ = true;
     vel_in_body_ = true;
@@ -86,6 +88,7 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
                             kd_p_, kd_v_, kd_a_, kd_q_, kd_w_,
                             limit_err_p_, limit_err_v_, limit_err_a_,
                             limit_d_err_p_, limit_d_err_v_, limit_d_err_a_);
+    se3_controller_.setIntegral(Eigen::Vector3d(0.0, 0.0, ki_pz_), int_limit_z_);
 }
 
 
@@ -205,6 +208,7 @@ void se3Ctrl::pubLocalPose(const Eigen::Vector3d &pose)
 
 void se3Ctrl::setDesiredStateToCurrentOdom()
 {
+    se3_controller_.resetIntegral();
     desired_state_.p = odom_data_.p;
     desired_state_.v = Eigen::Vector3d::Zero();
     desired_state_.a.setZero();

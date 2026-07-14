@@ -126,16 +126,22 @@ FCU_DEVICE=/dev/ttyACM0 \
 在 Jetson 上执行：
 
 ```bash
+cd ~/diff-planner-px4-deployment
 FCU_URL='serial:///dev/ttyACM0:57600' \
 GCS_URL='udp://:14550@10.0.30.196:14550' \
-SE3_HOVER_PERCENT=0.90 \
-SE3_MAX_HOVER_PERCENT=0.95 \
-SE3_MAX_OUTPUT_THRUST=1.00 \
-SE3_ENABLE_THRUST_ESTIMATION=false \
+SE3_HOVER_PERCENT=0.50 \
 SE3_MAX_FEEDFORWARD_ACC=1.2 \
 DIFF_PLANNER_INFLATION_SIZE=0.2 \
-./scripts/start_real_px4_mid360_fastlio.sh start
+DIFF_PLANNER_VIRTUAL_CEIL=1.5 \
+DIFF_PLANNER_VIRTUAL_GROUND=0.1 \
+./scripts/start_real_px4_mid360_fastlio.sh restart
 ```
+
+`DIFF_PLANNER_VIRTUAL_CEIL` 是规划器虚拟天花板高度，超过该 z 值的空间会被规划器视为不可通行。
+
+`SE3_HOVER_PERCENT=0.50` 是本机（机体/电池/桨调整后）实测真实悬停油门；`SE3_KI_PZ=0.30` 是竖直积分增益，消除随电压/载荷的缓慢掉高。整定方法见 [docs/ki_pz_tuning_guide.md](docs/ki_pz_tuning_guide.md)。
+
+`SE3_GEOFENCE_Z` 只由 `se3_controller_node` 用于超限检测。默认 `SE3_AUTO_LAND_ON_GEOFENCE=false` 时，超限后只打印告警，不会限制规划器轨迹，也不会主动压低控制指令。如需让它触发 PX4 降落，需要显式设置 `SE3_AUTO_LAND_ON_GEOFENCE=true`，并建议让 `SE3_GEOFENCE_Z` 略高于 `DIFF_PLANNER_VIRTUAL_CEIL`。
 
 常用命令：
 
@@ -285,3 +291,40 @@ SE3 控制：
 - [HITSZ-MAS/se3_controller](https://github.com/HITSZ-MAS/se3_controller)
 - [Geometric Tracking Control of a Quadrotor UAV on SE(3)](https://www.researchgate.net/publication/224220605_Geometric_Tracking_Control_of_a_Quadrotor_UAV_on_SE3)
 - [Control of Complex Maneuvers for a Quadrotor UAV using Geometric Methods on SE(3)](https://arxiv.org/abs/1003.2005)
+
+
+室外测试步骤
+1、选点位
+固定在某个位置和朝向上电，抱着无人机找出合适的目标点位，记录坐标值（x,y,z）
+docker exec -it ros_noetic_realflight bash
+rostopic list
+rostopic echo ...
+
+2、远程启动程序
+ssh jetson2@10.251.142.1
+FCU_URL='serial:///dev/ttyACM0:57600' GCS_URL='udp://:14550@10.251.142.172:14550' SE3_HOVER_PERCENT=0.5 SE3_MAX_FEEDFORWARD_ACC=1.2 DIFF_PLANNER_INFLATION_SIZE=0.3 DIFF_PLANNER_VIRTUAL_CEIL=1.0 DIFF_PLANNER_VIRTUAL_GROUND=0.1 ./scripts/start_real_px4_mid360_fastlio.sh restart
+
+3、本机启动rviz
+CONTAINER_NAME=ros_noetic JETSON_IP=10.251.142.1 LOCAL_IP=10.251.142.172 /home/dreamer198/diff-planner-px4-deployment/scripts/start_jetson_ros1_rviz.sh
+
+<!-- 发点 -->
+ssh jetson2@10.251.142.1
+docker exec -it ros_noetic_realflight bash -lc 'source ~/.bashrc && rostopic pub -1 /goal geometry_msgs/PoseStamped "header:
+  frame_id: world
+pose:
+  position:
+    x: 7.84
+    y: 17.45
+    z: 0.75
+  orientation:
+    w: 1.0"'
+
+docker exec -it ros_noetic_realflight bash -lc 'source ~/.bashrc && rostopic pub -1 /goal geometry_msgs/PoseStamped "header:
+  frame_id: world
+pose:
+  position:
+    x: 0.0
+    y: 0.0
+    z: 0.75
+  orientation:
+    w: 1.0"'

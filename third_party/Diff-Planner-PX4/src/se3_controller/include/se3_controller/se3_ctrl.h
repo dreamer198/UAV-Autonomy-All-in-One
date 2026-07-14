@@ -46,6 +46,7 @@ private:
     bool arm_triggered_{false}, offboard_triggered_{false}, takeoffFlag_{false};
     bool has_odom_{false}, has_imu_{false}, has_trajectory_after_offboard_{false};
     double takeoff_height_, max_feedforward_acc_;
+    double ki_pz_{0.0}, int_limit_z_{5.0};
     Eigen::Vector3d init_pose_, geo_fence_;;
 
     Eigen::Vector3d kp_p_, kp_v_, kp_a_, kp_q_, kp_w_, kd_p_, kd_v_, kd_a_, kd_q_, kd_w_;
@@ -112,7 +113,10 @@ private:
                                 limit_err_p_, limit_err_v_, limit_err_a_,
                                 limit_d_err_p_, limit_d_err_v_, limit_d_err_a_);
 
-
+        ki_pz_ = config.ki_pz;
+        int_limit_z_ = config.int_limit_z;
+        se3_controller_.setIntegral(Eigen::Vector3d(0.0, 0.0, ki_pz_), int_limit_z_);
+        ROS_INFO("integral: ki_pz=%f int_limit_z=%f", ki_pz_, int_limit_z_);
 
         printf("\n");
     }

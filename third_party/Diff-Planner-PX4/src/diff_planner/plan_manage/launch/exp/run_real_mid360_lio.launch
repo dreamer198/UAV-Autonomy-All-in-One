@@ -7,6 +7,8 @@
     <arg name="max_jer" default="8.0"/>
     <arg name="yaw_dot_max_deg_s" default="35.0"/>
     <arg name="yaw_dot_dot_max_deg_s2" default="90.0"/>
+    <arg name="virtual_ceil" default="1.6"/>
+    <arg name="virtual_ground" default="0.1"/>
 
     <include file="$(find diff_planner)/launch/include/advanced_param_exp.xml">
         <arg name="odom_topic" value="$(arg odom_topic)"/>
@@ -26,8 +28,8 @@
         <arg name="local_map_size_y" value="4.0"/>
         <arg name="local_map_size_z" value="1.8"/>
         <arg name="enable_virtual_wall" value="true"/>
-        <arg name="virtual_ceil" value="1.6"/>
-        <arg name="virtual_ground" value="0.1"/>
+        <arg name="virtual_ceil" value="$(arg virtual_ceil)"/>
+        <arg name="virtual_ground" value="$(arg virtual_ground)"/>
         <arg name="map_resolution" value="0.15"/>
         <arg name="inflation_size" value="$(arg inflation_size)"/>
         <arg name="flight_type" value="1"/>

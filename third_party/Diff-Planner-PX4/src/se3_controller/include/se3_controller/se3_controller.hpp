@@ -181,6 +181,13 @@ private:
 	Eigen::Vector3d grav_vec_, last_err_p_, last_err_v_, last_err_a_, last_err_q_, last_err_w_;
 	std::queue<std::pair<ros::Time, double>> timed_thrust_;
 
+	// 竖直(z)位置积分项：补偿随机重/电压变化的悬停推力，消除稳态高度误差
+	Eigen::Vector3d Ki_p_ = Eigen::Vector3d::Zero();      // 积分增益（仅 z 非零）
+	Eigen::Vector3d int_err_p_ = Eigen::Vector3d::Zero(); // 位置误差积分累加器 [m·s]
+	double int_limit_ = 0.0;                              // 抗饱和逐轴钳位 [m·s]
+	bool out_saturated_ = false;                          // 上一拍推力是否饱和
+	static constexpr double kCtrlDt_ = 0.01;              // 100Hz 固定步长 [s]
+
 	void computeFlatInput(Desired_State_t desired_state, Odom_Data_t &desired_odom){
 		
 		desired_odom.p = desired_state.p;
@@ -267,6 +274,16 @@ public:
 	SE3_CONTROLLER(){};
     ~SE3_CONTROLLER(){};
 
+	// 设置/清零竖直积分项（由 se3_ctrl 在构造与 dynamic_reconfigure 回调中调用）
+	void setIntegral(const Eigen::Vector3d &ki, double int_limit){
+		Ki_p_ = ki;
+		int_limit_ = int_limit;
+	}
+	void resetIntegral(){
+		int_err_p_.setZero();
+		out_saturated_ = false;
+	}
+
 	void init(double hover_percent, double max_hover_percent, double min_output_thrust, double max_output_thrust, bool enu_frame, bool vel_in_body){
 		
 		hover_percent_ = hover_percent;
@@ -285,6 +302,8 @@ public:
 		last_err_w_ = Eigen::Vector3d::Zero();
 
 		have_last_err_ = false;
+		int_err_p_.setZero();
+		out_saturated_ = false;
 	}
 
 	void setup(Eigen::Vector3d kp_p, Eigen::Vector3d kp_v, Eigen::Vector3d kp_a, Eigen::Vector3d kp_q, Eigen::Vector3d kp_w, 
@@ -317,6 +336,12 @@ public:
 		// desired_state.yaw = limitYaw(fromQuaternion2yaw(odom_data.q), desired_state.yaw, M_PI_2 / 3);
 		Eigen::Vector3d err_p = odom_data.p - desired_state.p;
 		limitErr(err_p, -limit_err_p_, limit_err_p_);
+		// 竖直积分项累加（抗饱和：上一拍推力饱和则冻结累加，逐轴钳位）
+		if(!out_saturated_){
+			int_err_p_ += err_p * kCtrlDt_;
+			for(int i = 0; i < 3; ++i)
+				int_err_p_(i) = std::max(std::min(int_err_p_(i), int_limit_), -int_limit_);
+		}
 		if(have_last_err_ == false)
 			last_err_p_ = err_p;
 		Eigen::Vector3d d_err_p = err_p - last_err_p_;
@@ -329,6 +354,8 @@ public:
 		Eigen::Vector3d d_err_v = err_v - last_err_v_;
 		limitErr(d_err_v, -limit_d_err_v_, limit_d_err_v_);
 		desired_state.a = desired_state.a - Kp_v_.asDiagonal() * err_v - Kd_v_.asDiagonal() * d_err_v + grav_vec_;
+		// 积分配平：err_p(2)<0(低于目标)→ 减去 Ki*负 → a 增大 → 推力上升 → 消除稳态下垂
+		desired_state.a -= Ki_p_.asDiagonal() * int_err_p_;
 		// std::cout << "err_p: " << err_p.transpose() << std::endl;
 		// std::cout << "err_v: " << err_v.transpose() << std::endl;
 		// std::cout << "imu_data.a: " << imu_data.a.transpose() << std::endl;
@@ -347,8 +374,9 @@ public:
 		last_err_a_ = err_a;
 		
 		double thr = desired_state.a.transpose() * (odom_data.q * Eigen::Vector3d::UnitZ());
-		output.thrust = thr / T_a_;
-		output.thrust = std::max(std::min(output.thrust, max_output_thrust_), min_output_thrust_);
+		double raw_thrust = thr / T_a_;
+		out_saturated_ = (raw_thrust > max_output_thrust_) || (raw_thrust < min_output_thrust_);
+		output.thrust = std::max(std::min(raw_thrust, max_output_thrust_), min_output_thrust_);
 		// std::cout << std::endl << "desired_state.a: " << desired_state.a.transpose() << std::endl;
 		// std::cout << "odom_v: " << odom_data.v.transpose() << std::endl;
 		

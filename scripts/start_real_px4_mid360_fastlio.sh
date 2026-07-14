@@ -30,6 +30,8 @@ DIFF_PLANNER_MAX_ACC="${DIFF_PLANNER_MAX_ACC:-0.8}"
 DIFF_PLANNER_MAX_JER="${DIFF_PLANNER_MAX_JER:-8.0}"
 DIFF_PLANNER_YAW_DOT_MAX_DEG_S="${DIFF_PLANNER_YAW_DOT_MAX_DEG_S:-35.0}"
 DIFF_PLANNER_YAW_DOT_DOT_MAX_DEG_S2="${DIFF_PLANNER_YAW_DOT_DOT_MAX_DEG_S2:-90.0}"
+DIFF_PLANNER_VIRTUAL_CEIL="${DIFF_PLANNER_VIRTUAL_CEIL:-1.6}"
+DIFF_PLANNER_VIRTUAL_GROUND="${DIFF_PLANNER_VIRTUAL_GROUND:-0.1}"
 DIFF_PLANNER_POS_CMD_TOPIC="${DIFF_PLANNER_POS_CMD_TOPIC:-/drone_0_planning/pos_cmd}"
 START_TRAJ_CONVERTER="${START_TRAJ_CONVERTER:-$START_DIFF_PLANNER}"
 TRAJ_CONVERTER_INPUT_TOPIC="${TRAJ_CONVERTER_INPUT_TOPIC:-$DIFF_PLANNER_POS_CMD_TOPIC}"
@@ -40,24 +42,44 @@ SE3_AUTO_REQUEST_OFFBOARD="${SE3_AUTO_REQUEST_OFFBOARD:-false}"
 SE3_AUTO_REQUEST_ARM="${SE3_AUTO_REQUEST_ARM:-false}"
 SE3_AUTO_LAND_ON_GEOFENCE="${SE3_AUTO_LAND_ON_GEOFENCE:-false}"
 SE3_TAKEOFF_HEIGHT="${SE3_TAKEOFF_HEIGHT:-0.3}"
+# 在线推力估计：本机架振动会让 IMU 竖直加速度整流偏高，使 RLS 把 T_a_ 越估越大、
+# 基准油门越压越低，导致 OFFBOARD 下反复震荡掉高（已在受控悬停测试中验证）。故默认关闭，
+# 用下方静态标定的 hover_percent。仅在低振动机架上才考虑打开。详见 docs/se3_controller.md §10。
 SE3_ENABLE_THRUST_ESTIMATION="${SE3_ENABLE_THRUST_ESTIMATION:-false}"
 SE3_USE_ACCELERATION_FEEDFORWARD="${SE3_USE_ACCELERATION_FEEDFORWARD:-true}"
 SE3_USE_YAW_RATE_FEEDFORWARD="${SE3_USE_YAW_RATE_FEEDFORWARD:-true}"
-SE3_MAX_FEEDFORWARD_ACC="${SE3_MAX_FEEDFORWARD_ACC:-2.0}"
-SE3_HOVER_PERCENT="${SE3_HOVER_PERCENT:-0.45}"
-SE3_MAX_HOVER_PERCENT="${SE3_MAX_HOVER_PERCENT:-0.75}"
+# 加速度前馈限幅调小，降低机动瞬间的推力需求尖峰（与 README 推荐一致）
+SE3_MAX_FEEDFORWARD_ACC="${SE3_MAX_FEEDFORWARD_ACC:-1.2}"
+# 以下三项为本机（MID-360 + Jetson 载荷，机体/电池/桨调整后）的悬停油门标定：
+# hover_percent 取实测真实悬停油门 ≈0.50；max_output 必须高于悬停油门否则会被钳到悬停之下而掉高。
+SE3_HOVER_PERCENT="${SE3_HOVER_PERCENT:-0.50}"
+SE3_MAX_HOVER_PERCENT="${SE3_MAX_HOVER_PERCENT:-0.95}"
 SE3_MIN_OUTPUT_THRUST="${SE3_MIN_OUTPUT_THRUST:-0.20}"
-SE3_MAX_OUTPUT_THRUST="${SE3_MAX_OUTPUT_THRUST:-0.85}"
+SE3_MAX_OUTPUT_THRUST="${SE3_MAX_OUTPUT_THRUST:-1.00}"
 SE3_GEOFENCE_X="${SE3_GEOFENCE_X:-2.0}"
 SE3_GEOFENCE_Y="${SE3_GEOFENCE_Y:-2.0}"
-SE3_GEOFENCE_Z="${SE3_GEOFENCE_Z:-1.5}"
+SE3_GEOFENCE_Z="${SE3_GEOFENCE_Z:-1.8}"
+# 竖直积分增益：补偿随电压/载荷变化的悬停推力、消除稳态掉高。0=关闭（行为同纯比例）；
+# 按 docs/ki_pz_tuning_guide.md 用 rqt_reconfigure/dynparam 从 0 在线整定后填入。本机实测 0.30。
+SE3_KI_PZ="${SE3_KI_PZ:-0.30}"
+SE3_INT_LIMIT_Z="${SE3_INT_LIMIT_Z:-5.0}"   # 积分抗饱和钳位 [m*s]
 SE3_NODE_NAME="${SE3_NODE_NAME:-/se3_controller_node}"
 MAVROS_ATTITUDE_TOPIC="${MAVROS_ATTITUDE_TOPIC:-/mavros/setpoint_raw/attitude}"
+# 自动录包：每次启动都把下方白名单话题录成一个 lz4 压缩 bag，方便事后回放调 bug。
+# 只录控制/估计/规划的输入输出，不录点云（/livox/lidar、/cloud_registered 等），footprint 很小。
+# bag 落在容器内 $ROSBAG_DIR，经 docker_run_real.sh 的 bind-mount 持久化到宿主
+# ~/<project>/runtime/flight_bags/。关闭录制：START_ROSBAG=false。
+START_ROSBAG="${START_ROSBAG:-true}"
+ROSBAG_DIR="${ROSBAG_DIR:-/root/flight_bags}"
+ROSBAG_PREFIX="${ROSBAG_PREFIX:-se3_test}"
+ROSBAG_NODE_NAME="${ROSBAG_NODE_NAME:-/flight_recorder}"
+ROSBAG_TOPICS="${ROSBAG_TOPICS:-/tf /tf_static $ODOM_RAW_TOPIC $ODOM_BASE_TOPIC /mavros/vision_pose/pose /livox/imu /mavros/local_position/odom /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/battery /mavros/altitude /mavros/rc/in $MAVROS_ATTITUDE_TOPIC /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local $TRAJ_CONVERTER_OUTPUT_TOPIC /desire_odom_pub $DIFF_PLANNER_POS_CMD_TOPIC /goal}"
+ROSBAG_EXTRA_ARGS="${ROSBAG_EXTRA_ARGS:-}"
 ROS_MASTER_URI="${ROS_MASTER_URI:-http://127.0.0.1:11311}"
 ROS_IP="${ROS_IP:-}"
 HOST_LOG_DIR="${HOST_LOG_DIR:-$HOME/${PROJECT_NAME}_logs/$RUN_ID}"
 CONTAINER_ROS_LOG_DIR="${CONTAINER_ROS_LOG_DIR:-/root/flight_bags/ros_logs/$RUN_ID}"
-PROCESS_GREP_PATTERN="roscore|rosmaster|roslaunch livox_ros_driver2|livox_ros_driver2_node|roslaunch fast_lio mapping_mid360.launch|fastlio_mapping|roslaunch mavros px4.launch|mavros_node|roslaunch diff_planner|traj_server|ego_planner|plan_manage|trajectory_msg_converter.py|se3_controller_node|odom_to_base.py|odom_to_pose.py"
+PROCESS_GREP_PATTERN="roscore|rosmaster|roslaunch livox_ros_driver2|livox_ros_driver2_node|roslaunch fast_lio mapping_mid360.launch|fastlio_mapping|roslaunch mavros px4.launch|mavros_node|roslaunch diff_planner|traj_server|ego_planner|plan_manage|trajectory_msg_converter.py|se3_controller_node|odom_to_base.py|odom_to_pose.py|__name:=flight_recorder"
 
 usage() {
   cat <<'EOF'
@@ -189,6 +211,7 @@ cleanup_container_processes() {
     }
 
     for pattern in \
+      "__name:=flight_recorder" \
       "roscore" \
       "rosmaster" \
       "roslaunch livox_ros_driver2" \
@@ -205,6 +228,7 @@ cleanup_container_processes() {
     sleep 2
 
     for pattern in \
+      "__name:=flight_recorder" \
       "roscore" \
       "rosmaster" \
       "livox_ros_driver2_node" \
@@ -345,7 +369,7 @@ start_stack() {
 
   if [ "$START_DIFF_PLANNER" = "true" ]; then
     create_window "diff_planner" \
-      "source ~/.bashrc && roslaunch diff_planner $DIFF_PLANNER_LAUNCH inflation_size:=$DIFF_PLANNER_INFLATION_SIZE max_vel:=$DIFF_PLANNER_MAX_VEL max_acc:=$DIFF_PLANNER_MAX_ACC max_jer:=$DIFF_PLANNER_MAX_JER yaw_dot_max_deg_s:=$DIFF_PLANNER_YAW_DOT_MAX_DEG_S yaw_dot_dot_max_deg_s2:=$DIFF_PLANNER_YAW_DOT_DOT_MAX_DEG_S2"
+      "source ~/.bashrc && roslaunch diff_planner $DIFF_PLANNER_LAUNCH inflation_size:=$DIFF_PLANNER_INFLATION_SIZE max_vel:=$DIFF_PLANNER_MAX_VEL max_acc:=$DIFF_PLANNER_MAX_ACC max_jer:=$DIFF_PLANNER_MAX_JER yaw_dot_max_deg_s:=$DIFF_PLANNER_YAW_DOT_MAX_DEG_S yaw_dot_dot_max_deg_s2:=$DIFF_PLANNER_YAW_DOT_DOT_MAX_DEG_S2 virtual_ceil:=$DIFF_PLANNER_VIRTUAL_CEIL virtual_ground:=$DIFF_PLANNER_VIRTUAL_GROUND"
 
     wait_for_condition "Diff-Planner" "rostopic list | grep -qx '$DIFF_PLANNER_POS_CMD_TOPIC' || rosnode list | grep -q 'traj_server'"
   else
@@ -363,11 +387,21 @@ start_stack() {
 
   if [ "$START_SE3_CONTROLLER" = "true" ]; then
     create_window "se3_controller" \
-      "source ~/.bashrc && rosparam set /se3_controller_node/enable_sim $SE3_ENABLE_SIM && rosparam set /se3_controller_node/auto_request_offboard $SE3_AUTO_REQUEST_OFFBOARD && rosparam set /se3_controller_node/auto_request_arm $SE3_AUTO_REQUEST_ARM && rosparam set /se3_controller_node/auto_land_on_geofence $SE3_AUTO_LAND_ON_GEOFENCE && rosparam set /se3_controller_node/takeoff_height $SE3_TAKEOFF_HEIGHT && rosparam set /se3_controller_node/enable_thrust_estimation $SE3_ENABLE_THRUST_ESTIMATION && rosparam set /se3_controller_node/use_acceleration_feedforward $SE3_USE_ACCELERATION_FEEDFORWARD && rosparam set /se3_controller_node/use_yaw_rate_feedforward $SE3_USE_YAW_RATE_FEEDFORWARD && rosparam set /se3_controller_node/max_feedforward_acc $SE3_MAX_FEEDFORWARD_ACC && rosparam set /se3_controller_node/hover_percent $SE3_HOVER_PERCENT && rosparam set /se3_controller_node/max_hover_percent $SE3_MAX_HOVER_PERCENT && rosparam set /se3_controller_node/min_output_thrust $SE3_MIN_OUTPUT_THRUST && rosparam set /se3_controller_node/max_output_thrust $SE3_MAX_OUTPUT_THRUST && rosparam set /se3_controller_node/geo_fence/x $SE3_GEOFENCE_X && rosparam set /se3_controller_node/geo_fence/y $SE3_GEOFENCE_Y && rosparam set /se3_controller_node/geo_fence/z $SE3_GEOFENCE_Z && rosrun se3_controller se3_controller_node"
+      "source ~/.bashrc && rosparam set /se3_controller_node/enable_sim $SE3_ENABLE_SIM && rosparam set /se3_controller_node/auto_request_offboard $SE3_AUTO_REQUEST_OFFBOARD && rosparam set /se3_controller_node/auto_request_arm $SE3_AUTO_REQUEST_ARM && rosparam set /se3_controller_node/auto_land_on_geofence $SE3_AUTO_LAND_ON_GEOFENCE && rosparam set /se3_controller_node/takeoff_height $SE3_TAKEOFF_HEIGHT && rosparam set /se3_controller_node/enable_thrust_estimation $SE3_ENABLE_THRUST_ESTIMATION && rosparam set /se3_controller_node/use_acceleration_feedforward $SE3_USE_ACCELERATION_FEEDFORWARD && rosparam set /se3_controller_node/use_yaw_rate_feedforward $SE3_USE_YAW_RATE_FEEDFORWARD && rosparam set /se3_controller_node/max_feedforward_acc $SE3_MAX_FEEDFORWARD_ACC && rosparam set /se3_controller_node/hover_percent $SE3_HOVER_PERCENT && rosparam set /se3_controller_node/max_hover_percent $SE3_MAX_HOVER_PERCENT && rosparam set /se3_controller_node/min_output_thrust $SE3_MIN_OUTPUT_THRUST && rosparam set /se3_controller_node/max_output_thrust $SE3_MAX_OUTPUT_THRUST && rosparam set /se3_controller_node/geo_fence/x $SE3_GEOFENCE_X && rosparam set /se3_controller_node/geo_fence/y $SE3_GEOFENCE_Y && rosparam set /se3_controller_node/geo_fence/z $SE3_GEOFENCE_Z && rosparam set /se3_controller_node/ki_pz $SE3_KI_PZ && rosparam set /se3_controller_node/int_limit_z $SE3_INT_LIMIT_Z && rosrun se3_controller se3_controller_node"
 
     wait_for_condition "SE3 controller" "rosnode list | grep -qx '$SE3_NODE_NAME' && rostopic list | grep -qx '$MAVROS_ATTITUDE_TOPIC'"
   else
     echo "[INFO] SE3 controller startup skipped because START_SE3_CONTROLLER=false."
+  fi
+
+  if [ "$START_ROSBAG" = "true" ]; then
+    create_window "rosbag" \
+      "source ~/.bashrc && mkdir -p '$ROSBAG_DIR' && rosbag record --lz4 -O '$ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}' __name:=flight_recorder $ROSBAG_TOPICS $ROSBAG_EXTRA_ARGS"
+
+    wait_for_condition "rosbag recorder" "rosnode list | grep -qx '$ROSBAG_NODE_NAME'"
+    echo "[INFO] Recording bag to (container) $ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}.bag"
+  else
+    echo "[INFO] rosbag recording skipped because START_ROSBAG=false."
   fi
 
   echo "[INFO] Real-flight stack started successfully."
@@ -382,7 +416,7 @@ stop_stack() {
   echo "[INFO] Stopping real-flight stack..."
 
   if tmux_has_session; then
-    for window_name in se3_controller traj_converter diff_planner odom_to_pose mavros odom_to_base fast_lio mid360 roscore; do
+    for window_name in rosbag se3_controller traj_converter diff_planner odom_to_pose mavros odom_to_base fast_lio mid360 roscore; do
       if tmux_has_window "$window_name"; then
         tmux send-keys -t "$SESSION_NAME:$window_name" C-c
       fi
