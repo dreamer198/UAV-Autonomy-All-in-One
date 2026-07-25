@@ -1,0 +1,11 @@
+<launch>
+  <arg name="goal_z" default="1.0"/>
+  <arg name="frame_id" default="world"/>
+  <arg name="input_topic" default="/sim2real/rviz_goal"/>
+
+  <node pkg="sim2real_simulation" type="rviz_2d_goal_bridge.py" name="rviz_2d_goal_bridge" output="screen">
+    <param name="input_topic" value="$(arg input_topic)"/>
+    <param name="goal_z" value="$(arg goal_z)"/>
+    <param name="frame_id" value="$(arg frame_id)"/>
+  </node>
+</launch>

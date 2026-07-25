@@ -1,5 +1,9 @@
 
 #include <plan_manage/diff_replan_fsm.h>
+#include <plan_manage/goal_yaw_utils.h>
+#include <plan_manage/planning_recovery_utils.h>
+
+#include <cmath>
 
 namespace diff_planner
 {
@@ -10,6 +14,9 @@ namespace diff_planner
     have_target_ = false;
     have_odom_ = false;
     have_recv_pre_agent_ = false;
+    have_goal_yaw_ = false;
+    have_odom_yaw_ = false;
+    have_queued_emergency_target_ = false;
     flag_escape_emergency_ = true;
     mandatory_stop_ = false;
 
@@ -18,11 +25,37 @@ namespace diff_planner
     nh.param("fsm/thresh_replan_time", replan_thresh_, -1.0);
     nh.param("fsm/planning_horizon", planning_horizen_, -1.0);
     nh.param("fsm/emergency_time", emergency_time_, 1.0);
+    double goal_yaw_tolerance_deg = 5.0;
+    nh.param("fsm/goal_yaw_tolerance_deg", goal_yaw_tolerance_deg, 5.0);
+    goal_yaw_tolerance_ = goal_yaw_tolerance_deg * M_PI / 180.0;
+    nh.param("fsm/goal_position_tolerance", goal_position_tolerance_, 0.2);
+    nh.param("fsm/max_goal_distance", max_goal_distance_, 200.0);
     nh.param("fsm/realworld_experiment", flag_realworld_experiment_, false);
     nh.param("fsm/fail_safe", enable_fail_safe_, true);
     nh.param("fsm/ground_height_measurement", enable_ground_height_measurement_, false);
     nh.param("fsm/mondify_final_goal", mondify_final_goal_, true);
     nh.param("fsm/enable_stuck_detect", enable_stuck_detect_, true);
+
+    if (!std::isfinite(goal_yaw_tolerance_) || goal_yaw_tolerance_ <= 0.0 ||
+        goal_yaw_tolerance_ > M_PI)
+    {
+      ROS_WARN("fsm/goal_yaw_tolerance_deg must be in (0, 180]; using 5 degrees.");
+      goal_yaw_tolerance_ = 5.0 * M_PI / 180.0;
+    }
+    if (!std::isfinite(goal_position_tolerance_) || goal_position_tolerance_ <= 0.0)
+    {
+      ROS_WARN("fsm/goal_position_tolerance must be positive; using 0.2 m.");
+      goal_position_tolerance_ = 0.2;
+    }
+    if (!std::isfinite(max_goal_distance_) || max_goal_distance_ <= 0.0)
+    {
+      ROS_WARN("fsm/max_goal_distance must be positive; using 200.0 m.");
+      max_goal_distance_ = 200.0;
+    }
+
+    goal_yaw_ = 0.0;
+    odom_yaw_ = 0.0;
+    goal_stamp_ = ros::Time(0);
 
     nh.param("fsm/waypoint_num", waypoint_num_, -1);
     for (int i = 0; i < waypoint_num_; i++)
@@ -208,6 +241,12 @@ namespace diff_planner
       t_cur = min(info->duration, t_cur);
       Eigen::Vector3d pos = info->traj.getPos(t_cur);
       bool touch_the_goal = ((local_target_pt_ - final_goal_).norm() < 1e-2);
+      const bool final_trajectory_finished = (t_cur > info->duration - 1e-2) && touch_the_goal;
+      const double goal_position_error = (odom_pos_ - final_goal_).norm();
+      const bool goal_position_reached = goal_position_error <= goal_position_tolerance_;
+      const double goal_yaw_error = std::fabs(goal_yaw_utils::wrapAngle(goal_yaw_ - odom_yaw_));
+      const bool goal_yaw_reached = !have_goal_yaw_ ||
+                                    (have_odom_yaw_ && goal_yaw_error <= goal_yaw_tolerance_);
 
       const PtsChk_t *chk_ptr = &planner_manager_->traj_.local_traj.pts_chk;
       bool close_to_current_traj_end = (chk_ptr->size() >= 1 && chk_ptr->back().size() >= 1) ? chk_ptr->back().back().first - t_cur < emergency_time_ : 0; // In case of empty vector
@@ -234,26 +273,55 @@ namespace diff_planner
         wpt_id_++;
         planNextWaypoint(wps_[wpt_id_], true);
       }
-      else if ((t_cur > info->duration - 1e-2) && touch_the_goal) // case 3: the final waypoint reached
+      else if (final_trajectory_finished && goal_position_reached) // case 3: final pose reached
       {
-        have_target_ = false;
-        have_trigger_ = false;
-        if (target_type_ == TARGET_TYPE::PRESET_TARGET)
+        if (goal_yaw_reached)
         {
-          // prepare for next round
-          wpt_id_ = 0;
-          planNextWaypoint(wps_[wpt_id_], true);
-        }
+          have_target_ = false;
+          have_trigger_ = false;
+          if (target_type_ == TARGET_TYPE::PRESET_TARGET)
+          {
+            // prepare for next round
+            wpt_id_ = 0;
+            planNextWaypoint(wps_[wpt_id_], true);
+          }
 
-        /* The navigation task completed */
-        changeFSMExecState(WAIT_TARGET, "FSM");
+          /* The navigation task completed */
+          changeFSMExecState(WAIT_TARGET, "FSM");
+        }
+        else
+        {
+          if (!have_odom_yaw_)
+          {
+            ROS_WARN_THROTTLE(1.0, "Final position reached, but odometry has no valid orientation; waiting for goal yaw.");
+          }
+          else
+          {
+            ROS_INFO_THROTTLE(1.0,
+                              "Final position reached; waiting for goal yaw (error %.1f deg, tolerance %.1f deg).",
+                              goal_yaw_error * 180.0 / M_PI,
+                              goal_yaw_tolerance_ * 180.0 / M_PI);
+          }
+        }
+      }
+      else if (final_trajectory_finished)
+      {
+        // traj_server is holding the final setpoint. Avoid replanning from an
+        // expired polynomial while odometry catches up; stuck detection below
+        // remains active if the vehicle cannot reach the position tolerance.
+        ROS_INFO_THROTTLE(1.0,
+                          "Final trajectory finished; waiting for position (error %.2f m, tolerance %.2f m).",
+                          goal_position_error,
+                          goal_position_tolerance_);
       }
       else if (t_cur > replan_thresh_ || (!touch_the_goal && close_to_current_traj_end)) // case 3: time to perform next replan
       {
         changeFSMExecState(REPLAN_TRAJ, "FSM");
       }
       // ROS_ERROR("AAAA");
-      if (enable_stuck_detect_)
+      // Once translation is complete, holding position to finish the requested
+      // yaw is intentional and must not be treated as a stuck condition.
+      if (enable_stuck_detect_ && !(final_trajectory_finished && goal_position_reached))
       {
         /* Avoid getting stuck wandering around large obstacles */
         static bool baseline_initialized = false;
@@ -324,7 +392,9 @@ namespace diff_planner
     {
       if (flag_escape_emergency_) // Avoiding repeated calls
       {
-        callEmergencyStop(odom_pos_);
+        // Retry on the next FSM tick if the stop trajectory could not be
+        // validated/stored; never pretend an unpublished stop was accepted.
+        flag_escape_emergency_ = !callEmergencyStop(odom_pos_);
       }
       else
       {
@@ -335,15 +405,28 @@ namespace diff_planner
         }
         else if (enable_fail_safe_ && need_hover_stop_ && odom_vel_.norm() < 0.1)
         {
-          ROS_INFO("Exiting EMERGENCY_STOP. Switching to WAIT_TARGET. Need a new target point !!!");
           need_hover_stop_ = false;
-          have_target_ = false;
-          have_trigger_ = false;
-          changeFSMExecState(WAIT_TARGET, "EMERGENCY_EXIT"); 
+          if (have_queued_emergency_target_ &&
+              have_new_target_ && have_target_ && have_trigger_)
+          {
+            // A fresh goal may arrive while the vehicle is still braking.
+            // Keep that explicitly queued goal and plan it only after the
+            // vehicle has stopped; otherwise the EMERGENCY_STOP exit below
+            // would silently discard a mission retry.
+            ROS_INFO("Exiting EMERGENCY_STOP with a fresh queued target. Restarting from current odometry.");
+            have_queued_emergency_target_ = false;
+            last_target_change_time_ = ros::Time::now().toSec();
+            changeFSMExecState(GEN_NEW_TRAJ, "EMERGENCY_RETRY");
+          }
+          else
+          {
+            ROS_INFO("Exiting EMERGENCY_STOP. Switching to WAIT_TARGET. Need a new target point !!!");
+            have_target_ = false;
+            have_trigger_ = false;
+            changeFSMExecState(WAIT_TARGET, "EMERGENCY_EXIT");
+          }
         }
       }
-
-      flag_escape_emergency_ = false;
       break;
     }
     }
@@ -368,6 +451,14 @@ namespace diff_planner
 
   void DiffReplanFSM::changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call)
   {
+
+    if (new_state == EMERGENCY_STOP && exec_state_ != EMERGENCY_STOP)
+    {
+      // Only a goal received after this emergency begins may bypass the
+      // normal WAIT_TARGET exit. An older have_new_target_ flag is not enough
+      // evidence that the pilot or mission runner requested a retry.
+      have_queued_emergency_target_ = false;
+    }
 
     if (new_state == exec_state_)
       continously_called_times_++;
@@ -534,11 +625,15 @@ namespace diff_planner
   bool DiffReplanFSM::callEmergencyStop(Eigen::Vector3d stop_pos)
   {
 
-    planner_manager_->EmergencyStop(stop_pos);
+    if (!planner_manager_->EmergencyStop(stop_pos))
+    {
+      ROS_ERROR("Unable to validate/store the emergency-stop trajectory.");
+      return false;
+    }
 
     traj_utils::PolyTraj poly_msg;
     traj_utils::MINCOTraj MINCO_msg;
-    polyTraj2ROSMsg(poly_msg, MINCO_msg);
+    polyTraj2ROSMsg(poly_msg, MINCO_msg, false, false);
     poly_traj_pub_.publish(poly_msg);
     broadcast_ploytraj_pub_.publish(MINCO_msg);
     return true;
@@ -550,10 +645,12 @@ namespace diff_planner
     {
       ROS_WARN("Successfully modified final_goal in callReboundReplan !!!");
     }
-    planner_manager_->getLocalTarget(
-        planning_horizen_, start_pt_, final_goal_,
-        local_target_pt_, local_target_vel_,
-        touch_goal_);
+    if (!planner_manager_->getLocalTarget(
+            planning_horizen_, start_pt_, final_goal_,
+            local_target_pt_, local_target_vel_, touch_goal_))
+    {
+      return false;
+    }
 
     bool plan_success = planner_manager_->reboundReplan(
         start_pt_, start_vel_, start_acc_,
@@ -567,7 +664,7 @@ namespace diff_planner
     {
       traj_utils::PolyTraj poly_msg;
       traj_utils::MINCOTraj MINCO_msg;
-      polyTraj2ROSMsg(poly_msg, MINCO_msg);
+      polyTraj2ROSMsg(poly_msg, MINCO_msg, touch_goal_, true);
       poly_traj_pub_.publish(poly_msg);
       broadcast_ploytraj_pub_.publish(MINCO_msg);
     }
@@ -602,7 +699,17 @@ namespace diff_planner
   {
 
     LocalTrajData *info = &planner_manager_->traj_.local_traj;
-    double t_cur = ros::Time::now().toSec() - info->start_time;
+    const double now = ros::Time::now().toSec();
+    if (!planning_recovery_utils::isLocalTrajectoryUsable(
+            now, info->start_time, info->duration))
+    {
+      ROS_WARN_THROTTLE(
+          1.0,
+          "Previous local trajectory is unavailable or expired; replanning from current odometry.");
+      return planFromGlobalTraj(trial_times);
+    }
+
+    const double t_cur = now - info->start_time;
 
     start_pt_ = info->traj.getPos(t_cur);
     start_vel_ = info->traj.getVel(t_cur);
@@ -664,17 +771,20 @@ namespace diff_planner
           ros::Duration(0.001).sleep();
           if (ros::Time::now() - start_time > timeout)
           {
-            ROS_WARN("Timeout waiting for state to change to EXEC_TRAJ.");
-            return false; 
+            ROS_WARN("Timeout waiting for EXEC_TRAJ; the accepted target remains queued for the active planning state.");
+            break;
           }
         }
-        changeFSMExecState(REPLAN_TRAJ, "TRIG");
+        if (exec_state_ == EXEC_TRAJ)
+        {
+          changeFSMExecState(REPLAN_TRAJ, "TRIG");
+        }
       }
       else if(exec_state_ == EMERGENCY_STOP)
       {
         return true;
       }
-      // visualization_->displayGoalPoint(final_goal_, Eigen::Vector4d(1, 0, 0, 1), 0.3, 0);
+      visualization_->displayGoalPoint(final_goal_, Eigen::Vector4d(1, 0, 0, 1), 0.3, 0);
        visualization_->displayGlobalPathList(gloabl_traj, 0.1, 0);
     }
     else
@@ -727,17 +837,69 @@ namespace diff_planner
 
   void DiffReplanFSM::waypointCallback(const geometry_msgs::PoseStampedPtr &msg)
   {
+    const bool received_during_emergency = exec_state_ == EMERGENCY_STOP;
     Eigen::Vector3d end_wp(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
+    if (!end_wp.allFinite())
+    {
+      ROS_WARN("Ignoring a goal with non-finite coordinates.");
+      return;
+    }
+    if (!have_odom_ || !odom_pos_.allFinite())
+    {
+      ROS_WARN("Ignoring the goal because valid odometry is not available yet.");
+      return;
+    }
+    const double goal_distance = (end_wp - odom_pos_).norm();
+    if (goal_distance > max_goal_distance_)
+    {
+      ROS_WARN("Ignoring goal %.1f m from the vehicle; fsm/max_goal_distance is %.1f m. "
+               "goal=(%.3f, %.3f, %.3f), odom=(%.3f, %.3f, %.3f)",
+               goal_distance, max_goal_distance_,
+               end_wp(0), end_wp(1), end_wp(2),
+               odom_pos_(0), odom_pos_(1), odom_pos_(2));
+      return;
+    }
     if (planner_manager_->grid_map_->getInflateOccupancy(end_wp) == -1)
     {
       ROS_WARN("The goal is outside the safe fence, ignore this goal!");
       return;
     }
+
+    double requested_yaw = 0.0;
+    const bool requested_has_yaw = goal_yaw_utils::quaternionToYaw(msg->pose.orientation, requested_yaw);
+    if (requested_has_yaw)
+    {
+      ROS_INFO("Received goal yaw: %.1f deg", requested_yaw * 180.0 / M_PI);
+    }
+    else
+    {
+      ROS_WARN("Goal orientation is invalid or unspecified; using path-aligned yaw for this goal.");
+    }
+
+    const bool previous_have_goal_yaw = have_goal_yaw_;
+    const double previous_goal_yaw = goal_yaw_;
+    const ros::Time previous_goal_stamp = goal_stamp_;
+    have_goal_yaw_ = requested_has_yaw;
+    goal_yaw_ = requested_yaw;
+    goal_stamp_ = msg->header.stamp;
+
     ROS_INFO("Received goal: %f, %f, %f", end_wp(0), end_wp(1), end_wp(2));
     if (planNextWaypoint(end_wp, true))
     {
       last_target_change_time_ = ros::Time::now().toSec();
       have_trigger_ = true;
+      if (received_during_emergency)
+      {
+        have_queued_emergency_target_ = true;
+        ROS_INFO("Queued the fresh goal received during EMERGENCY_STOP.");
+      }
+    }
+    else
+    {
+      // A rejected goal must not overwrite the orientation of the active mission.
+      have_goal_yaw_ = previous_have_goal_yaw;
+      goal_yaw_ = previous_goal_yaw;
+      goal_stamp_ = previous_goal_stamp;
     }
   }
 
@@ -763,6 +925,10 @@ namespace diff_planner
       ros::Duration(0.001).sleep();
     }
 
+    // Preset waypoints contain positions only, so retain the legacy path-aligned yaw behavior.
+    have_goal_yaw_ = false;
+    goal_stamp_ = ros::Time(0);
+
     // plan first global waypoint
     wpt_id_ = 0;
     planNextWaypoint(wps_[wpt_id_], true);
@@ -782,9 +948,39 @@ namespace diff_planner
     odom_pos_(1) = msg->pose.pose.position.y;
     odom_pos_(2) = msg->pose.pose.position.z;
 
-    odom_vel_(0) = msg->twist.twist.linear.x;
-    odom_vel_(1) = msg->twist.twist.linear.y;
-    odom_vel_(2) = msg->twist.twist.linear.z;
+    // nav_msgs/Odometry defines twist in child_frame_id (base_link here),
+    // whereas trajectory boundary conditions are expressed in the world
+    // frame. Normalize that contract once at the shared Planner boundary so
+    // MAVROS simulation odom and FAST-LIO deployment odom behave identically.
+    const Eigen::Vector3d velocity_body(msg->twist.twist.linear.x,
+                                        msg->twist.twist.linear.y,
+                                        msg->twist.twist.linear.z);
+    Eigen::Quaterniond orientation(msg->pose.pose.orientation.w,
+                                   msg->pose.pose.orientation.x,
+                                   msg->pose.pose.orientation.y,
+                                   msg->pose.pose.orientation.z);
+    if (orientation.coeffs().allFinite() && orientation.norm() > 1e-6)
+    {
+      orientation.normalize();
+      odom_vel_ = orientation * velocity_body;
+    }
+    else
+    {
+      odom_vel_.setZero();
+      ROS_WARN_THROTTLE(1.0, "Odometry orientation is invalid; using zero world velocity.");
+    }
+
+    double measured_yaw = 0.0;
+    if (goal_yaw_utils::quaternionToYaw(msg->pose.pose.orientation, measured_yaw))
+    {
+      odom_yaw_ = measured_yaw;
+      have_odom_yaw_ = true;
+    }
+    else
+    {
+      have_odom_yaw_ = false;
+      ROS_WARN_THROTTLE(1.0, "Odometry orientation is invalid; goal-yaw completion is suspended.");
+    }
 
     have_odom_ = true;
   }
@@ -930,7 +1126,10 @@ namespace diff_planner
     }
   }
 
-  void DiffReplanFSM::polyTraj2ROSMsg(traj_utils::PolyTraj &poly_msg, traj_utils::MINCOTraj &MINCO_msg)
+  void DiffReplanFSM::polyTraj2ROSMsg(traj_utils::PolyTraj &poly_msg,
+                                      traj_utils::MINCOTraj &MINCO_msg,
+                                      bool include_goal_yaw,
+                                      bool armable)
   {
 
     auto data = &planner_manager_->traj_.local_traj;
@@ -945,6 +1144,13 @@ namespace diff_planner
     poly_msg.coef_x.resize(6 * piece_num);
     poly_msg.coef_y.resize(6 * piece_num);
     poly_msg.coef_z.resize(6 * piece_num);
+    poly_msg.has_goal_yaw = include_goal_yaw && have_goal_yaw_;
+    poly_msg.goal_yaw = poly_msg.has_goal_yaw ? goal_yaw_ : 0.0;
+    poly_msg.goal_position[0] = final_goal_(0);
+    poly_msg.goal_position[1] = final_goal_(1);
+    poly_msg.goal_position[2] = final_goal_(2);
+    poly_msg.goal_stamp = goal_stamp_;
+    poly_msg.armable = armable;
     for (int i = 0; i < piece_num; ++i)
     {
       poly_msg.duration[i] = durs(i);
@@ -1039,7 +1245,6 @@ namespace diff_planner
       double t = 0.0;
       Eigen::Vector3d ab = b - a;
       double ab2 = ab.squaredNorm();   
-      double ab_norm = ab.norm();
       if (ab2 < 1e-8)                  
       {
         t = 0.0;

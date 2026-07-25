@@ -140,7 +140,7 @@ namespace diff_planner
   {
     poly_traj::Trajectory traj = pt_data.getTraj();
     Eigen::VectorXd durations = traj.getDurations();
-    const double RES = grid_map_->getResolution(), RES_2 = RES / 2;
+    const double RES = grid_map_->getResolution();
     double t_step = min(RES / max_vel_, durations.minCoeff() / max(cps_num_prePiece_, 1) / 1.5);
     double traj_duration = traj.getTotalDuration();
 

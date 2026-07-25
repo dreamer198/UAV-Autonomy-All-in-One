@@ -69,7 +69,9 @@ namespace diff_planner
 
       local_traj.drone_id = -1;
       local_traj.duration = 0.0;
-      local_traj.traj_id = 0;
+      // Keep trajectory IDs monotonic across global-goal changes. Resetting
+      // here made a new mission reuse id=1 while traj_server could still be
+      // publishing the previous mission's id=1 command.
     }
 
     void setLocalTraj(const poly_traj::Trajectory &trajectory, const PtsChk_t &pts_to_chk, const double &world_time, const int drone_id = -1)

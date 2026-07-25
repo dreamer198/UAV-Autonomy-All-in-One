@@ -6,6 +6,8 @@
 #include <visualization_msgs/Marker.h>
 #include <ros/ros.h>
 
+#include <cmath>
+
 using namespace Eigen;
 
 ros::Publisher pos_cmd_pub;
@@ -32,6 +34,11 @@ double yaw_dot_max_per_sec_, yaw_dot_dot_max_per_sec_;
 double yaw_custom_;
 bool receive_yaw_ = false;
 ros::Time receive_yaw_time_(0);
+bool have_goal_yaw_ = false;
+bool goal_yaw_active_ = false;
+double goal_yaw_ = 0.0;
+double goal_yaw_switch_distance_ = 0.5;
+Eigen::Vector3d goal_position_(Eigen::Vector3d::Zero());
 
 void heartbeatCallback(std_msgs::EmptyPtr msg)
 {
@@ -81,6 +88,23 @@ void polyTrajCallback(traj_utils::PolyTrajPtr msg)
   traj_duration_ = traj_->getTotalDuration();
   traj_id_ = msg->traj_id;
 
+  const bool valid_goal_yaw = msg->has_goal_yaw &&
+                              std::isfinite(msg->goal_yaw) &&
+                              std::isfinite(msg->goal_position[0]) &&
+                              std::isfinite(msg->goal_position[1]) &&
+                              std::isfinite(msg->goal_position[2]);
+  have_goal_yaw_ = valid_goal_yaw;
+  goal_yaw_active_ = false;
+  if (have_goal_yaw_)
+  {
+    goal_yaw_ = std::atan2(std::sin(msg->goal_yaw), std::cos(msg->goal_yaw));
+    goal_position_ << msg->goal_position[0], msg->goal_position[1], msg->goal_position[2];
+  }
+  else if (msg->has_goal_yaw)
+  {
+    ROS_WARN("[traj_server] Ignoring non-finite goal yaw metadata.");
+  }
+
   receive_traj_ = true;
 }
 
@@ -96,6 +120,19 @@ std::pair<double, double> calculate_yaw(double t_cur, Eigen::Vector3d &pos, doub
   double yaw_temp = dir.norm() > 0.1
                         ? atan2(dir(1), dir(0))
                         : last_yaw_;
+
+  if (have_goal_yaw_ && (goal_position_ - pos).norm() <= goal_yaw_switch_distance_)
+  {
+    yaw_temp = goal_yaw_;
+    if (!goal_yaw_active_)
+    {
+      ROS_INFO("[traj_server] Tracking final goal yaw %.1f deg within %.2f m of the goal.",
+               goal_yaw_ * 180.0 / M_PI,
+               goal_yaw_switch_distance_);
+      goal_yaw_active_ = true;
+    }
+  }
+
   if (receive_yaw_ && yaw_custom_ > -100.0)
   { 
     if ((ros::Time::now() - receive_yaw_time_).toSec() < 0.5)
@@ -108,50 +145,32 @@ std::pair<double, double> calculate_yaw(double t_cur, Eigen::Vector3d &pos, doub
     }
   }
 
-  double yawdot = 0;
-  double d_yaw = yaw_temp - last_yaw_;
-  if (d_yaw >= M_PI)
+  const double yaw_error = std::atan2(std::sin(yaw_temp - last_yaw_),
+                                      std::cos(yaw_temp - last_yaw_));
+
+  // Generate a discrete trapezoidal yaw profile. The stopping-speed term makes
+  // the command decelerate before the target, while the rate-delta clamp keeps
+  // both yaw rate and yaw acceleration within their configured limits.
+  double desired_yawdot = 0.0;
+  if (std::fabs(yaw_error) > 1e-9)
   {
-    d_yaw -= 2 * M_PI;
-  }
-  if (d_yaw <= -M_PI)
-  {
-    d_yaw += 2 * M_PI;
+    const double direction = yaw_error > 0.0 ? 1.0 : -1.0;
+    const double stopping_rate = std::sqrt(2.0 * YAW_DOT_DOT_MAX_PER_SEC * std::fabs(yaw_error));
+    desired_yawdot = direction * std::min(YAW_DOT_MAX_PER_SEC, stopping_rate);
   }
 
-  const double YDM = d_yaw >= 0 ? YAW_DOT_MAX_PER_SEC : -YAW_DOT_MAX_PER_SEC;
-  const double YDDM = d_yaw >= 0 ? YAW_DOT_DOT_MAX_PER_SEC : -YAW_DOT_DOT_MAX_PER_SEC;
-  double d_yaw_max;
-  if (fabs(last_yawdot_ + dt * YDDM) <= fabs(YDM))
-  {
-    // yawdot = last_yawdot_ + dt * YDDM;
-    d_yaw_max = last_yawdot_ * dt + 0.5 * YDDM * dt * dt;
-  }
-  else
-  {
-    // yawdot = YDM;
-    double t1 = (YDM - last_yawdot_) / YDDM;
-    d_yaw_max = ((dt - t1) + dt) * (YDM - last_yawdot_) / 2.0;
-  }
-
-  if (fabs(d_yaw) > fabs(d_yaw_max))
-  {
-    d_yaw = d_yaw_max;
-  }
-  yawdot = d_yaw / dt;
-
-  double yaw = last_yaw_ + d_yaw;
-  if (yaw > M_PI)
-    yaw -= 2 * M_PI;
-  if (yaw < -M_PI)
-    yaw += 2 * M_PI;
+  const double max_rate_delta = YAW_DOT_DOT_MAX_PER_SEC * dt;
+  const double rate_delta = std::max(-max_rate_delta,
+                                     std::min(max_rate_delta, desired_yawdot - last_yawdot_));
+  const double yawdot = last_yawdot_ + rate_delta;
+  const double yaw_step = 0.5 * (last_yawdot_ + yawdot) * dt;
+  const double yaw = std::atan2(std::sin(last_yaw_ + yaw_step),
+                                std::cos(last_yaw_ + yaw_step));
   yaw_yawdot.first = yaw;
   yaw_yawdot.second = yawdot;
 
   last_yaw_ = yaw_yawdot.first;
   last_yawdot_ = yaw_yawdot.second;
-
-  yaw_yawdot.second = yaw_temp;
 
   return yaw_yawdot;
 }
@@ -201,7 +220,9 @@ void cmdCallback(const ros::TimerEvent &e)
     ROS_ERROR("[traj_server] Lost heartbeat from the planner, is it dead?");
 
     receive_traj_ = false;
+    last_yawdot_ = 0.0;
     publish_cmd(last_pos_, Vector3d::Zero(), Vector3d::Zero(), Vector3d::Zero(), last_yaw_, 0);
+    return;
   }
 
   double t_cur = (time_now - start_time_).toSec();
@@ -329,6 +350,21 @@ void cmdCallback(const ros::TimerEvent &e)
     publish_cmd(pos, vel, acc, jer, yaw_yawdot.first, yaw_yawdot.second);
   }
 #endif
+
+#if !FLIP_YAW_AT_END && !TURN_YAW_TO_CENTER_AT_END
+  else if (t_cur >= traj_duration_)
+  {
+    // Keep publishing the final position so the controller can finish and hold
+    // the requested goal yaw after translational motion has ended.
+    pos = traj_->getPos(traj_duration_);
+    vel.setZero();
+    acc.setZero();
+    jer.setZero();
+    yaw_yawdot = calculate_yaw(traj_duration_, pos, 0.01);
+    last_pos_ = pos;
+    publish_cmd(pos, vel, acc, jer, yaw_yawdot.first, yaw_yawdot.second);
+  }
+#endif
 }
 
 int main(int argc, char **argv)
@@ -338,7 +374,7 @@ int main(int argc, char **argv)
   ros::NodeHandle nh("~");
 
   ros::Subscriber poly_traj_sub = nh.subscribe("planning/trajectory", 10, polyTrajCallback);
-  ros::Subscriber yaw_sub = nh.subscribe("/planning/yaw", 10, yawCallback);
+  ros::Subscriber yaw_sub = nh.subscribe("planning/yaw", 10, yawCallback);
   ros::Subscriber heartbeat_sub = nh.subscribe("heartbeat", 10, heartbeatCallback);
   
   pos_cmd_pub = nh.advertise<quadrotor_msgs::PositionCommand>("/position_cmd", 50);
@@ -350,6 +386,22 @@ int main(int argc, char **argv)
   nh.param("traj_server/time_forward", time_forward_, -1.0);
   nh.param("traj_server/yaw_dot_max_deg_s", yaw_dot_max_deg_s, yaw_dot_max_deg_s);
   nh.param("traj_server/yaw_dot_dot_max_deg_s2", yaw_dot_dot_max_deg_s2, yaw_dot_dot_max_deg_s2);
+  nh.param("traj_server/goal_yaw_switch_distance", goal_yaw_switch_distance_, 0.5);
+  if (!std::isfinite(yaw_dot_max_deg_s) || yaw_dot_max_deg_s <= 0.0)
+  {
+    ROS_WARN("traj_server/yaw_dot_max_deg_s must be positive; using 360 deg/s.");
+    yaw_dot_max_deg_s = 360.0;
+  }
+  if (!std::isfinite(yaw_dot_dot_max_deg_s2) || yaw_dot_dot_max_deg_s2 <= 0.0)
+  {
+    ROS_WARN("traj_server/yaw_dot_dot_max_deg_s2 must be positive; using 900 deg/s^2.");
+    yaw_dot_dot_max_deg_s2 = 900.0;
+  }
+  if (!std::isfinite(goal_yaw_switch_distance_) || goal_yaw_switch_distance_ < 0.0)
+  {
+    ROS_WARN("traj_server/goal_yaw_switch_distance must be non-negative; using 0.5 m.");
+    goal_yaw_switch_distance_ = 0.5;
+  }
   yaw_dot_max_per_sec_ = yaw_dot_max_deg_s * M_PI / 180.0;
   yaw_dot_dot_max_per_sec_ = yaw_dot_dot_max_deg_s2 * M_PI / 180.0;
   last_yaw_ = 0.0;
@@ -357,8 +409,8 @@ int main(int argc, char **argv)
 
   ros::Duration(1.0).sleep();
 
-  ROS_INFO("[Traj server]: ready. yaw_dot_max=%.1f deg/s yaw_dot_dot_max=%.1f deg/s^2",
-           yaw_dot_max_deg_s, yaw_dot_dot_max_deg_s2);
+  ROS_INFO("[Traj server]: ready. yaw_dot_max=%.1f deg/s yaw_dot_dot_max=%.1f deg/s^2 goal_yaw_switch_distance=%.2f m",
+           yaw_dot_max_deg_s, yaw_dot_dot_max_deg_s2, goal_yaw_switch_distance_);
 
   ros::spin();
 

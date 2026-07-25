@@ -1,0 +1,14 @@
+# Algorithm and safety defaults shared by both environments. Vehicle-specific
+# calibration is loaded from simulation/config or deployment/config afterwards.
+enable_sim: false
+auto_request_offboard: false
+auto_request_arm: false
+auto_land_on_geofence: false
+enable_thrust_estimation: false
+use_acceleration_feedforward: true
+use_yaw_rate_feedforward: true
+max_feedforward_acc: 1.2
+
+# Maximum receive age of /mavros/local_position/odom. At 30 Hz this allows
+# roughly six missed updates while still rejecting a genuinely stale pose.
+odom_timeout: 0.2

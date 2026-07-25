@@ -43,11 +43,11 @@ private:
     bool sim_enable_, auto_request_offboard_{false}, auto_request_arm_{false}, auto_land_on_geofence_{false};
     bool enable_thrust_estimation_{false};
     bool use_acceleration_feedforward_{true}, use_yaw_rate_feedforward_{true};
-    bool arm_triggered_{false}, offboard_triggered_{false}, takeoffFlag_{false};
+    bool arm_triggered_{false}, offboard_triggered_{false};
     bool has_odom_{false}, has_imu_{false}, has_trajectory_after_offboard_{false};
-    double takeoff_height_, max_feedforward_acc_;
+    double max_feedforward_acc_, odom_timeout_{0.2};
     double ki_pz_{0.0}, int_limit_z_{5.0};
-    Eigen::Vector3d init_pose_, geo_fence_;;
+    Eigen::Vector3d geo_fence_;
 
     Eigen::Vector3d kp_p_, kp_v_, kp_a_, kp_q_, kp_w_, kd_p_, kd_v_, kd_a_, kd_q_, kd_w_;
     double limit_err_p_, limit_err_v_, limit_err_a_, limit_d_err_p_, limit_d_err_v_, limit_d_err_a_;
@@ -63,6 +63,7 @@ private:
 
     void send_cmd(const Controller_Output_t &output, bool angle);
     void pubLocalPose(const Eigen::Vector3d &pose); 
+    bool hasFreshOdom() const;
     void setDesiredStateToCurrentOdom();
 
     bool landCallback(std_srvs::SetBool::Request &request, std_srvs::SetBool::Response &response);

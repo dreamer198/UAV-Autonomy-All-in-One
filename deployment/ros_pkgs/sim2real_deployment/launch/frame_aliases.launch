@@ -1,0 +1,11 @@
+<launch>
+  <!-- FAST-LIO's inertial frame and MAVROS/planner ENU frame share the same origin. -->
+  <node pkg="tf2_ros" type="static_transform_publisher"
+        name="real_world_camera_init_tf"
+        args="0 0 0 0 0 0 1 world camera_init" />
+
+  <!-- MAVROS vision input uses map while the shared localization contract uses world. -->
+  <node pkg="tf2_ros" type="static_transform_publisher"
+        name="real_world_map_tf"
+        args="0 0 0 0 0 0 1 world map" />
+</launch>

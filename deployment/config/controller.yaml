@@ -1,0 +1,13 @@
+# Real vehicle calibration and safety limits. Planner parameters are shared
+# from sim2real_common/config/planner.yaml and must not be duplicated here.
+enable_sim: false
+hover_percent: 0.50
+max_hover_percent: 0.95
+min_output_thrust: 0.20
+max_output_thrust: 1.00
+geo_fence:
+  x: 50.0
+  y: 50.0
+  z: 3.0
+ki_pz: 0.30
+int_limit_z: 5.0

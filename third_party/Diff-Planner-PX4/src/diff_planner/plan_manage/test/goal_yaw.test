@@ -1,0 +1,16 @@
+<launch>
+  <node pkg="diff_planner" type="traj_server" name="goal_yaw_traj_server" output="screen">
+    <remap from="~planning/trajectory" to="/goal_yaw_test/planning/trajectory"/>
+    <remap from="~heartbeat" to="/goal_yaw_test/heartbeat"/>
+    <remap from="/position_cmd" to="/goal_yaw_test/position_cmd"/>
+    <param name="traj_server/time_forward" value="0.1" type="double"/>
+    <param name="traj_server/yaw_dot_max_deg_s" value="90.0" type="double"/>
+    <param name="traj_server/yaw_dot_dot_max_deg_s2" value="180.0" type="double"/>
+    <param name="traj_server/goal_yaw_switch_distance" value="0.1" type="double"/>
+  </node>
+
+  <test test-name="goal_yaw_tracking"
+        pkg="diff_planner"
+        type="test_goal_yaw.py"
+        time-limit="25.0"/>
+</launch>

@@ -34,6 +34,8 @@
     <arg name="pose_type"/>
     <arg name="use_multitopology_trajs"/>
     <arg name="drone_id"/>
+    <arg name="goal_yaw_tolerance_deg" default="5.0"/>
+    <arg name="goal_position_tolerance" default="0.2"/>
     <arg name="use_drone_topic_prefix" default="true"/>
     <arg name="resolved_odometry_topic" default="$(eval '/drone_%s_%s' % (arg('drone_id'), arg('odometry_topic').lstrip('/')) if arg('use_drone_topic_prefix') == 'true' else arg('odometry_topic'))"/>
     <arg name="resolved_cloud_topic" default="$(eval '/drone_%s_%s' % (arg('drone_id'), arg('cloud_topic').lstrip('/')) if arg('use_drone_topic_prefix') == 'true' else arg('cloud_topic'))"/>
@@ -60,6 +62,8 @@
         <param name="fsm/planning_horizon" value="$(arg planning_horizon)" type="double"/>
         <!--always set to 1.5 times grater than sensing horizen-->
         <param name="fsm/emergency_time" value="1.0" type="double"/>
+        <param name="fsm/goal_yaw_tolerance_deg" value="$(arg goal_yaw_tolerance_deg)" type="double"/>
+        <param name="fsm/goal_position_tolerance" value="$(arg goal_position_tolerance)" type="double"/>
         <param name="fsm/realworld_experiment" value="true"/>
         <param name="fsm/fail_safe" value="true"/>
         <!-- Allow final goal modification -->
@@ -88,7 +92,7 @@
         <param name="grid_map/map_size_z" value="$(arg map_size_z_)" />
         <param name="grid_map/local_update_range_x" value="5.5" />
         <param name="grid_map/local_update_range_y" value="5.5" />
-        <param name="grid_map/local_update_range_z" value="2.0" /> <!-- different meaning between grid_map.cpp and grid_map_bigmap.cpp -->
+        <param name="grid_map/local_update_range_z" value="2.0" />
         <param name="grid_map/obstacles_inflation" value="0.1" />
         <param name="grid_map/local_map_margin" value="10"/>
         <param name="grid_map/enable_virtual_wall" value="false"/>

@@ -1,6 +1,6 @@
 # Diff-Planner 规划器工作原理详解
 
-> 本文面向想真正理解本项目所用局部规划器 **Diff-Planner** 算法原理的读者，覆盖从感知建图、前端搜索、轨迹表示、后端优化，到状态机编排、轨迹执行、多机协同以及与 PX4 真机链路对接的完整链路。既给直觉解释，也给数学推导与源码定位。
+> 本文面向想真正理解本项目所用局部规划器 **Diff-Planner** 算法原理的读者，覆盖从感知建图、前端搜索、轨迹表示、后端优化，到状态机编排、轨迹执行、多机协同以及与 PX4/MAVROS 公共链路对接的完整流程。既给直觉解释，也给数学推导与源码定位。
 >
 > 所有源码路径相对仓库根 `third_party/Diff-Planner-PX4/src/diff_planner/`（个别给出绝对路径）。引用形如 `文件:行号` 方便跳转核对。文末「实现瑕疵」一节如实列出代码中的可疑点与遗留代码，阅读源码时请留意。
 
@@ -20,7 +20,7 @@
 如果你是第一次读，先抓住这条主线：
 
 ```text
-FAST-LIO 点云/里程计
+/localization/cloud_registered + /localization/odom
   → GridMap 建局部占据地图
   → A* 只在轨迹穿障时提供绕障方向
   → MINCO + L-BFGS 优化出平滑局部轨迹
@@ -34,7 +34,7 @@ FAST-LIO 点云/里程计
 | 目标 | 建议阅读 |
 |---|---|
 | 先建立整体图 | §1、§2、§3、§13 |
-| 查真机部署参数 | §11、§12、§14 |
+| 查公共部署参数 | §11、§12、§14 |
 | 深入算法细节 | §4–§8，再按需要看 §9–§10 |
 
 记住三个关键词就不会迷路：**ring-buffer 地图负责“哪里能走”**，**A* 负责“从哪边绕”**，**MINCO/L-BFGS 负责“轨迹怎么又平滑又可行”**。
@@ -53,8 +53,8 @@ FAST-LIO 点云/里程计
 8. [规划状态机：DiffReplanFSM（plan_manage）](#8-规划状态机diffreplanfsmplan_manage)
 9. [轨迹执行：traj_server 与数据结构](#9-轨迹执行traj_server-与数据结构)
 10. [多机协同与互检测（swarm_bridge / drone_detect）](#10-多机协同与互检测swarm_bridge--drone_detect)
-11. [与 PX4 真机链路的对接](#11-与-px4-真机链路的对接)
-12. [关键参数详解（真机实测值）](#12-关键参数详解真机实测值)
+11. [与 PX4/MAVROS 公共链路的对接](#11-与-px4mavros-公共链路的对接)
+12. [关键参数详解（两端公共值）](#12-关键参数详解两端公共值)
 13. [端到端走查：从点目标到电机指令](#13-端到端走查从点目标到电机指令)
 14. [实现瑕疵与注意事项](#14-实现瑕疵与注意事项)
 15. [术语表与参考](#15-术语表与参考)
@@ -63,7 +63,7 @@ FAST-LIO 点云/里程计
 
 ## 1. 概述与定位
 
-**Diff-Planner** 是微分智飞（Differential Robotics）为其教育无人机子品牌「非凸空间」适配的单机导航避障规划器。它**基于浙江大学 FAST-Lab 开源的 [EGO-Planner-v2](https://github.com/ZJU-FAST-Lab/EGO-Planner-v2)**，由原班人马深度参与优化，并在本仓库进一步**适配到 PX4 / ROS1 真机环境**。
+**Diff-Planner** 是微分智飞（Differential Robotics）为其教育无人机子品牌「非凸空间」适配的单机导航避障规划器。它**基于浙江大学 FAST-Lab 开源的 [EGO-Planner-v2](https://github.com/ZJU-FAST-Lab/EGO-Planner-v2)**，由原班人马深度参与优化，并在本仓库进一步**适配到 PX4 / ROS1 Sim-to-Real 环境**。
 
 源流链条：
 
@@ -74,22 +74,24 @@ EGO-Planner / EGO-Planner-v2 (ZJU FAST-Lab)
 Diff-Planner (微分智飞，针对教育平台增强：失速检测、目标修正、虚拟墙等)
         │  适配 PX4 SITL / MAVROS
         ▼
-Diff-Planner-PX4 (本仓库，真机部署：MID360 + FAST-LIO + SE3 控制器)
+Diff-Planner-PX4 (本仓库，接入公共 localization 接口与 SE3 控制器)
 ```
 
-在本项目的真机链路里，Diff-Planner 处于**感知**与**控制**之间：
+在本项目的 Sim-to-Real 链路里，Diff-Planner 处于**环境适配**与**控制**之间：
 
 ```text
-MID-360 LiDAR → FAST-LIO → /Odometry_base + /cloud_registered
-                                   │
-                                   ▼
-                            Diff-Planner（建图 + 规划）
-                                   │  /drone_0_planning/trajectory
-                                   ▼
-                              traj_server（轨迹采样）
-                                   │  /drone_0_planning/pos_cmd
-                                   ▼
-              trajectory_msg_converter.py → SE3 控制器 → MAVROS → PX4
+仿真 MAVROS odom/TF ─┐
+                     ├─> /localization/odom + /localization/cloud_registered
+真机 FAST-LIO ───────┘
+                                  │
+                                  ▼
+                           Diff-Planner（建图 + 规划）
+                                  │  /drone_0_planning/trajectory
+                                  ▼
+                             traj_server（轨迹采样）
+                                  │  /drone_0_planning/pos_cmd
+                                  ▼
+             trajectory_msg_converter.py → SE3 控制器 → MAVROS → PX4
 ```
 
 Diff-Planner 的职责：**在一张随机体滑动的局部占据栅格地图上，把「当前状态 → 目标点」实时求解成一条平滑、无碰撞、满足动力学约束的多项式轨迹，并以 100 Hz 滚动重规划。**
@@ -106,7 +108,7 @@ Diff-Planner 的职责：**在一张随机体滑动的局部占据栅格地图�
 | `swarm_bridge` | 多机轨迹网络广播 | `bridge_node_{udp,tcp}.cpp`、`reliable_bridge.hpp` |
 | `drone_detect` | 从深度图剔除队友机体 | `drone_detector.{cpp,h}` |
 
-> 多机相关的 `swarm_bridge` / `drone_detect` 在**本仓库单机真机部署中并不启动**（详见 [§10](#10-多机协同与互检测swarm_bridge--drone_detect)）。
+> 多机相关的 `swarm_bridge` / `drone_detect` 在**本仓库默认单机仿真与真机部署中都不启动**（详见 [§10](#10-多机协同与互检测swarm_bridge--drone_detect)）。
 
 ---
 
@@ -139,7 +141,7 @@ EGO 系列（含 Diff-Planner）**完全不维护 ESDF**。本仓库代码经核
 
 机载局部地图只能看到周围几米，规划器并不一次性算到终点，而是：
 
-- 在全局参考轨迹上选一个 `planning_horizon`（真机 3 m）之外的**局部目标**；
+- 在全局参考轨迹上选一个 `planning_horizon`（公共值 3 m）之外的**局部目标**；
 - 反复求解「当前状态 → 局部目标」的短程轨迹；
 - 由 **100 Hz 的状态机定时器** 判断是否需要重规划，**20 Hz 的安全定时器**实时扫描碰撞，发现危险立即重规划或急停。
 
@@ -151,9 +153,9 @@ EGO 系列（含 Diff-Planner）**完全不维护 ESDF**。本仓库代码经核
 
 ```mermaid
 flowchart TB
-    subgraph 感知["感知 (外部, FAST-LIO)"]
-        ODOM["/Odometry_base 里程计"]
-        CLOUD["/cloud_registered 世界系点云"]
+    subgraph 感知["公共环境适配接口"]
+        ODOM["/localization/odom<br/>world → base_link"]
+        CLOUD["/localization/cloud_registered<br/>世界系点云"]
     end
 
     subgraph planner["diff_planner_node (单进程, 单线程 ros::spin)"]
@@ -181,7 +183,6 @@ flowchart TB
     SERVER -->|PositionCommand| DOWN["下游: 转换脚本 → SE3 控制器 → PX4"]
 
     FSM -.heartbeat.-> SERVER
-    SERVER -.heartbeat.-> MONITOR["monitor_node 看门狗 1Hz"]
 ```
 
 几个要点：
@@ -194,16 +195,11 @@ flowchart TB
 
 ## 4. 环境表示：占据栅格地图（plan_env）
 
-### 4.1 两套实现，实际只编译一套
+### 4.1 当前实现
 
-`plan_env` 里有两个**同名 `GridMap`**：
-
-| 实现 | 文件 | 风格 | 是否编译 |
-|---|---|---|---|
-| 环形缓冲滑窗局部地图 | `grid_map.{h,cpp}` | EGO-Planner-v2 现代实现 | **是**（`CMakeLists.txt:42-45`） |
-| 固定全局地图 | `grid_map_bigmap.{h,cpp}` | Fast-Planner 旧式 origin+size | 否（遗留/备用） |
-
-下游 (`planner_manager.h:8`、`poly_traj_optimizer.h:6`、`dyn_a_star.h:8`) 一律 `#include <plan_env/grid_map.h>`。**本部署运行的是 ring-buffer 版 `grid_map.cpp`**。下文以它为主线。
+`plan_env` 编译并使用环形缓冲滑窗局部地图 `grid_map.{h,cpp}`。下游
+(`planner_manager.h:8`、`poly_traj_optimizer.h:6`、`dyn_a_star.h:8`) 一律
+`#include <plan_env/grid_map.h>`。**本部署运行的是 ring-buffer 版 `grid_map.cpp`**。
 
 ### 4.2 数据结构与坐标体系
 
@@ -218,7 +214,7 @@ ring-buffer 的精髓是「无 map_origin、对全局连续空间直接取整 + 
 
 ### 4.3 从传感器到占据地图
 
-本部署的**实际链路是「点云 + odom」**（不走深度图）：launch 把 `depth_topic` / `camera_pose_topic` 设为不存在的 `no_use*`，`grid_map/odom ← /Odometry_base`、`grid_map/cloud ← /cloud_registered`，`pose_type=2`。
+本部署的**实际链路是“点云 + odom”**（不走深度图）：公共 [planner.launch](../common/launch/planner.launch) 把未使用的 pose/depth remap 到 `/localization/unused_*`，`grid_map/odom ← /localization/odom`、`grid_map/cloud ← /localization/cloud_registered`，`pose_type=2`。公共 odom 的 pose 在 `world`、twist 按标准消息语义在 `base_link`；Planner callback 按姿态把线速度旋到 world 后用于初始状态。两端进入 Planner 前已经完成 frame 和 topic 标准化。
 
 `cloudCallback`（`grid_map.cpp:339-367`）在回调里就地完成融合：`moveRingBuffer()` → `raycastFromCloud()` → `clearAndInflateLocalMap()`。
 
@@ -241,17 +237,19 @@ $$
 
 各 log 值由概率经 $\text{logit}(x)=\ln\frac{x}{1-x}$ 得到（`grid_map.cpp:58-62`）。占据判定 `getOccupancy`：$L > \text{min\_occupancy\_log}$ 即占据（`grid_map.h:401`）。这是标准贝叶斯 occupancy grid。
 
-**衰减遗忘** `fadingCallback`（让旧障碍逐步淡出）在真机被 **`fading_time = -1.0` 关闭**——因为 LIO 提供的是全局配准点云，不靠逐帧遗忘，障碍只靠 ring-buffer 滑出窗口清除。
+**衰减遗忘** `fadingCallback`（让旧障碍逐步淡出）在公共配置中以 **`fading_time = -1.0` 关闭**。两端传给 Planner 的都是世界系注册点云，障碍随 ring-buffer 滑出窗口清除；若研究动态障碍再单独评估是否启用衰减。
 
 ### 4.4 膨胀（inflate）——增量计数
 
 膨胀**不是**事后整窗扫描，而是**增量计数**（ring-buffer 版区别于 bigmap 版的关键）：
 
-- `inf_grid_ = ceil((obstacles_inflation - 1e-5)/resolution)`，**硬上限 4**（`grid_map.cpp:44-50`）。真机 `inflation=0.15, resolution=0.15` → `inf_grid_=1`（膨胀 ±1 体素，3×3×3 立方核）。
+- `inf_grid_ = ceil((obstacles_inflation - 1e-5)/resolution)`，**硬上限 4**（`grid_map.cpp:44-50`）。公共配置 `inflation=0.33, resolution=0.11` → `inf_grid_=3`（XYZ 统一膨胀 ±3 体素，即 ±0.33 m）。该半径相对 `0.65 m` 正方形机体的 `0.325 m` 半对角线只留 `0.005 m` 理论余量。
 - 当某体素**变成/不再是**障碍时，`changeInfBuf` 对其周围 $(2\cdot\text{inf\_grid}+1)^3$ 个膨胀体素计数 `±1`（`grid_map.h:260-317`）。
 - `occupancy_buffer_inflate_[i]` 的语义 = 落在该膨胀核内的障碍体素个数。`getInflateOccupancy` 返回这个计数，**下游一律按布尔用（非零即占据）**。
 
-**虚拟墙**：开启 `enable_virtual_wall` 时，`z >= virtual_ceil || z <= virtual_ground` 直接返回 -1（视为越界/障碍）。真机收紧到 `[0.1, 1.6]` m，把无人机约束在低空安全层。
+**虚拟墙**：开启 `enable_virtual_wall` 时，`z >= virtual_ceil || z <= virtual_ground` 直接返回 -1（视为越界/障碍）。公共配置使用 `[0.1, 1.5]` m，把两端都约束在相同低空安全层。
+
+**地图发布范围**：公共配置启用 `visualize_all_directions`，发布完整 360° 原始/膨胀占据体素，避免沿用前视深度相机的 ±60° 可视化裁剪。
 
 ### 4.5 对外碰撞查询接口
 
@@ -415,9 +413,9 @@ J_total = 平滑/jerk能量
         + time(时间正则)
 ```
 
-各项数学形式与权重（真机 `advanced_param_exp.xml` 值）：
+各项数学形式与权重（公共 [planner.yaml](../common/config/planner.yaml)）：
 
-| 项 | 数学形式（每个被违反采样点） | 权重参数 | 真机值 |
+| 项 | 数学形式（每个被违反采样点） | 权重参数 | 公共值 |
 |---|---|---|---|
 | 平滑/能量 | $\int\|\dddot p\|^2$ | （无显式权重） | — |
 | 障碍硬项 | $w_{obs}\,(d_{clear}-d)^3,\ d_{clear}-d>0$ | `wei_obs_` | 10000 |
@@ -495,7 +493,7 @@ lbfgs::lbfgs_optimize(变量数, x, &cost,
 
 ### 7.7 多拓扑（默认关闭）
 
-`distinctiveTrajs`（`:869`）能为每个碰撞段生成「左绕/右绕」两个版本，枚举最多 8 条不同拓扑，分别优化取代价最小者。真机 `use_multitopology_trajs=false`，**单拓扑运行**省算力。
+`distinctiveTrajs`（`:869`）能为每个碰撞段生成“左绕/右绕”两个版本，枚举最多 8 条不同拓扑，分别优化取代价最小者。公共配置 `use_multitopology_trajs=false`，两端都以**单拓扑运行**省算力。
 
 ---
 
@@ -534,7 +532,7 @@ stateDiagram-v2
 1. **final_goal 落入膨胀障碍**：`mondify_final_goal_` 为真则把目标挪到全局轨迹上最近的无障碍点 → REPLAN_TRAJ；否则急停。
 2. **预设多 waypoint 推进**：到达当前点附近且还有下个点 → `wpt_id_++; planNextWaypoint`。
 3. **任务完成**：`t_cur > duration && touch_the_goal` → 清目标 → WAIT_TARGET。
-4. **到期重规划**：`t_cur > replan_thresh_`（真机 1.0 s）或接近轨迹末端 → REPLAN_TRAJ。
+4. **到期重规划**：`t_cur > replan_thresh_`（公共值 1.0 s）或接近轨迹末端 → REPLAN_TRAJ。
 
 **失速检测**（`enable_stuck_detect_`，Diff-Planner 相对原版 EGO 的增强）：把当前位置投影到「基准→目标」线段，若 `TARGET_STUCK_TIME = 1.5·planning_horizon/max_vel` 内前进不足 0.3 m，或绕飞偏离超 `planning_horizon·√2`，判定卡死 → 急停 + `need_hover_stop_`。
 
@@ -587,12 +585,12 @@ stateDiagram-v2
 发布的 `PositionCommand` 字段本身填了 **P/V/A/Jerk + yaw/yaw_dot**（`publish_cmd` 写入 `cmd.jerk` 与 `cmd.yaw_dot`）。但要把「traj_server 发布了什么」和「当前 SE3 实际用了什么」分开：
 
 - `trajectory_msg_converter.py` 只把 **P/V/A + yaw/yaw_dot** 转成 `MultiDOFJointTrajectory`，**不透传 jerk**；SE3 的 `multiDOFJointCallback` 也会把 `desired_state_.j` 置零。
-- 当前 `calculate_yaw` 最后把 `yaw_yawdot.second` 覆盖成 `yaw_temp`，所以 `cmd.yaw_dot` **不是实际角速度**。
-- 即便 `yaw_dot` 传到了 SE3，当前 SE3 发给 PX4 时也忽略 `body_rate` 字段；因此这个 bug 在现配置下主要是潜在风险，未来若启用角速率设定值就必须先修。
+- `calculate_yaw` 当前生成受角速度与角加速度限制的离散梯形 yaw 轨迹，并发布对应 `yaw_dot`。
+- `yaw_dot` 会传到 SE3，但当前 SE3 发给 PX4 时忽略 `body_rate` 字段；因此 PX4 实际执行的是平滑后的 yaw 姿态，而不是该角速率前馈。
 
 ### 9.3 Yaw 规划（`calculate_yaw`，`:87-157`）
 
-默认朝向「前视点」方向：取 `time_forward_`（真机 1.0 s）秒后轨迹点的方向 `atan2(dir.y, dir.x)`，对 yaw 角速度/角加速度做**限幅平滑**（真机限到 35 deg/s、90 deg/s²，转向柔和）。支持外部 `/planning/yaw` 短时（0.5 s 内）覆盖机头朝向。
+默认朝向“前视点”方向：取 `time_forward_`（公共值 1.0 s）后轨迹点的方向 `atan2(dir.y, dir.x)`，对 yaw 角速度/角加速度做**限幅平滑**（公共值 35 deg/s、90 deg/s²）。接近目标时可切换到 `/goal` 四元数中的最终 yaw，也支持外部 `/planning/yaw` 短时（0.5 s 内）覆盖机头朝向。
 
 ### 9.4 数据结构（`plan_container.hpp`）
 
@@ -604,17 +602,11 @@ stateDiagram-v2
 | `SwarmTrajData` | `vector<LocalTrajData>`，按 drone_id 索引的多机轨迹缓冲 |
 | `TrajContainer` | 聚合 global/local/swarm；`setLocalTraj` 自增 `traj_id` |
 
-### 9.5 看门狗 monitor_node
-
-监控 traj_server 心跳，**掉线（> 4 s）则 `pkill diff_planner` 并 roslaunch 重启**，3 秒后把记录的目标重发到 `/goal_with_id` 恢复任务。两级心跳保护：traj_server 0.5 s（掉线悬停，保飞行安全），monitor 4 s（掉线重启，保任务恢复）。
-
-> ⚠️ monitor 重启硬编码的是 `single_drone_interactive.launch`，与真机部署用的 `run_real_mid360_lio.launch` 不同；真机若用 monitor 自动重启需确认该 launch 存在且一致。
-
 ---
 
 ## 10. 多机协同与互检测（swarm_bridge / drone_detect）
 
-> **结论先行：这两个模块在本仓库的单机真机部署中均不启动、不参与。** 下面介绍其原理与「为何单机不启用」。
+> **结论先行：这两个模块在本仓库默认的单机仿真与真机部署中均不启动、不参与。** 下面介绍其原理与“为何单机不启用”。
 
 ### 10.1 轨迹广播链路
 
@@ -634,14 +626,14 @@ stateDiagram-v2
 
 ### 10.3 为何单机不启用
 
-1. 真机 launch 只启动 `diff_planner_node` 和 `traj_server`，没有启动 `bridge_node_udp/tcp`、`traj2odom_node` 或 `drone_detect`。
+1. 公共 `sim2real_common/planner.launch` 只启动 `diff_planner_node` 和 `traj_server`，没有启动 `bridge_node_udp/tcp`、`traj2odom_node` 或 `drone_detect`。
 2. 规划器仍保留 `planning/broadcast_traj_send/recv` 的 remap，但没有桥节点把网络轨迹送进来；单机时 `RecvBroadcastMINCOTrajCallback` 收不到「别人」，swarm 代价对空集求值。
 3. 当前接收口还被 remap 到 `/bridge/broadcast_traj_from_planner`，与常见桥输出 `/broadcast_traj_to_planner` 不一致；即使后来启桥，也需要先核对话题。
 4. `drone_detect` 依赖 `/others_odom` + 深度图，真机走点云（`depth_topic=no_use1`），输入前提不满足。
 
 ---
 
-## 11. 与 PX4 真机链路的对接
+## 11. 与 PX4/MAVROS 公共链路的对接
 
 Diff-Planner 输出的是 `PositionCommand`（字段含位置/速度/加速度/jerk + yaw/yaw_dot），需经转换才能驱动 PX4；当前转换链路只把位置/速度/加速度/yaw 作为有效控制信息用到 SE3：
 
@@ -659,54 +651,57 @@ MAVROS → PX4
 ```
 
 要点：
-- **traj_server 输出话题的命名风险**：源码里 `traj_server.cpp:344` 直接 advertise 全局话题 `/position_cmd`，真机 launch 在当前全局命名空间下用 `from="position_cmd"` remap 到 `/drone_0_planning/pos_cmd`。这条链路在当前配置下应能工作，但写法比较脆：如果之后给节点加 namespace、改多机命名或复用 launch，优先检查实际 `rostopic list` 里是否真的有 `/drone_0_planning/pos_cmd`。
+- **traj_server 输出话题的命名风险**：源码直接 advertise 全局话题 `/position_cmd`，公共 [planner.launch](../common/launch/planner.launch) 将 `position_cmd` remap 到 `/drone_0_planning/pos_cmd`。这条链路在当前全局命名空间下可用，但写法对 namespace/多机复用较脆；修改命名空间后应先核对实际 topic。
 - **SE3 控制器**把期望轨迹转成姿态/推力设定值（内部也计算 `bodyrates`，但当前发给 PX4 时被 `type_mask` 忽略），是 PX4 OFFBOARD 模式下的轨迹跟踪控制器。当前实际生效的是 P/V/A/yaw → 姿态+油门，jerk/yaw-rate 不要当作有效执行通道。详见同目录的 [se3_controller.md](se3_controller.md)。
-- **安全策略**（本项目）：代码默认不自动解锁、不循环请求 OFFBOARD，是否切 OFFBOARD 由飞手遥控器决定，飞行中可随时切回接管。
+- **安全策略**：SE3 两端都不在启动时自动解锁。显式执行仿真或真机的 `arm` 后，同一个共享执行器请求 PX4 原生 `AUTO.TAKEOFF` 起飞到默认 `1.0 m`，达到实际高度并确认预热 setpoint 后自动切入 OFFBOARD，SE3 原地悬停并等待新目标。飞行中切到其他模式即视为人工接管，执行器不会抢回控制权。
 
 ---
 
-## 12. 关键参数详解（真机实测值）
+## 12. 关键参数详解（两端公共值）
 
-真机链路加载 `exp/run_real_mid360_lio.launch` + `include/advanced_param_exp.xml`。下表为**真机实际取值**（已交叉核对到 C++ 读取处）。
+仿真和真机都由 [sim2real_common/planner.launch](../common/launch/planner.launch) 加载唯一默认参数文件 [planner.yaml](../common/config/planner.yaml)，`traj_server` 另加载 [trajectory_server.yaml](../common/config/trajectory_server.yaml)。下表为两端共同值。
 
 ### 12.1 飞行包络（顶层 arg）
 
-| 参数 | 真机值 | 含义 / 影响 |
+| 参数 | 公共值 | 含义 / 影响 |
 |---|---|---|
-| `max_vel` | **0.5** m/s | 最大速度（真机保守）；时间分配 `ts = piece_length/max_vel` |
+| `max_vel` | **0.5** m/s | 最大速度（两端保守基线）；时间分配 `ts = piece_length/max_vel` |
 | `max_acc` | **0.8** m/s² | 最大加速度 |
 | `max_jer` | **8.0** m/s³ | 最大 jerk |
 | `planning_horizon` | **3.0** m | 局部规划视距（局部目标选取距离） |
-| `virtual_ceil / virtual_ground` | **1.6 / 0.1** m | 虚拟天花板/地面（约束在低空层） |
-| `yaw_dot_max_deg_s` | 35 | traj_server 内部 yaw 平滑角速度上限；当前发布的 `yaw_dot` 字段有 bug，不代表下游拿到了正确 yaw-rate |
+| `max_goal_distance` | **200.0** m | 单次目标相对当前里程计位置的最大三维直线距离；这是输入保护，不是全局可达性保证 |
+| `virtual_ceil / virtual_ground` | **3.0 / 0.1** m | 虚拟天花板/地面（约束在低空层） |
+| `yaw_dot_max_deg_s` | 35 | traj_server 内部 yaw 平滑角速度上限；yaw-rate 会传到 SE3，但当前 PX4 输出忽略 body-rate 字段 |
 | `yaw_dot_dot_max_deg_s2` | 90 | traj_server 内部 yaw 平滑角加速度上限 |
 
 ### 12.2 地图（grid_map/*）
 
-| 参数 | 真机值 | 含义 |
+| 参数 | 公共值 | 含义 |
 |---|---|---|
-| `resolution` | 0.15 m | 体素边长 |
-| `local_update_range_{x,y,z}` | 4.0 / 4.0 / 1.8 m | ring-buffer **半范围**（实际窗口 8×8×3.6 m） |
-| `obstacles_inflation` | 0.15 m | 膨胀半径 → `inf_grid_=1` |
+| `resolution` | 0.11 m | 体素边长 |
+| `local_update_range_{x,y,z}` | 5.5 / 5.5 / 1.8 m | ring-buffer **半范围**（量化后实际窗口约 11.0×11.0×3.75 m） |
+| `obstacles_inflation` | 0.33 m | XYZ 统一膨胀；`inf_grid_=3`，即每轴 ±0.33 m；0.65 m 正方形机体半对角线外只留 0.005 m 理论余量 |
 | `p_hit / p_miss` | 0.65 / 0.35 | 命中/穿过单帧概率 |
 | `p_min / p_max` | 0.12 / 0.90 | log-odds clamp 下/上界 |
 | `p_occ` | 0.80 | 占据判定阈值 |
-| `fading_time` | **-1.0（关闭）** | 占据衰减（真机用全局点云，不需遗忘） |
+| `fading_time` | **-1.0（关闭）** | 世界系注册点云默认不做时间衰减 |
 | `pose_type` | 2 (ODOMETRY) | odom 同步点云建图 |
 | `enable_virtual_wall` | true | 启用虚拟墙 |
+| `visualize_all_directions` | true | 发布完整 360° 占据地图 |
+| `visualization_period` | 0.5 s | 可视化点云以 2 Hz 发布；内部地图更新频率不变 |
 
 ### 12.3 编排（manager/*）
 
-| 参数 | 真机值 | 含义 |
+| 参数 | 公共值 | 含义 |
 |---|---|---|
 | `polyTraj_piece_length` | 1.5 m | 多项式分段标称长度；piece 数 = `ceil(dist/1.5)` |
 | `feasibility_tolerance` | 0.05 | 可行性松弛 |
 | `use_multitopology_trajs` | **false** | 单拓扑（省算力） |
-| `drone_id` | `$(env DRONE_ID)` | 机号（单机通常 0） |
+| `drone_id` | launch arg，默认 `0` | 机号（单机通常 0） |
 
 ### 12.4 优化器（optimization/*）
 
-| 参数 | 真机值 | 含义 |
+| 参数 | 公共值 | 含义 |
 |---|---|---|
 | `constraint_points_perPiece` | 5 | 每段约束/采样点数 `cps_num_prePiece_` |
 | `weight_obstacle` | 10000 | 硬障碍权重 |
@@ -720,23 +715,17 @@ MAVROS → PX4
 | `swarm_clearance` | 0.15 m | 多机间距 |
 | `vel/acc_tolerance` | 1.0 | 可行性检查松弛 |
 
-### 12.5 真机 vs 仿真的关键差异
+### 12.5 真机 vs 仿真的边界
 
-> 优化器代价权重（weight_*、clearance、cps_num、tolerance）在真机与仿真**完全一致**。差异集中在**建图、动力学包络、输入话题**：
+Planner 看见的输入和所有上述参数完全一致。差异只存在于 Planner 之前的环境适配层：
 
-| 维度 | 真机 | 仿真 |
-|---|---|---|
-| odom 源 | `/Odometry_base`（FAST-LIO） | `/mavros/local_position/odom` |
-| 点云源 | `/cloud_registered` | `/livox/lidar_world` |
-| `pose_type` | 2 | -1（纯世界系点云） |
-| 地图实现 | ring-buffer 版 `grid_map.cpp` | 同样是 ring-buffer 版 `grid_map.cpp`；`map_size_*` 参数是 legacy/bigmap 路线遗留，当前编译实现不依赖它 |
-| `resolution` | 0.15 | 0.1 |
-| `local_update_range` | 4.0/4.0/1.8 | 5.5/5.5/2.0 |
-| `inflation` | 0.15 | 0.1 |
-| 虚拟墙 | true，`[0.1,1.6]` | false |
-| `fading_time` | -1.0（关闭） | 1000.0（启用） |
-| `max_vel/acc/jer` | 0.5 / 0.8 / 8.0（保守） | 由 `run_in_sim.xml` 给 |
-| `use_multitopology` | false（写死） | 由 arg 控制 |
+| 维度 | 真机适配层 | 仿真适配层 | Planner 接口 |
+|---|---|---|---|
+| 定位来源 | FAST-LIO `/Odometry` + 安装外参 | `/mavros/local_position/odom` | `/localization/odom` |
+| 点云来源 | FAST-LIO `/cloud_registered` | Gazebo `/livox/lidar` + TF | `/localization/cloud_registered` |
+| 输出 frame | 适配为 `world -> base_link` | 适配为 `world -> base_link` | 相同 |
+
+因此 `pose_type=2`、ring-buffer 地图、分辨率、local update range、膨胀、虚拟墙、衰减、飞行包络和优化器权重都由同一份 `planner.yaml` 决定。定位算法的差异不会演变成两套规划配置。
 
 ---
 
@@ -745,16 +734,15 @@ MAVROS → PX4
 把一次完整规划串起来：
 
 1. **目标输入**：飞手在 RViz 用 3D Nav Goal 选点（或预设 waypoint），发到 `/goal`。FSM `waypointCallback` 检查目标不在安全围栏外，调 `planNextWaypoint` 用 MinJerk 拟合一条**全局参考轨迹**（start → waypoints → tail），置 `have_target_`。
-2. **触发起飞**：真机 `realworld_experiment=true`，需外部 `/traj_start_trigger` 把 `have_trigger_` 置真，FSM 从 WAIT_TARGET → SEQUENTIAL_START。
+2. **触发规划**：公共配置 `realworld_experiment=true`。本仓库修改后的目标回调会把有效 `/goal` 同时视为显式触发；预设 waypoint 流程仍可使用 `/traj_start_trigger`。FSM 随后从 WAIT_TARGET → SEQUENTIAL_START。
 3. **首次规划**：`planFromGlobalTraj` → `getLocalTarget`（在全局轨迹上选 3 m 外的局部目标）→ `reboundReplan`：
    - `computeInitState` 生成初始 MINCO 轨迹；
    - `finelyCheckAndSetConstraintPoints` 细查碰撞，对穿障段跑 **A\***，把折线编码成每个约束点的 `{base_point, direction}`；
    - `optimizeTrajectory` 跑 **L-BFGS**：每次迭代 `generate` 解带状系统得系数 → 算 jerk 能量 + 障碍/可行性/时间惩罚 → `getGrad2TP` 解析反传梯度 → 必要时 rebound 重设 `{p,v}` 重启；收敛后三重终检（无碰撞/可行/swarm 够）。
 4. **发布轨迹**：成功 → `setLocalTrajFromOpt` 落地 → `polyTraj2ROSMsg` 发 `PolyTraj` 到 `/drone_0_planning/trajectory`。FSM → EXEC_TRAJ。
-5. **执行采样**：traj_server 100 Hz 采样轨迹得 PositionCommand（字段含 P/V/A/Jerk + yaw）。源码发布名是 `/position_cmd`，当前真机 launch remap 后下游订阅 `/drone_0_planning/pos_cmd`；转换到 SE3 时 jerk 不透传，`yaw_dot` 字段当前也不是实际角速度。
+5. **执行采样**：traj_server 100 Hz 采样轨迹得 PositionCommand（字段含 P/V/A/Jerk + yaw）。源码发布名是 `/position_cmd`，公共 launch remap 后下游订阅 `/drone_0_planning/pos_cmd`；转换到 SE3 时 jerk 不透传。
 6. **滚动重规划**：FSM 100 Hz 判断（到期/接近末端/失速/目标入障），20 Hz 安全定时器扫碰撞；触发则回到第 3 步重规划，或急停。
 7. **下游控制**：转换脚本 → SE3 控制器算姿态/推力 → MAVROS → PX4。
-8. **看门狗**：monitor_node 监控心跳，规划器掉线则重启并重发目标。
 
 ---
 
@@ -766,11 +754,9 @@ MAVROS → PX4
 |---|---|
 | `dyn_a_star.h:11` | `inf = 1 >> 20` 应为 `1 << 20`，实际 `inf==0`；但「已访问」靠 `rounds` 判定，不影响结果 |
 | `dyn_a_star.cpp:249-254` | open set 更新已有节点时不做 decrease-key / 重新 push，堆与真实 f 可能短暂不一致 |
-| `traj_server.cpp:154` | `yaw_yawdot.second`（yaw_dot）被覆盖成目标 yaw，发布的 `cmd.yaw_dot` **不是角速度**——下游若当角速度用会出问题 |
 | `trajectory_msg_converter.py:100-112` / `se3_ctrl.cpp:330` | converter 不透传 `PositionCommand.jerk`，SE3 主轨迹回调把 `desired_state_.j` 置零；规划器 jerk 当前不参与实际控制 |
-| `traj_server.cpp:344` | 用绝对话题 `/position_cmd` 发布，当前真机全局命名空间 remap 后可用，但对 namespace/多机复用较脆（§11） |
+| `traj_server.cpp` | 用绝对话题 `/position_cmd` 发布，当前公共 launch 在全局命名空间 remap 后可用，但对 namespace/多机复用较脆（§11） |
 | `plan_container.hpp:75-84` | `LocalTrajData::end_time` 在 `setLocalTraj` 中未赋值 |
-| `monitor_node.cpp` | `cmd_timer` 未绑定回调即 stop/start，为无效代码；重启硬编码 `single_drone_interactive.launch` |
 | `planning_visualization.cpp:18-25` | intermediate 梯度可视化发布器全被注释，相关 display 函数实际不可用 |
 | `diff_replan_fsm.h` | `REFENCE_PATH=3` 枚举存在但无对应分支；`mandatory_stop_`/`odom_acc_` 声明后未被实质读取 |
 | `poly_traj_optimizer.cpp:35` | `variable_num_` 注释式 `4*(N-1)+1` 与实际布局 `3*(N-1)+N` 写法不一致但数值等价 |

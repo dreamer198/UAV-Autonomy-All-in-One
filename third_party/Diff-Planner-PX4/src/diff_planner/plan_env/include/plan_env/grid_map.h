@@ -67,7 +67,7 @@ struct MappingParameters
   double fading_time_;
 
   /* visualization and computation time display */
-  bool show_occ_time_;
+  bool visualize_all_directions_, show_occ_time_;
 };
 
 // intermediate mapping data for fusion
@@ -117,6 +117,7 @@ struct MappingData
   ros::Time last_occ_update_time_;
   bool flag_depth_odom_timeout_;
   bool flag_have_ever_received_depth_;
+  bool flag_have_ever_received_cloud_;
 
   // depth image projected point cloud
 

@@ -74,6 +74,7 @@ namespace diff_planner
     int waypoint_num_, wpt_id_;
     double planning_horizen_;
     double emergency_time_;
+    double goal_yaw_tolerance_, goal_position_tolerance_, max_goal_distance_;
     bool flag_realworld_experiment_;
     bool enable_fail_safe_;
     bool enable_ground_height_measurement_;
@@ -83,6 +84,8 @@ namespace diff_planner
     bool enable_stuck_detect_; // Whether to enable stuck detection
 
     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_, touch_goal_, mandatory_stop_;
+    bool have_queued_emergency_target_;
+    bool have_goal_yaw_, have_odom_yaw_;
     FSM_EXEC_STATE exec_state_;
     int continously_called_times_{0};
 
@@ -90,6 +93,8 @@ namespace diff_planner
     Eigen::Vector3d final_goal_;                             // goal state
     Eigen::Vector3d local_target_pt_, local_target_vel_; // local target state
     Eigen::Vector3d odom_pos_, odom_vel_, odom_acc_;     // odometry state
+    double goal_yaw_, odom_yaw_;
+    ros::Time goal_stamp_;
     std::vector<Eigen::Vector3d> wps_;
 
     /* ROS utils */
@@ -125,7 +130,10 @@ namespace diff_planner
     void odometryCallback(const nav_msgs::OdometryConstPtr &msg);
     void triggerCallback(const geometry_msgs::PoseStampedPtr &msg);
     void RecvBroadcastMINCOTrajCallback(const traj_utils::MINCOTrajConstPtr &msg);
-    void polyTraj2ROSMsg(traj_utils::PolyTraj &poly_msg, traj_utils::MINCOTraj &MINCO_msg);
+    void polyTraj2ROSMsg(traj_utils::PolyTraj &poly_msg,
+                         traj_utils::MINCOTraj &MINCO_msg,
+                         bool include_goal_yaw,
+                         bool armable);
 
     /* ground height measurement */
     bool measureGroundHeight(double &height);

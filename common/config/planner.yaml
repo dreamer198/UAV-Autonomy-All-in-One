@@ -1,0 +1,101 @@
+# The only default planner parameter set used by simulation and deployment.
+# These conservative values are the real-flight-safe baseline.
+fsm:
+  flight_type: 1
+  thresh_replan_time: 1.0
+  planning_horizon: 3.0
+  emergency_time: 1.0
+  goal_yaw_tolerance_deg: 5.0
+  goal_position_tolerance: 0.2
+  # Admission guard for one newly received goal, measured as 3-D straight-line
+  # distance from current odometry. This is not a guaranteed global path range.
+  max_goal_distance: 200.0
+  realworld_experiment: true
+  fail_safe: true
+  mondify_final_goal: true
+  enable_stuck_detect: true
+  waypoint_num: 2
+  waypoint0_x: 1.0
+  waypoint0_y: 0.0
+  waypoint0_z: 0.8
+  waypoint1_x: 0.0
+  waypoint1_y: 0.0
+  waypoint1_z: 0.8
+  waypoint2_x: 0.0
+  waypoint2_y: 0.0
+  waypoint2_z: 0.8
+  waypoint3_x: 0.0
+  waypoint3_y: 0.0
+  waypoint3_z: 0.8
+  waypoint4_x: 0.0
+  waypoint4_y: 0.0
+  waypoint4_z: 0.8
+
+grid_map:
+  # The 0.65 m square airframe has a 0.325 m circumradius. The requested
+  # 0.11 m resolution represents its collision envelope with three cells.
+  resolution: 0.11
+  local_update_range_x: 5.5
+  local_update_range_y: 5.5
+  local_update_range_z: 1.8
+  # Uniform XYZ inflation. Three 0.11 m cells give a 0.33 m planning radius.
+  # This leaves only 0.005 m beyond the 0.325 m airframe circumradius.
+  obstacles_inflation: 0.33
+  enable_virtual_wall: true
+  virtual_ceil: 3.0
+  virtual_ground: 0.1
+  ground_height: -0.01
+  cx: 319.31427001953125
+  cy: 239.09725952148438
+  fx: 386.2706298828125
+  fy: 386.2706298828125
+  use_depth_filter: true
+  depth_filter_tolerance: 0.15
+  depth_filter_maxdist: 5.0
+  depth_filter_mindist: 0.2
+  depth_filter_margin: 2
+  k_depth_scaling_factor: 1000.0
+  skip_pixel: 2
+  p_hit: 0.65
+  p_miss: 0.35
+  p_min: 0.12
+  p_max: 0.90
+  p_occ: 0.80
+  fading_time: -1.0
+  min_ray_length: 0.1
+  max_ray_length: 4.5
+  visualization_truncate_height: 1.9
+  visualize_all_directions: true
+  # RViz/rosbag occupancy clouds only; internal map updates remain at full rate.
+  visualization_period: 0.5
+  show_occ_time: false
+  pose_type: 2
+  frame_id: world
+
+manager:
+  max_vel: 0.5
+  max_acc: 0.8
+  max_jer: 8.0
+  polyTraj_piece_length: 1.5
+  feasibility_tolerance: 0.05
+  planning_horizon: 3.0
+  use_multitopology_trajs: false
+  drone_id: 0
+
+optimization:
+  constraint_points_perPiece: 5
+  weight_obstacle: 10000.0
+  weight_obstacle_soft: 5000.0
+  weight_swarm: 10000.0
+  weight_feasibility: 10000.0
+  weight_sqrvariance: 10000.0
+  weight_time: 10.0
+  obstacle_clearance: 0.1
+  obstacle_clearance_soft: 0.5
+  swarm_clearance: 0.15000000000000002
+  max_vel: 0.5
+  vel_tolerance: 1.0
+  max_acc: 0.8
+  acc_tolerance: 1.0
+  max_jer: 8.0
+  record_opt: true

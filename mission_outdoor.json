@@ -1,0 +1,74 @@
+{
+  "takeoff_height": 1.0,
+  "takeoff_settle_time": 0.0,
+  "land_after_mission": true,
+  "fly_through": true,
+  "fly_through_tolerance": 0.5,
+  "position_tolerance": 0.5,
+  "yaw_tolerance_deg": 30.0,
+  "velocity_tolerance": 0.15,
+  "hold_time": 0.5,
+  "waypoint_timeout": 1200.0,
+  "planner_accept_timeout": 15.0,
+  "planner_recovery_timeout": 2.0,
+  "planner_retry_limit": 3,
+  "state_timeout": 3.0,
+  "odom_timeout": 0.5,
+  "waypoints": [
+    {
+      "x": 11.08,
+      "y": -0.27,
+      "z": 0.75
+    },
+    {
+      "x": 19.82,
+      "y": -2.12,
+      "z": 1.09
+    },
+    {
+      "x": 34.31,
+      "y": 1.06,
+      "z": 1.26
+    },
+    {
+      "x": 55.15,
+      "y": -12.05,
+      "z": 1.26
+    },
+    {
+      "x": 61.08,
+      "y": -14.15,
+      "z": 1.62
+    },
+    {
+      "x": 72.13,
+      "y": -12.94,
+      "z": 1.54
+    },
+    {
+      "x": 79.2,
+      "y": -14.5,
+      "z": 1.73
+    },
+    {
+      "x": 86.27,
+      "y": -15.42,
+      "z": 1.59
+    },
+    {
+      "x": 96.48,
+      "y": -13.56,
+      "z": 1.40
+    },
+    {
+      "x": 102.74,
+      "y": -4.41,
+      "z": 1.13
+    },
+    {
+      "x": 119.68,
+      "y": 5.88,
+      "z": 0.60
+    }
+  ]
+}

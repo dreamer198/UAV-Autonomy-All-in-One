@@ -21,8 +21,8 @@
 
 | 观察到的现象 | 更可能的原因 | 先看 |
 |---|---|---|
-| 爬升段油门贴近 1.0，高度跟不上 | 推力余量不够 | §3.①、§5 |
-| `/mavros/local_position/odom` 跳变、掉频，实际高度漂 | FAST-LIO/odom 退化 | §3.②、§6 |
+| 爬升段油门贴近 `max_output_thrust`，高度跟不上 | 推力余量不够 | §3.①、§5 |
+| `/localization/odom` 跳变、掉频，或它与 MAVROS 高度明显分离 | 真机 FAST-LIO/外参/EKF 链路退化 | §3.②、§6 |
 | 期望 z 和实际 z 有短时误差，但油门未饱和 | 瞬态跟踪滞后或增益问题 | §3.③、§6 |
 | 跟踪竖直轨迹后上下振荡 | `ki_pz` 动态下偏大 | §3.④、§5 |
 | 提高规划加速度后才出问题 | 前馈加速度被裁剪或推力不足 | §3.⑤、§7 |
@@ -43,11 +43,11 @@
 |---|---|---|
 | 轨迹链路 | `/drone_0_planning/pos_cmd` → [trajectory_msg_converter.py](../third_party/Diff-Planner-PX4/src/diff_planner/plan_manage/scripts/trajectory_msg_converter.py) → `/command/trajectory` → [multiDOFJointCallback](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L292) | — |
 | z 前馈 | **位置/速度/加速度透传并生效**（竖直是前馈+反馈，非纯反馈）；jerk 不透传，yaw-rate 当前只进被忽略的 bodyrates | [converter L91–112](../third_party/Diff-Planner-PX4/src/diff_planner/plan_manage/scripts/trajectory_msg_converter.py#L91-L112) + [se3_ctrl.cpp L330](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L330) / [L338](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L338) |
-| 规划限幅 | `max_vel=0.5` / `max_acc=0.8` / `max_jer=8.0`（温和） | 启动脚本 |
-| 竖直范围 | `virtual_ground=0.1 ~ virtual_ceil=1.6`（local_map_z=1.8） | run_real_mid360_lio.launch |
-| 加速度前馈裁剪 | `max_feedforward_acc=1.2 ≥ max_acc=0.8` → 当前**不裁** | 启动脚本 + [se3_ctrl.cpp:320-325](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L320-L325) |
-| 推力 | 真实悬停 ~0.88(满电)/~0.92–0.95(沉电)；`max_output=1.0` | 实测 |
-| **悬停之上的推力余量** | **0.12(满电) / 0.05(沉电)** | 推算 |
+| 规划限幅 | `max_vel=0.5` / `max_acc=0.8` / `max_jer=8.0`（温和） | [公共 planner.yaml](../common/config/planner.yaml) |
+| 竖直范围 | `virtual_ground=0.1 ~ virtual_ceil=1.5`（local_update_range_z=1.8） | [公共 planner.yaml](../common/config/planner.yaml) |
+| 加速度前馈裁剪 | `max_feedforward_acc=1.2 ≥ max_acc=0.8` → 当前**不裁** | [公共 controller.yaml](../common/config/controller.yaml) + [se3_ctrl.cpp](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp) |
+| 推力 | `hover_percent`、`max_output_thrust` 按真机标定 | [真机 controller.yaml](../deployment/config/controller.yaml) |
+| **悬停之上的推力余量** | `max_output_thrust - 实际悬停推力`；必须按当前电池/载荷实测 | — |
 
 ---
 
@@ -61,17 +61,15 @@
 ## 3. 跟踪轨迹时的残余掉高诱因
 
 ### ① 爬升时推力饱和（头号风险）
-规划器爬升（竖直加速度 `az`）所需推力 ≈ `hover × (1 + az/g)`。代入 `az=0.8`：**+8%**。
-- 满电（hover 0.88）→ 0.95，够；
-- **沉电（hover 0.95）→ 1.03 → 顶到 `max_output=1.0` 饱和** → 爬不动、竖直跟踪滞后。
+规划器爬升（竖直加速度 `az`）所需推力近似为 `hover × (1 + az/g)`。代入 `az=0.8`，相对悬停需要约 **+8%**。例如若某次实测悬停推力已经接近 `0.93`，理想爬升推力约 `1.01`；在 `max_output_thrust=1.0` 时必然饱和。这里的数字只是计算示例，应使用当前机体、电池和载荷实测值。
 
 抗饱和会冻结积分（不乱积），但**变不出物理上没有的推力**。
 > **非对称**：下降/平飞避障不吃余量、很安全；**只有向上爬升段才吃推力**（如越过低矮障碍）。横向倾斜在温和限幅下耗推力可忽略（0.8 m/s² 仅倾 ~5°、推力 +0.3%）——吃余量的是竖直爬升，不是横向。
 
 ### ② 里程计（FAST-LIO）动态退化
-快速平移/偏航 → LIO 退化（运动模糊、特征少、IMU 漂移）。
+真机快速平移/偏航可能让 LIO 退化（运动模糊、特征少、IMU 漂移）；仿真使用 MAVROS odom/TF 适配，不经过 FAST-LIO，因此这一项主要是真机风险。
 - z 估计漂 → 控制器**忠实跟随错误的 z** → 真实高度漂；
-- odom 超 0.1s 不更新 →[calControl 返回 false、不发指令](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L332)→ 瞬时下沉。
+- odom 超过 `odom_timeout`（默认 `0.2 s`）不更新 → [calControl 返回 false、不发指令](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp) → 由 PX4 Offboard failsafe 接管。
 
 **跟踪比悬停更容易触发**，很可能也是早期「某些情况掉高」的一部分。任何控制增益都治不了，只能靠温和运动 + 监控 LIO 健康。
 
@@ -89,7 +87,7 @@
 
 ## 4. 对本配置的风险结论
 
-当前**温和限幅（0.5 / 0.8）+ 电量充足**时，积分器修好悬停后，跟踪应能稳住高度。残余掉高**主要来自**：
+当前公共**温和限幅（0.5 / 0.8）+ 电量充足**时，积分器修好悬停后，跟踪应能稳住高度。真机残余掉高**主要来自**：
 
 1. **电量低 + 爬升段**（推力余量耗尽）——头号；
 2. **里程计动态退化**；
@@ -100,7 +98,7 @@
 
 ## 5. 实操防护清单（按重要性）
 
-1. **守住推力余量**：盯 `rostopic echo /mavros/setpoint_raw/attitude/thrust`。爬升时若贴近 1.0 = 余量见底 → **别把电池飞太空**（悬停油门爬过 ~0.92 就返航）；`hover_percent` 设成真实满电悬停、别人为抬高。
+1. **守住推力余量**：盯 `rostopic echo /mavros/setpoint_raw/attitude/thrust`。爬升时若贴近配置的 `max_output_thrust`，就是余量见底；返航阈值应通过本机电池测试制定。`hover_percent` 设成真实悬停值，不要人为抬高。
 2. **限幅保持温和**：`max_vel=0.5 / max_acc=0.8` 很好；要提速先小步加，并保持 `max_feedforward_acc ≥ max_acc`。
 3. **`ki_pz` 动态再验证**：悬停调好后用真实轨迹复验，振荡就回调一档（见 [ki_pz 整定指南](ki_pz_tuning_guide.md)）。
 4. **渐进放飞**：先给近、平、慢的目标 → 看 thrust 是否顶 1.0、实际 z 是否跟得上期望 z → 再上复杂/带爬升的任务。
@@ -110,13 +108,14 @@
 
 ## 6. 录包定位法（判断是哪一类）
 
-`record.sh` 已录以下话题，飞完拉出来对比：
+`./launch/real.sh` 默认用 `START_ROSBAG=true` 录制控制/估计/规划白名单话题，bag 保存在宿主 `runtime/flight_bags/`。飞完对比：
 
 | 对比 | 看什么 | 指向 |
 |---|---|---|
-| 期望 z（`/desire_odom_pub` 或 `/command/trajectory`） vs 实际 z（`/mavros/local_position/odom`） | 跟踪滞后大小、方向 | ③瞬态 / ④积分过冲 |
-| `/mavros/setpoint_raw/attitude/thrust` | 是否在爬升段顶到 1.0 | ①推力余量 |
-| FAST-LIO odom 频率 / 协方差 / 是否跳变 | 是否退化、掉帧 | ②里程计 |
+| 期望 z（`/desire_odom_pub` 或 `/command/trajectory`） vs 控制反馈 z（`/mavros/local_position/odom`） | 跟踪滞后大小、方向 | ③瞬态 / ④积分过冲 |
+| `/localization/odom` vs `/mavros/local_position/odom` | LIO/vision 回灌与 PX4 EKF 是否一致 | ②定位链路 |
+| `/mavros/setpoint_raw/attitude/thrust` | 是否在爬升段顶到 `max_output_thrust` | ①推力余量 |
+| FAST-LIO `/Odometry` 与公共 odom 的频率、跳变 | 是否退化、掉帧或外参错误 | ②里程计 |
 
 哪条对上，就对应上面哪一类诱因，再按第 5 节对症处理。
 
@@ -124,11 +123,11 @@
 
 ## 7. 参数一致性快速自查
 
-- [ ] `SE3_MAX_OUTPUT_THRUST=1.00`，且真实悬停油门留有余量（爬升不顶 1.0）。
-- [ ] `SE3_HOVER_PERCENT` ≈ 真实满电悬停（别抬高，留爬升余量）。
-- [ ] `SE3_MAX_FEEDFORWARD_ACC ≥ DIFF_PLANNER_MAX_ACC`。
+- [ ] 真机 `max_output_thrust` 与真实悬停油门之间留有余量，爬升不顶上限。
+- [ ] 真机 `hover_percent` ≈ 当前载荷的真实悬停值。
+- [ ] 公共 `max_feedforward_acc ≥ planner.yaml` 的 `max_acc`。
 - [ ] `ki_pz` 已用真实轨迹动态验证、无竖直振荡。
-- [ ] `SE3_ENABLE_THRUST_ESTIMATION=false`（本机架）。
+- [ ] 公共 `enable_thrust_estimation: false`（本机架）。
 - [ ] 规划竖直范围（`virtual_ground~virtual_ceil`）与飞行场景匹配。
 
 ---

@@ -5,6 +5,8 @@
 
 #include "se3_controller/se3_ctrl.h"
 
+#include <cmath>
+
 se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
 {
     cmd_pub_ = nh_.advertise<mavros_msgs::AttitudeTarget>("/mavros/setpoint_raw/attitude", 10);
@@ -33,8 +35,8 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     nh_.param<bool>("enable_thrust_estimation", enable_thrust_estimation_, false);
     nh_.param<bool>("use_acceleration_feedforward", use_acceleration_feedforward_, true);
     nh_.param<bool>("use_yaw_rate_feedforward", use_yaw_rate_feedforward_, true);
-    nh_.param<double>("takeoff_height", takeoff_height_, 2.0);
     nh_.param<double>("max_feedforward_acc", max_feedforward_acc_, 2.0);
+    nh_.param<double>("odom_timeout", odom_timeout_, 0.2);
     nh_.param<double>("hover_percent", hover_percent_, 0.45);
     nh_.param<double>("max_hover_percent", max_hover_percent_, 0.75);
     nh_.param<double>("min_output_thrust", min_output_thrust_, 0.20);
@@ -45,10 +47,14 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     nh_.param<double>("ki_pz", ki_pz_, 0.0);
     nh_.param<double>("int_limit_z", int_limit_z_, 5.0);
 
+    if (!std::isfinite(odom_timeout_) || odom_timeout_ <= 0.0) {
+        ROS_WARN("[se3_controller] Invalid odom_timeout=%.3f; using 0.2 s.", odom_timeout_);
+        odom_timeout_ = 0.2;
+    }
+
     enu_frame_ = true;
     vel_in_body_ = true;
 
-    init_pose_ << 0, 0, 0.5;
     node_state_ = WAITING_FOR_CONNECTED;
 
     kp_p_ << 0.85, 0.85, 1.5;
@@ -70,11 +76,6 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     limit_d_err_v_ = 1.0;
     limit_d_err_a_ = 1.0;
 
-    desired_state_.p(0) = 0.0;
-    desired_state_.p(1) = 0.0;
-    desired_state_.p(2) = takeoff_height_;
-    desired_state_.yaw = 0.0;
-
     ROS_INFO("[se3_controller] thrust params: hover_percent=%.3f max_hover_percent=%.3f min_output_thrust=%.3f max_output_thrust=%.3f",
              hover_percent_, max_hover_percent_, min_output_thrust_, max_output_thrust_);
     ROS_INFO("[se3_controller] enable_thrust_estimation=%s", enable_thrust_estimation_ ? "true" : "false");
@@ -82,6 +83,7 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
              use_acceleration_feedforward_ ? "true" : "false",
              use_yaw_rate_feedforward_ ? "true" : "false",
              max_feedforward_acc_);
+    ROS_INFO("[se3_controller] odometry timeout: %.3f s", odom_timeout_);
 
     se3_controller_.init(hover_percent_, max_hover_percent_, min_output_thrust_, max_output_thrust_, enu_frame_, vel_in_body_);
     se3_controller_.setup(kp_p_, kp_v_, kp_a_, kp_q_, kp_w_,
@@ -105,19 +107,17 @@ void se3Ctrl::execFSMCallback(const ros::TimerEvent &e){
         break;
     }
     case WAITING_FOR_OFFBOARD:{
-        if (has_odom_) {
-            pubLocalPose(odom_data_.p);
-            setDesiredStateToCurrentOdom();
-        } else {
-            pubLocalPose(init_pose_);
+        if (!hasFreshOdom()) {
+            ROS_ERROR_THROTTLE(1.0, "[se3_controller] No fresh odometry; not publishing an OFFBOARD warmup setpoint or requesting OFFBOARD/arm.");
+            break;
         }
+        pubLocalPose(odom_data_.p);
+        setDesiredStateToCurrentOdom();
         trigger_offboard();
         trigger_arm();
         if(currState_.mode == "OFFBOARD" && currState_.armed){
             has_trajectory_after_offboard_ = false;
-            if (has_odom_) {
-                setDesiredStateToCurrentOdom();
-            }
+            setDesiredStateToCurrentOdom();
             ROS_INFO("OFFBOARD entered. Holding current pose until a fresh trajectory is received.");
             node_state_ = MISSION_EXECUTION;
             // last_ = ros::Time::now();
@@ -127,21 +127,22 @@ void se3Ctrl::execFSMCallback(const ros::TimerEvent &e){
     case MISSION_EXECUTION:{
         if(currState_.mode != "OFFBOARD" || !currState_.armed){
             has_trajectory_after_offboard_ = false;
-            if (has_odom_) {
+            if (hasFreshOdom()) {
                 pubLocalPose(odom_data_.p);
                 setDesiredStateToCurrentOdom();
             } else {
-                pubLocalPose(init_pose_);
+                ROS_ERROR_THROTTLE(1.0, "[se3_controller] No fresh odometry; not publishing an OFFBOARD warmup setpoint.");
             }
             return;
         }
 
-        if(fabs(odom_data_.p(2) - takeoff_height_) < 0.02 && !takeoffFlag_){
-            ROS_INFO("takeoff completed");
-            takeoffFlag_ = true;
-        } 
+        if (!hasFreshOdom()) {
+            ROS_ERROR_THROTTLE(1.0, "[se3_controller] Odometry is stale; suppressing attitude/thrust output until localization recovers.");
+            return;
+        }
+
         Controller_Output_t output;
-        if(has_odom_ && has_imu_ && se3_controller_.calControl(odom_data_, imu_data_, desired_state_, output)){
+        if(has_imu_ && se3_controller_.calControl(odom_data_, imu_data_, desired_state_, output, odom_timeout_)){
             send_cmd(output, true);
             desire_odom_pub_.publish(desire_odom_);
             if (enable_thrust_estimation_) {
@@ -162,10 +163,14 @@ void se3Ctrl::execFSMCallback(const ros::TimerEvent &e){
     }
     case LANDED:
         if(!currState_.armed){
-            ROS_INFO("Landed. Please set to position control and disarm.");
-            exec_timer_.stop();
+            has_trajectory_after_offboard_ = false;
+            se3_controller_.resetIntegral();
+            if (hasFreshOdom()) {
+                setDesiredStateToCurrentOdom();
+            }
+            ROS_INFO("Landed and disarmed. SE3 controller is ready for a new takeoff cycle.");
+            node_state_ = WAITING_FOR_OFFBOARD;
         }
-        // ros::spinOnce();
         break;
     default:
         break;
@@ -206,6 +211,11 @@ void se3Ctrl::pubLocalPose(const Eigen::Vector3d &pose)
     local_pos_pub_.publish(msg);
 }
 
+bool se3Ctrl::hasFreshOdom() const
+{
+    return has_odom_ && odom_data_.isFresh(odom_timeout_);
+}
+
 void se3Ctrl::setDesiredStateToCurrentOdom()
 {
     se3_controller_.resetIntegral();
@@ -238,8 +248,14 @@ bool se3Ctrl::landCallback(std_srvs::SetBool::Request &request, std_srvs::SetBoo
 }
 
 void se3Ctrl::OdomCallback(const nav_msgs::Odometry::ConstPtr &msg){
+    const bool recovered_from_stale_odom = has_odom_ && !odom_data_.isFresh(odom_timeout_);
     odom_data_.feed(msg, enu_frame_, vel_in_body_);
     has_odom_ = true;
+    if (recovered_from_stale_odom) {
+        has_trajectory_after_offboard_ = false;
+        setDesiredStateToCurrentOdom();
+        ROS_WARN("[se3_controller] Odometry recovered after a timeout. Holding the recovered pose until a fresh trajectory is received.");
+    }
     bool judge_x = ((odom_data_.p(0) >= geo_fence_[0]) || (odom_data_.p(0) <= -geo_fence_[0]));
     bool judge_y = ((odom_data_.p(1) >= geo_fence_[1]) || (odom_data_.p(1) <= -geo_fence_[1]));
     bool judge_z = (odom_data_.p(2) >= geo_fence_[2]);
@@ -267,6 +283,11 @@ void se3Ctrl::StateCallback(const mavros_msgs::State::ConstPtr &msg){
 }
 
 void se3Ctrl::DesireOdomCallback(const nav_msgs::Odometry::ConstPtr &msg){
+    if (!hasFreshOdom()) {
+        ROS_WARN_THROTTLE(1.0, "[se3_controller] Ignoring desired odometry because localization is unavailable or stale.");
+        return;
+    }
+
     desire_odom_ = *msg;
 
     desired_state_.p(0) = msg->pose.pose.position.x;
@@ -293,6 +314,11 @@ void se3Ctrl::multiDOFJointCallback(const trajectory_msgs::MultiDOFJointTrajecto
 {
     if (currState_.mode != "OFFBOARD" || !currState_.armed) {
         ROS_WARN_THROTTLE(1.0, "[se3_controller] Ignoring trajectory until vehicle is armed and in OFFBOARD.");
+        return;
+    }
+
+    if (!hasFreshOdom()) {
+        ROS_WARN_THROTTLE(1.0, "[se3_controller] Ignoring trajectory because localization is unavailable or stale.");
         return;
     }
 

@@ -24,6 +24,13 @@ struct Odom_Data_t{
 	Odom_Data_t(){
 		recv_new_msg = false;
 	}
+	bool isFresh(double timeout_sec = 0.2) const {
+		if (!recv_new_msg || rcv_stamp.isZero()) {
+			return false;
+		}
+		const double age = (ros::Time::now() - rcv_stamp).toSec();
+		return age >= 0.0 && age <= timeout_sec;
+	}
 	void feed(nav_msgs::OdometryConstPtr pMsg, bool enu_frame, bool vel_in_body){
 		msg = *pMsg;
 		rcv_stamp = ros::Time::now();
@@ -328,8 +335,9 @@ public:
 		limit_d_err_a_ = limit_d_err_a;
 	}
 
-	bool calControl(Odom_Data_t odom_data, Imu_Data_t imu_data, Desired_State_t desired_state, Controller_Output_t &output){
-		if((ros::Time::now() - odom_data.rcv_stamp).toSec() > 0.1){
+	bool calControl(Odom_Data_t odom_data, Imu_Data_t imu_data, Desired_State_t desired_state,
+					Controller_Output_t &output, double odom_timeout_sec = 0.2){
+		if(!odom_data.isFresh(odom_timeout_sec)){
 			// std::cout << "odom not rcv" << std::endl;
 			return false;
 		}

@@ -1,0 +1,245 @@
+Panels:
+  - Class: rviz/Displays
+    Help Height: 70
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Sensors1
+        - /Mapping1
+        - /Planning1
+      Splitter Ratio: 0.5
+    Tree Height: 620
+  - Class: rviz/Selection
+    Name: Selection
+  - Class: rviz/Tool Properties
+    Expanded:
+      - /2D Nav Goal1
+    Name: Tool Properties
+    Splitter Ratio: 0.58
+  - Class: rviz/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.45
+      Cell Size: 0.5
+      Class: rviz/Grid
+      Color: 120; 125; 130
+      Enabled: true
+      Line Style:
+        Line Width: 0.02
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 40
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz/Group
+      Displays:
+        - Alpha: 0.9
+          Autocompute Intensity Bounds: true
+          Autocompute Value Bounds:
+            Max Value: 3
+            Min Value: 0
+            Value: true
+          Axis: Z
+          Channel Name: intensity
+          Class: rviz/PointCloud2
+          Color: 120; 200; 255
+          Color Transformer: AxisColor
+          Decay Time: 0.8
+          Enabled: true
+          Invert Rainbow: false
+          Max Color: 255; 80; 60
+          Min Color: 60; 150; 255
+          Name: Registered cloud
+          Position Transformer: XYZ
+          Queue Size: 12
+          Selectable: false
+          Size (Pixels): 2
+          Size (m): 0.025
+          Style: Points
+          Topic: /localization/cloud_registered
+          Unreliable: false
+          Use Fixed Frame: true
+          Use rainbow: true
+          Value: true
+        - Angle Tolerance: 0.1
+          Class: rviz/Odometry
+          Covariance:
+            Orientation:
+              Alpha: 0.5
+              Color: 255; 255; 127
+              Scale: 1
+              Value: false
+            Position:
+              Alpha: 0.3
+              Color: 204; 51; 204
+              Scale: 1
+              Value: false
+            Value: false
+          Enabled: true
+          Keep: 100
+          Name: Vehicle odometry
+          Position Tolerance: 0.05
+          Shape:
+            Alpha: 1
+            Axes Length: 0.35
+            Axes Radius: 0.035
+            Color: 255; 255; 255
+            Head Length: 0.25
+            Head Radius: 0.08
+            Shaft Length: 0.8
+            Shaft Radius: 0.04
+            Value: Axes
+          Topic: /localization/odom
+          Unreliable: false
+          Value: true
+      Enabled: true
+      Name: Sensors
+    - Class: rviz/Group
+      Displays:
+        - Alpha: 0.7
+          Class: rviz/PointCloud2
+          Color: 255; 205; 70
+          Color Transformer: FlatColor
+          Decay Time: 0
+          Enabled: true
+          Name: Occupancy
+          Position Transformer: XYZ
+          Queue Size: 5
+          Selectable: false
+          Size (Pixels): 2
+          Size (m): 0.12
+          Style: Boxes
+          Topic: /drone_0_diff_planner_node/grid_map/occupancy
+          Unreliable: false
+          Use Fixed Frame: true
+          Value: true
+        - Alpha: 0.28
+          Autocompute Value Bounds:
+            Max Value: 3
+            Min Value: 0
+            Value: false
+          Axis: Z
+          Channel Name: intensity
+          Class: rviz/PointCloud2
+          Color: 80; 190; 220
+          Color Transformer: AxisColor
+          Decay Time: 0
+          Enabled: true
+          Invert Rainbow: false
+          Max Color: 255; 175; 55
+          Min Color: 55; 170; 220
+          Name: Inflated occupancy
+          Position Transformer: XYZ
+          Queue Size: 5
+          Selectable: false
+          Size (Pixels): 2
+          Size (m): 0.15
+          Style: Boxes
+          Topic: /drone_0_diff_planner_node/grid_map/occupancy_inflate
+          Unreliable: false
+          Use Fixed Frame: true
+          Use rainbow: false
+          Value: true
+      Enabled: true
+      Name: Mapping
+    - Class: rviz/Group
+      Displays:
+        - Class: rviz/Marker
+          Enabled: true
+          Marker Topic: /drone_0_diff_planner_node/goal_point
+          Name: Goal
+          Namespaces:
+            {}
+          Queue Size: 10
+          Value: true
+        - Class: rviz/Marker
+          Enabled: true
+          Marker Topic: /drone_0_diff_planner_node/global_list
+          Name: Initial path
+          Namespaces:
+            {}
+          Queue Size: 20
+          Value: true
+        - Class: rviz/Marker
+          Enabled: true
+          Marker Topic: /drone_0_diff_planner_node/optimal_list
+          Name: Optimized trajectory
+          Namespaces:
+            {}
+          Queue Size: 20
+          Value: true
+        - Class: rviz/Marker
+          Enabled: false
+          Marker Topic: /drone_0_diff_planner_node/a_star_list
+          Name: A-star search
+          Namespaces:
+            {}
+          Queue Size: 20
+          Value: false
+      Enabled: true
+      Name: Planning
+  Enabled: true
+  Global Options:
+    Background Color: 24; 27; 31
+    Default Light: true
+    Fixed Frame: world
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz/Interact
+      Hide Inactive Objects: true
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+    - Class: rviz/FocusCamera
+    - Class: rviz/Measure
+    - Class: rviz/SetGoal
+      Topic: /sim2real/rviz_goal
+  Value: true
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 7
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0.5
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 0.62
+      Target Frame: base_link
+      Yaw: 0.78
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Selection:
+    collapsed: false
+  Tool Properties:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1440
+  X: 40
+  Y: 40

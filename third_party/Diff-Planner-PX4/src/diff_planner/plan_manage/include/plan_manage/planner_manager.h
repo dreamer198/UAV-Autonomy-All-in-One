@@ -42,7 +42,7 @@ namespace diff_planner
         const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel,
         const Eigen::Vector3d &start_acc, const std::vector<Eigen::Vector3d> &waypoints,
         const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc);
-    void getLocalTarget(
+    bool getLocalTarget(
         const double planning_horizen,
         const Eigen::Vector3d &start_pt, const Eigen::Vector3d &global_end_pt,
         Eigen::Vector3d &local_target_pos, Eigen::Vector3d &local_target_vel,

@@ -90,9 +90,6 @@
         <remap from="~planning/trajectory" to="drone_$(arg drone_id)_planning/trajectory"/>
         <param name="traj_server/time_forward" value="1.0" type="double"/>
     </node>
-        <!-- monitor_node
-    <node pkg="diff_planner" name="drone_$(arg drone_id)_monitor_node" type="monitor_node" output="screen">
-    </node> -->
     <!-- use simulator -->
     <!-- <include file="$(find diff_planner)/launch/include/simulator.xml">
         <arg name="drone_id" value="$(arg drone_id)"/>
@@ -120,4 +117,3 @@
         <arg name="cmd_topic" value="$(arg cmd_topic)"/>
     </include>
 </launch>
-    

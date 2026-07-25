@@ -1,5 +1,7 @@
 #include "plan_env/grid_map.h"
 
+#include <cmath>
+
 void GridMap::initMap(ros::NodeHandle &nh)
 {
   node_ = nh;
@@ -39,7 +41,15 @@ void GridMap::initMap(ros::NodeHandle &nh)
   node_.param("grid_map/fading_time", mp_.fading_time_, 1000.0);
   node_.param("grid_map/min_ray_length", mp_.min_ray_length_, 0.1);
 
+  node_.param("grid_map/visualize_all_directions", mp_.visualize_all_directions_, false);
   node_.param("grid_map/show_occ_time", mp_.show_occ_time_, false);
+  double visualization_period = 0.125;
+  node_.param("grid_map/visualization_period", visualization_period, visualization_period);
+  if (!std::isfinite(visualization_period) || visualization_period <= 0.0)
+  {
+    ROS_WARN("grid_map/visualization_period must be finite and positive; using 0.125 s.");
+    visualization_period = 0.125;
+  }
 
   mp_.inf_grid_ = ceil((mp_.obstacles_inflation_ - 1e-5) / mp_.resolution_);
   if (mp_.inf_grid_ > 4)
@@ -122,7 +132,10 @@ void GridMap::initMap(ros::NodeHandle &nh)
       node_.subscribe<sensor_msgs::PointCloud2>("grid_map/cloud", 10, &GridMap::cloudCallback, this);
 
   occ_timer_ = node_.createTimer(ros::Duration(0.032), &GridMap::updateOccupancyCallback, this);
-  vis_timer_ = node_.createTimer(ros::Duration(0.125), &GridMap::visCallback, this);
+  // Visualization clouds are not used by collision checking or planning. Keep
+  // their publication rate configurable so rosbag/RViz subscribers cannot
+  // impose an unnecessarily high serialization load on the planner callback.
+  vis_timer_ = node_.createTimer(ros::Duration(visualization_period), &GridMap::visCallback, this);
   if (mp_.fading_time_ > 0)
     fading_timer_ = node_.createTimer(ros::Duration(0.5), &GridMap::fadingCallback, this);
 
@@ -135,6 +148,7 @@ void GridMap::initMap(ros::NodeHandle &nh)
   md_.last_occ_update_time_.fromSec(0);
 
   md_.flag_have_ever_received_depth_ = false;
+  md_.flag_have_ever_received_cloud_ = false;
   md_.flag_depth_odom_timeout_ = false;
 }
 
@@ -364,6 +378,10 @@ void GridMap::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &msg)
   raycastFromCloud();// TODO by glq        
   clearAndInflateLocalMap(); 
   md_.occ_need_update_ = true; 
+  // Point-cloud deployments do not execute the depth-image callbacks above.
+  // Track their sensor stream separately so the existing Planner timeout also
+  // trips when a MID360/Ethernet outage stops cloud delivery.
+  md_.flag_have_ever_received_cloud_ = true;
 }
 
 void GridMap::extrinsicCallback(const nav_msgs::OdometryConstPtr &odom)
@@ -880,9 +898,12 @@ bool GridMap::checkDepthOdomNeedupdate()
   }
   if (!md_.occ_need_update_)
   {
-    if (md_.flag_have_ever_received_depth_ && (ros::Time::now() - md_.last_occ_update_time_).toSec() > mp_.odom_depth_timeout_)
+    const bool have_ever_received_sensor =
+        md_.flag_have_ever_received_depth_ || md_.flag_have_ever_received_cloud_;
+    if (have_ever_received_sensor &&
+        (ros::Time::now() - md_.last_occ_update_time_).toSec() > mp_.odom_depth_timeout_)
     {
-      ROS_ERROR("odom or depth lost! ros::Time::now()=%f, md_.last_occ_update_time_=%f, mp_.odom_depth_timeout_=%f",
+      ROS_ERROR("odometry or obstacle sensor lost! ros::Time::now()=%f, md_.last_occ_update_time_=%f, mp_.odom_depth_timeout_=%f",
                 ros::Time::now().toSec(), md_.last_occ_update_time_.toSec(), mp_.odom_depth_timeout_);
       md_.flag_depth_odom_timeout_ = true;
     }
@@ -909,7 +930,7 @@ void GridMap::publishMap()
         for (double zd = lbz + mp_.resolution_ / 2; zd <= ubz; zd += mp_.resolution_)
         {
           Eigen::Vector3d relative_dir = (Eigen::Vector3d(xd, yd, zd) - md_.camera_pos_);
-          if (heading.dot(relative_dir.normalized()) > 0.5)
+          if (mp_.visualize_all_directions_ || heading.dot(relative_dir.normalized()) > 0.5)
           {
             if (md_.occupancy_buffer_[globalIdx2BufIdx(pos2GlobalIdx(Eigen::Vector3d(xd, yd, zd)))] >= mp_.min_occupancy_log_)
               cloud.push_back(pcl::PointXYZ(xd, yd, zd));
@@ -943,7 +964,7 @@ void GridMap::publishMapInflate()
         for (double zd = lbz + mp_.resolution_ / 2; zd < ubz; zd += mp_.resolution_)
         {
           Eigen::Vector3d relative_dir = (Eigen::Vector3d(xd, yd, zd) - md_.camera_pos_);
-          if (heading.dot(relative_dir.normalized()) > 0.5)
+          if (mp_.visualize_all_directions_ || heading.dot(relative_dir.normalized()) > 0.5)
           {
             if (md_.occupancy_buffer_inflate_[globalIdx2InfBufIdx(pos2GlobalIdx(Eigen::Vector3d(xd, yd, zd)))])
               cloud.push_back(pcl::PointXYZ(xd, yd, zd));

@@ -1,0 +1,18 @@
+<launch>
+  <arg name="drone_id" default="0"/>
+  <arg name="command_topic" default="/drone_$(arg drone_id)_planning/pos_cmd"/>
+  <arg name="poly_traj_topic" default="/drone_$(arg drone_id)_planning/trajectory"/>
+  <arg name="output_topic" default="/command/trajectory"/>
+  <arg name="require_offboard" default="true"/>
+  <!-- Manual RC takeover must invalidate the previous mission. Re-entering
+       OFFBOARD therefore requires a newly published goal. -->
+  <arg name="replay_cached_goal_on_offboard" default="false"/>
+
+  <node pkg="diff_planner" name="trajectory_msg_converter" type="trajectory_msg_converter.py" output="screen">
+    <param name="traj_topic" value="$(arg command_topic)"/>
+    <param name="poly_traj_topic" value="$(arg poly_traj_topic)"/>
+    <param name="traj_pub_topic" value="$(arg output_topic)"/>
+    <param name="require_offboard" value="$(arg require_offboard)"/>
+    <param name="replay_cached_goal_on_offboard" value="$(arg replay_cached_goal_on_offboard)"/>
+  </node>
+</launch>

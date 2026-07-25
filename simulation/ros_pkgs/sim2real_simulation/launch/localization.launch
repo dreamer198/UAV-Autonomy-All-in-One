@@ -1,0 +1,42 @@
+<launch>
+  <arg name="input_odom_topic" default="/mavros/local_position/odom"/>
+  <arg name="input_cloud_topic" default="/livox/lidar"/>
+  <arg name="odom_topic" default="/localization/odom"/>
+  <arg name="cloud_topic" default="/localization/cloud_registered"/>
+  <arg name="world_frame" default="world"/>
+  <arg name="base_frame" default="base_link"/>
+  <arg name="lidar_frame" default="livox_link"/>
+  <arg name="cloud_filter_enable" default="false"/>
+  <arg name="cloud_voxel_leaf_size" default="0.08"/>
+  <arg name="cloud_max_points" default="80000"/>
+  <arg name="cloud_min_range" default="0.2"/>
+  <arg name="cloud_max_range" default="50.0"/>
+
+  <node pkg="sim2real_simulation" type="sim_odometry_adapter.py" name="sim_odometry_adapter" output="screen">
+    <param name="input_topic" value="$(arg input_odom_topic)"/>
+    <param name="output_topic" value="$(arg odom_topic)"/>
+    <param name="frame_id" value="$(arg world_frame)"/>
+    <param name="child_frame_id" value="$(arg base_frame)"/>
+    <param name="publish_tf" value="true"/>
+  </node>
+
+  <!-- Matches the iris_mid360 SDF mount. static_transform_publisher uses
+       x y z yaw pitch roll parent child period_ms. -->
+  <node pkg="tf" type="static_transform_publisher" name="sim_lidar_mount_tf"
+        args="0.07 0 0.072 0 0.3925 0 $(arg base_frame) $(arg lidar_frame) 50"/>
+
+  <node pkg="sim2real_simulation" type="pointcloud_to_world.py" name="sim_pointcloud_adapter" output="screen">
+    <param name="source_topic" value="$(arg input_cloud_topic)"/>
+    <param name="output_topic" value="$(arg cloud_topic)"/>
+    <param name="source_frame" value="$(arg lidar_frame)"/>
+    <param name="target_frame" value="$(arg world_frame)"/>
+    <param name="lookup_timeout" value="0.1"/>
+    <param name="use_latest_on_extrapolation" value="true"/>
+    <param name="cloud_timeout" value="1.0"/>
+    <param name="filter_enable" value="$(arg cloud_filter_enable)"/>
+    <param name="voxel_leaf_size" value="$(arg cloud_voxel_leaf_size)"/>
+    <param name="max_points" value="$(arg cloud_max_points)"/>
+    <param name="min_range" value="$(arg cloud_min_range)"/>
+    <param name="max_range" value="$(arg cloud_max_range)"/>
+  </node>
+</launch>

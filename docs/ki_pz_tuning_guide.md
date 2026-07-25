@@ -2,7 +2,7 @@
 
 > 这是一份**照着做**的操作指南，目标：在真机上找到一个合适的 `ki_pz`，让无人机在 OFFBOARD 下**不再随电池电压下降/载荷变化而缓慢掉高**。
 >
-> 原理（为什么要积分项、它如何消除稳态高度误差）见 [se3_controller.md §8.7](se3_controller.md#87-竖直积分项可选默认关闭) 以及 §8.1–§8.2 的位置/速度环说明。本文只讲**怎么调**。
+> 原理（为什么要积分项、它如何消除稳态高度误差）见 [se3_controller.md §8.7](se3_controller.md#87-竖直积分项可配置) 以及 §8.1–§8.2 的位置/速度环说明。本文只讲**怎么调**。
 
 ---
 
@@ -41,15 +41,15 @@
 - [ ] **低空测试**：1.5–2 m，给「初始小坑」留余量。
 - [ ] **手全程放在遥控器上**，随时可切回定点接管。
 - [ ] 用**和实飞相同的载荷/电池配置**整定（悬停油门跟重量强相关）。
-- [ ] 在线推力估计保持关闭：`SE3_ENABLE_THRUST_ESTIMATION=false`（本机架振动会让它发散）。
-- [ ] 在真实 `SE3_HOVER_PERCENT` 下确认 `ki_pz=0` 时基础悬停本身不发散（先无回归，再加积分；测试时再临时压低 `hover_percent` 造缺口）。
+- [ ] 在线推力估计保持关闭：公共 [controller.yaml](../common/config/controller.yaml) 中 `enable_thrust_estimation: false`（本机架振动会让它发散）。
+- [ ] 在真实 `hover_percent` 下确认 `ki_pz=0` 时基础悬停本身不发散（先无回归，再加积分；测试时再临时压低 `hover_percent` 造缺口）。
 - [ ] 积分项代码已编译进容器（见 [se3_controller.md](se3_controller.md) 部署说明）。
 
 ---
 
 ## 2. 测试原理：人为造缺口 + 用「切 OFFBOARD」当阶跃扰动
 
-1. **故意把 `SE3_HOVER_PERCENT` 设低一点**（比真实悬停油门低 0.05–0.10）。这样基准推力不足，缺口当场存在，不用等几分钟电池沉。
+1. **故意把真机 YAML 的 `hover_percent` 设低一点**（比真实悬停油门低 0.05–0.10）。这样基准推力不足，缺口当场存在，不用等几分钟电池沉。
 2. 用遥控器**从定点(Position)切到 OFFBOARD**。控制器接管的瞬间会「保持当前高度」，但基准不够 → 先往下掉一点 → 看积分器能否把它拉回**切那一刻的高度**并稳住。
 3. **关键设计**：积分器在**每次进 OFFBOARD 时会自动清零**（`resetIntegral()`）。所以：
    - 每次切都从积分=0 开始攒，**每次测试公平、可复现**；
@@ -63,16 +63,22 @@
 
 ### 3.1 启动（不跑规划器、压低 hover_percent 造缺口）
 
-在 Jetson 宿主执行（真实悬停 ~0.90 时，先压到 0.80）：
+先记录 [deployment/config/controller.yaml](../deployment/config/controller.yaml) 中已经实测的 `hover_percent`，只在本次整定期间把它临时降低 `0.05–0.10`。例如真实值为 `0.50` 时可先试 `0.43–0.45`；不要照抄历史机体的数值。
+
+真机 controller YAML 以只读 bind mount 进入容器，修改宿主文件后不需要重建镜像。然后在 Jetson 宿主执行：
 
 ```bash
-FCU_URL='serial:///dev/ttyACM0:57600' GCS_URL='udp://:14550@10.0.30.196:14550' \
-START_DIFF_PLANNER=false START_SE3_CONTROLLER=true \
-SE3_HOVER_PERCENT=0.80 \
-./scripts/start_real_px4_mid360_fastlio.sh start
+FCU_URL='/dev/ttyACM0:921600' \
+GCS_URL='udp://:14555@172.20.10.3:14550' \
+ROS_IP=172.20.10.5 \
+MAVROS_TGT_SYSTEM=5 \
+START_DIFF_PLANNER=false \
+START_TRAJ_CONVERTER=false \
+START_SE3_CONTROLLER=true \
+./launch/real.sh start
 ```
 
-### 3.2 打开监视与调参（另开终端，进容器 `./docker/docker_run_real.sh shell`）
+### 3.2 打开监视与调参（另开终端，进容器 `./launch/real_container.sh shell`）
 
 ```bash
 # 实时看下发油门：越界/饱和、是否在补偿
@@ -123,23 +129,19 @@ rostopic echo -n1 /mavros/local_position/odom/pose/pose/position/z
 
 ## 5. 常见陷阱
 
-1. **缺口造得太大**：`hover_percent` 压太低 → 初始坑很深很吓人，且回升时油门顶到 `max_output=1.0` **饱和**，抗饱和逻辑会**冻结积分**，你会看到「怎么加 ki 都恢复不动」的假象。→ 只压 0.05–0.10，并留足高度。
+1. **缺口造得太大**：`hover_percent` 压太低 → 初始坑很深，且回升时油门顶到真机 `max_output_thrust` **饱和**，抗饱和逻辑会冻结积分，形成“怎么加 ki 都恢复不动”的假象。只压 0.05–0.10，并留足高度。
 2. **把油门饱和当成 ki 不够**：先看 `thrust` 是否贴在 1.0。贴住=饱和受限，不是 ki 的问题。
 3. **没回到原高就收手**：见第 4 节，要等它真正回到切换高度，别被「极慢回升」骗了。
-4. **改了别的增益**：只动 `ki_pz`，`Kp_*` / `int_limit_z` 保持当前启动脚本和控制器配置（`int_limit_z=5.0` 给得很宽，正常不用动）。
+4. **改了别的增益**：只动 `ki_pz`，`Kp_*` / `int_limit_z` 保持当前源码和车辆 YAML 配置（`int_limit_z=5.0` 给得很宽，正常不用动）。
 5. **载荷/电池和实飞不一致**：换了配置悬停油门就变，整定要在实飞条件下做。
 
 ---
 
 ## 6. 固化（调好之后）
 
-1. 把 `SE3_HOVER_PERCENT` **调回真实悬停油门**（如 ~0.90）——测试时压低只为造缺口，实飞要让基准贴近真实、让积分只兜电压漂移那一小部分。
-2. 把整定好的值写进启动脚本默认：
-   ```bash
-   SE3_KI_PZ="${SE3_KI_PZ:-0.30}"   # 0.30 换成你测出来的值
-   ```
-   见 [scripts/start_real_px4_mid360_fastlio.sh](../scripts/start_real_px4_mid360_fastlio.sh)。
-3. **持久化到镜像**：容器内的增量编译在 `docker_run_real.sh run/restart` 后会丢失。最终用 `./docker/docker_run_real.sh build` 重建镜像固化（Jetson 上较慢，整定完再做）。
+1. 把 `hover_percent` **调回真实悬停油门**——测试时压低只为造缺口，实飞要让基准贴近真实、让积分只兜电压漂移那一小部分。
+2. 把整定好的 `ki_pz` 写入 [deployment/config/controller.yaml](../deployment/config/controller.yaml)，例如 `ki_pz: 0.30`。
+3. 重新执行 `./launch/real.sh restart`，再用 `rosparam get /se3_controller_node/ki_pz` 核对生效值。该 YAML 由宿主 bind mount，参数变更不要求重建镜像；只有修改控制器源码或镜像内容时才执行 `./launch/real_container.sh build` 并重建容器。
 
 ---
 

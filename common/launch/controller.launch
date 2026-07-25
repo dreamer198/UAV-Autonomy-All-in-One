@@ -1,0 +1,9 @@
+<launch>
+  <arg name="common_config" default="$(find sim2real_common)/config/controller.yaml"/>
+  <arg name="vehicle_config"/>
+
+  <node pkg="se3_controller" name="se3_controller_node" type="se3_controller_node" output="screen">
+    <rosparam command="load" file="$(arg common_config)"/>
+    <rosparam command="load" file="$(arg vehicle_config)"/>
+  </node>
+</launch>

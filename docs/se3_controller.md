@@ -8,7 +8,9 @@
 > - 控制律内核：[se3_controller.hpp](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp)
 > - 数学工具：[utils.hpp](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/utils.hpp)
 > - 入口：[se3_controller_node.cpp](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_controller_node.cpp)
-> - 部署参数：[scripts/start_real_px4_mid360_fastlio.sh](../scripts/start_real_px4_mid360_fastlio.sh)
+> - 公共参数：[common controller.yaml](../common/config/controller.yaml)
+> - 车辆标定：[真机 controller.yaml](../deployment/config/controller.yaml)、[仿真 controller.yaml](../simulation/config/controller.yaml)
+> - 启动入口：[launch/real.sh](../launch/real.sh)、[launch/sim.sh](../launch/sim.sh)
 
 ---
 
@@ -36,9 +38,9 @@
 
 先记住四件事：
 
-1. 真机上**不会自动 OFFBOARD、不会自动解锁**，飞手切入后控制器才接管。
+1. 真机 SE3 节点本身**不会自动 OFFBOARD、不会自动解锁**；仓库级 `real.sh arm` 共享执行器使用 PX4 原生 `AUTO.TAKEOFF` 解锁起飞，达到实际高度后请求 OFFBOARD，控制器随即接管并由执行器验证输出。
 2. 真正生效的主链路是**位置/速度反馈 + 加速度前馈 → 姿态/油门**；当前代码里的 `Kd_*` 实际不生效。
-3. `hover_percent` 决定基础推力标定；本真机启动脚本默认用 `0.90`，不要被 C++ fallback 的 `0.45` 误导。
+3. `hover_percent` 决定基础推力标定；当前真机 YAML 为 `0.50`，但它只对完成过该标定的机体有效，不要被 C++ fallback 或仿真值误导。
 4. 实际发给 PX4 的是**姿态 + 油门**；`bodyrates` 虽然算了但被 `type_mask` 忽略，因此 jerk/yaw-rate/Kp_q/Kp_a 这些只进入角速率字段的量，不要按「已被 PX4 执行」来理解。
 
 ---
@@ -66,11 +68,11 @@
 
 ## 1. 文档目的与适用范围
 
-SE3 控制器（`se3_controller_node`）是本部署链路里**「轨迹 → 姿态+油门」的最后一环**：它把 Diff-Planner 规划出的期望轨迹点，结合 FAST-LIO 的实时里程计与 IMU，换算成 PX4 飞控能直接执行的**姿态四元数 + 归一化油门**，通过 MAVROS 以 100 Hz 发送。
+SE3 控制器（`se3_controller_node`）是本部署链路里**「轨迹 → 姿态+油门」的最后一环**：它把 Diff-Planner 规划出的期望轨迹点，结合 MAVROS 输出的实时里程计与 IMU，换算成 PX4 飞控能直接执行的**姿态四元数 + 归一化油门**，通过 MAVROS 以 100 Hz 发送。真机的 MAVROS 状态受 FAST-LIO vision pose 回灌影响；仿真则来自 PX4 SITL，但控制器接口相同。
 
 本文覆盖：节点架构、状态机、控制律数学、推力模型、坐标系约定、参数含义、调参与排障。
 
-本文**不**覆盖：FAST-LIO 内部原理、Diff-Planner 轨迹优化算法、PX4 固件内部姿态/角速率环（这些在 PX4 侧，本控制器只向其发送姿态设定值）。
+本文**不**覆盖：仿真/真机定位适配、FAST-LIO 内部原理、Diff-Planner 轨迹优化算法、PX4 固件内部姿态/角速率环（这些在 PX4 侧，本控制器只向其发送姿态设定值）。
 
 ---
 
@@ -81,20 +83,15 @@ SE3 控制器（`se3_controller_node`）是本部署链路里**「轨迹 → 姿
 ### 在整条链路中的位置
 
 ```text
- Livox MID-360            ┌──────────────┐
-   点云 + IMU  ──────────►│   FAST-LIO   │  里程计
-                          └──────┬───────┘
-                                 │ /Odometry → odom_to_base.py → /Odometry_base
-                                 ▼
-                     ┌────────────────────────┐
-                     │   MAVROS  (vision pose) │ ──► PX4 EKF 融合
-                     └───────────┬─────────────┘
-                                 │ /mavros/local_position/odom  (位姿+速度)
-                                 │ /mavros/imu/data             (实测加速度/姿态)
-   ┌──────────────┐              ▼
+ 真机 FAST-LIO ─> /localization/odom ─> MAVROS vision pose ─> PX4 EKF ─┐
+ 仿真 PX4 SITL odom ──────────────────────────────────────────────────┤
+                                                                    │
+                    /mavros/local_position/odom（位姿+速度）          │
+                    /mavros/imu/data（实测加速度/姿态）               ▼
+   ┌──────────────┐
    │ Diff-Planner │  /drone_0_planning/pos_cmd
-   │  局部规划器  │ ──► trajectory_msg_converter.py ──► /command/trajectory
-   └──────────────┘              │  (期望 位置/速度/加速度/偏航)
+   │  公共规划器  │ ──► trajectory_msg_converter.py ──► /command/trajectory
+   └──────────────┘              │（期望位置/速度/加速度/偏航）
                                  ▼
                      ┌────────────────────────┐
                      │      SE3 控制器         │   ← 本文主角
@@ -109,8 +106,7 @@ SE3 控制器（`se3_controller_node`）是本部署链路里**「轨迹 → 姿
 
 一句话概括：**规划器只说「下一刻该到哪、速度多少」，PX4 只吃「姿态 + 油门」，SE3 控制器是中间的翻译器**——把期望状态与实测状态做差，算出这一拍该给的姿态和油门。
 
-> 部署链路里规划器输出的是 `pos_cmd`，由 `trajectory_msg_converter.py` 转成控制器订阅的 `/command/trajectory`（`trajectory_msgs/MultiDOFJointTrajectory`）。详见
-> [scripts/start_real_px4_mid360_fastlio.sh:35-38](../scripts/start_real_px4_mid360_fastlio.sh#L35-L38)。
+> 两端都由 [trajectory_converter.launch](../common/launch/trajectory_converter.launch) 启动 `trajectory_msg_converter.py`，把 Planner 的 `pos_cmd` 转成控制器订阅的 `/command/trajectory`（`trajectory_msgs/MultiDOFJointTrajectory`）。
 
 ---
 
@@ -142,7 +138,7 @@ SE3 控制器（`se3_controller_node`）是本部署链路里**「轨迹 → 姿
 |---|---|---|
 | `/land` (`std_srvs/SetBool`) | server | 外部触发降落，转入 `LANDING` 状态 |
 | `/mavros/set_mode` | client | 切换 PX4 飞行模式（如 `AUTO.LAND`） |
-| `/mavros/cmd/arming` | client | 解锁（仅在仿真自动解锁时使用） |
+| `/mavros/cmd/arming` | client | SE3 自动解锁功能的客户端；本项目两端默认关闭该节点功能，仿真由外部 `sim.sh arm` 调用服务 |
 
 ### 执行定时器
 
@@ -166,7 +162,7 @@ SE3 控制器（`se3_controller_node`）是本部署链路里**「轨迹 → 姿
 | `v` | 速度（经 `feed()` 处理后为世界系，见第 5 节） |
 | `q` | 姿态四元数 |
 | `w` | 机体角速度 |
-| `rcv_stamp` | 接收时间戳，用于 0.1 s 数据陈旧检测 |
+| `rcv_stamp` | 接收时间戳，用于按 `odom_timeout` 判断数据是否陈旧 |
 
 `feed()` 把 `nav_msgs/Odometry` 解析进来，并按 `enu_frame`/`vel_in_body` 做坐标变换。
 
@@ -211,7 +207,7 @@ vel_in_body_ = true;  // odom 的速度是机体系，需要旋到世界系
 ```
 
 ### `vel_in_body_ = true`
-FAST-LIO / MAVROS 发布的 odom `twist`（速度）通常表达在**机体系**。`feed()` 在
+MAVROS 发布的 odom `twist`（速度）在本控制器约定中表达在**机体系**。`feed()` 在
 [se3_controller.hpp:61-62](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L61-L62) 用 `v = q.toRotationMatrix() * v` 把它旋到世界系，保证后续位置/速度环都在同一个世界系下做差。头文件顶部还有对应的 `#define VEL_IN_BODY`（[se3_controller.hpp:10](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L10)）。
 
 ### `enu_frame_ = true`：`R_mid` 变换默认关闭
@@ -258,8 +254,9 @@ enum FlightState { WAITING_FOR_CONNECTED, WAITING_FOR_OFFBOARD,
  └──────────┬───────────┘
             │ connected == true
             ▼
- ┌──────────────────────┐   每拍发布当前位置 setpoint，维持 PX4 setpoint 流
- │ WAITING_FOR_OFFBOARD  │   真机：等待飞手用遥控器切 OFFBOARD + 解锁
+ ┌──────────────────────┐   定位新鲜时发布当前位置 setpoint，维持 PX4 setpoint 流
+ │ WAITING_FOR_OFFBOARD  │   原生起飞期间持续发布当前位置预热 setpoint
+ │                       │   仿真：脚本自动切 OFFBOARD；真机：等待飞手切换
  └──────────┬───────────┘
             │ mode == "OFFBOARD" && armed
             │ → 锁定当前位姿为期望，等待新轨迹
@@ -269,9 +266,10 @@ enum FlightState { WAITING_FOR_CONNECTED, WAITING_FOR_OFFBOARD,
  └──────────┬───────────┘
             │ /land 服务触发
             ▼
- ┌──────────┐    切 AUTO.LAND     ┌────────┐  disarm 后停止定时器
- │ LANDING  │ ──────────────────► │ LANDED │
- └──────────┘                     └────────┘
+ ┌──────────┐    切 AUTO.LAND     ┌────────┐  disarm 后复位
+ │ LANDING  │ ──────────────────► │ LANDED │ ────────────────┐
+ └──────────┘                     └────────┘                 │
+        ┌──────────── WAITING_FOR_OFFBOARD ◄─────────────────┘
 ```
 
 ### `WAITING_FOR_CONNECTED`
@@ -279,17 +277,18 @@ enum FlightState { WAITING_FOR_CONNECTED, WAITING_FOR_OFFBOARD,
 
 ### `WAITING_FOR_OFFBOARD`
 [se3_ctrl.cpp:104-122](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L104-L122)：
-- 每拍发布一个位置 setpoint 到 `/mavros/setpoint_position/local`——有里程计就发当前位姿，否则发 `init_pose_ = [0,0,0.5]`。**这是为了满足 PX4「进 OFFBOARD 前必须有持续 setpoint 流」的要求。**
+- 只有 `/mavros/local_position/odom` 已收到且接收时间不超过 `odom_timeout`（默认 `0.2 s`）时，才把当前位姿发布到 `/mavros/setpoint_position/local`，以满足 PX4 进入 OFFBOARD 前需要持续 setpoint 流的要求。
+- 没有定位或定位超时时，控制器不发布虚构位置，也不自动请求 OFFBOARD/解锁；仿真的 `sim.sh arm` 会因检测不到持续 setpoint 流而拒绝继续。
 - 调用 `trigger_offboard()` / `trigger_arm()`（见下方「真机 vs 仿真」）。
 - 一旦 `mode == "OFFBOARD" && armed`，把期望状态锁成当前里程计（`setDesiredStateToCurrentOdom()`，[se3_ctrl.cpp:116](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L116)），并置 `has_trajectory_after_offboard_ = false`，打印 *"OFFBOARD entered. Holding current pose until a fresh trajectory is received."*，转入 `MISSION_EXECUTION`。
 
 ### `MISSION_EXECUTION`
 [se3_ctrl.cpp:124-148](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L124-L148)：
-- **安全降级**：若 `mode != "OFFBOARD" || !armed`（飞手用遥控器接管了），立刻回到「保持当前位姿」并 `return`，不再发控制量（[se3_ctrl.cpp:125-134](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L125-L134)）。
-- **主控制**：`has_odom_ && has_imu_` 时调用 `calControl()` 算出姿态+油门并 `send_cmd()` 发送；若 `enable_thrust_estimation_` 为真则在线估计推力系数。
+- **安全降级**：若 `mode != "OFFBOARD" || !armed`（飞手用遥控器接管了），仅在定位新鲜时发布当前位置预热 setpoint；定位不可用时不发布位置。若已在 OFFBOARD 中丢失定位，则暂停姿态/推力输出，交由 PX4 的 Offboard failsafe 处理；定位恢复时先将期望重置为恢复后的当前位置，再等待新轨迹，避免继续追踪丢失定位前的旧期望。
+- **主控制**：定位新鲜且已收到 IMU 时调用 `calControl()` 算出姿态+油门并 `send_cmd()` 发送；若 `enable_thrust_estimation_` 为真则在线估计推力系数。
 
 ### `LANDING` / `LANDED`
-[se3_ctrl.cpp:150-166](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L150-L166)：`LANDING` 调 `set_mode` 切到 PX4 原生 `AUTO.LAND`，此后由飞控自主降落，控制器不再发姿态；进入 `LANDED` 后，**当 `!armed` 时**才 `exec_timer_.stop()` 停止主循环（[se3_ctrl.cpp:160-163](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L160-L163)）。
+[se3_ctrl.cpp:150-170](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L150-L170)：`LANDING` 调 `set_mode` 切到 PX4 原生 `AUTO.LAND`，此后由飞控自主降落，控制器不再发姿态。进入 `LANDED` 并确认 `!armed` 后，控制器清除旧轨迹和积分、用新鲜里程计重置期望状态，然后回到 `WAITING_FOR_OFFBOARD`；定时器不会停止，因此同一节点可以支持下一次起飞任务，但仍不会自行解锁或切入 OFFBOARD。
 
 ### 真机 vs 仿真：自动 OFFBOARD/解锁 的关键差异
 `trigger_offboard()`（[se3_ctrl.h:131-146](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_ctrl.h#L131-L146)）与 `trigger_arm()`（[se3_ctrl.h:148-163](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_ctrl.h#L148-L163)）**都在开头就 early-return**，除非：
@@ -299,33 +298,24 @@ if (!(sim_enable_ && auto_request_offboard_)) return;   // offboard
 if (!(sim_enable_ && auto_request_arm_))      return;   // arm
 ```
 
-部署脚本里 `SE3_ENABLE_SIM=false`（[start_real_px4_mid360_fastlio.sh:40](../scripts/start_real_px4_mid360_fastlio.sh#L40)），所以**真机上控制器永远不会自动切 OFFBOARD、也不会自动解锁**——这两件事必须由飞手通过遥控器完成。这与仓库 README 的安全策略一致，也是设计上的硬性安全保证。
-
-### `takeoff_height` 的真实行为（重要澄清）
-构造函数把期望 z 初始化为 `takeoff_height_`（[se3_ctrl.cpp:73-75](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L73-L75)）。但要注意：
-
-- 进入 `WAITING_FOR_OFFBOARD` / `MISSION_EXECUTION` 时，只要 `has_odom_` 为真，就会调用 `setDesiredStateToCurrentOdom()`（[se3_ctrl.cpp:209](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L209)），**用当前里程计无条件覆盖整个期望位置（含 z）**。
-- 因此**只有在拿不到里程计时，`takeoff_height_` 这个初值才会保留**；正常有 odom 时它会被当前高度覆盖。
-- `takeoffFlag_`（[se3_ctrl.cpp:136-139](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L136-L139)）只在高度接近 `takeoff_height_` 时打印一句 *"takeoff completed"*，**不参与任何控制逻辑**。
-
-> 结论：在本真机流程里，`takeoff_height` 并不真正驱动一次自动起飞。典型做法是飞手在定点模式下手动把飞机带到飞行高度，再切 OFFBOARD；此时控制器锁定当前（已在空中的）位姿并等待规划器轨迹。`takeoff_height` 实质是 odom 缺失时的兜底初值 + 一条日志阈值。
+[公共 controller.yaml](../common/config/controller.yaml) 默认把 `auto_request_offboard` 和 `auto_request_arm` 都设为 `false`，[真机 controller.yaml](../deployment/config/controller.yaml) 还明确设定 `enable_sim: false`。所以 SE3 节点自身不会自动切 OFFBOARD 或解锁。仿真和真机的仓库级 `arm` 命令执行同一个共享状态机：先请求 PX4 原生 `AUTO.TAKEOFF`，达到实际高度且预热 setpoint 连续后自动请求 OFFBOARD。SE3 检测到 armed OFFBOARD 时锁定当前位姿，等待一条新的规划轨迹。
 
 ---
 
-## 7. 期望状态的三个来源与优先级
+## 7. 期望状态来源与门禁
 
 `desired_state_` 在运行时被以下来源更新（后者覆盖前者）：
 
-1. **构造初值**：`(0, 0, takeoff_height_)`，零速、零加速度（[se3_ctrl.cpp:73-76](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L73-L76)）。
-2. **原地保持**：进 OFFBOARD / 被接管 / 等待新轨迹时，`setDesiredStateToCurrentOdom()` 把期望锁为当前里程计、速度清零（[se3_ctrl.cpp:209-231](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L209-L231)）。
-3. **规划器轨迹**（主来源）：`/command/trajectory` 到来后，`multiDOFJointCallback` 用轨迹点覆盖期望 位置/速度/加速度/偏航（[se3_ctrl.cpp:292-338](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L292-L338)）。该回调有两道闸：
+1. **原地保持**：进 OFFBOARD / 被接管 / 等待新轨迹时，`setDesiredStateToCurrentOdom()` 把期望锁为当前里程计、速度清零。该操作只会在定位新鲜时执行，不存在固定位置兜底。
+2. **规划器轨迹**（主来源）：`/command/trajectory` 到来后，`multiDOFJointCallback` 用轨迹点覆盖期望位置、速度、加速度和偏航。该回调有三道闸：
    - **未解锁或非 OFFBOARD 时直接丢弃轨迹**（[se3_ctrl.cpp:294-297](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L294-L297)）；
+   - 没有新鲜定位时丢弃轨迹，避免定位恢复后执行定位丢失期间缓存的旧指令；
    - 空消息丢弃（[se3_ctrl.cpp:299-302](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L299-L302)）。
    - 加速度前馈受 `max_feedforward_acc_` 限幅、且仅当 `use_acceleration_feedforward_` 为真才使用（[se3_ctrl.cpp:320-325](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L320-L325)）。
    - `desired_state_.j` 在该回调里直接置零（[se3_ctrl.cpp:330](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L330)），所以规划器发布的 jerk 不会进入 SE3 控制器。
    - 偏航角速率仅当 `use_yaw_rate_feedforward_` 为真才读取（[se3_ctrl.cpp:338](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L338)），但当前只进入被忽略的 `bodyrates`。
 
-（备用来源 `/desire_odom` 走 [`DesireOdomCallback`](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L269)，机制类似，本链路一般不用。）
+（备用来源 `/desire_odom` 走 [`DesireOdomCallback`](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp)，同样会在定位不可用或超时时拒收，本链路一般不用。）
 
 ---
 
@@ -339,7 +329,7 @@ if (!(sim_enable_ && auto_request_arm_))      return;   // arm
 因此调参时应优先理解 `Kp_p/Kp_v`、加速度前馈、`hover_percent/T_a_` 与推力限幅；不要期待 `Kp_a`、`Kp_q` 或 yaw-rate 前馈在当前配置下直接改变飞机响应。
 
 ### 8.0 入口保护
-若里程计超过 0.1 s 未更新，`calControl` 直接返回 false、不发指令（[se3_controller.hpp:331-334](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L331-L334)）。
+若里程计超过 `odom_timeout`（默认 `0.2 s`）未更新，`calControl` 直接返回 false、不发指令。该参数同时用于 OFFBOARD 预热、轨迹接收和控制计算，避免不同环节采用不同的新鲜度标准。
 
 ### 8.1 位置环 → 修正期望速度
 [se3_controller.hpp:337-349](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L337-L349)
@@ -390,7 +380,7 @@ j_des   = j_des - Kp_a ∘ err_a - Kd_a ∘ d_err_a
 每个误差和误差增量都过 `limitErr` 饱和（`limit_err_*` / `limit_d_err_*`，[se3_ctrl.cpp:66-71](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L66-L71)）。这是重要的安全设计：即使某一拍里程计跳变、误差骤增，修正量也被钳在有限范围内，避免瞬间满舵。
 
 ### 8.5 ⚠️ 关于「微分项」：当前实现里 `Kd` 是死的
-级联本身只有「前馈 + 比例 + 有限差分微分」，**默认不含积分项**（v2 起新增了可选的**竖直积分项**，默认关闭，见 [§8.7](#87-竖直积分项可选默认关闭)）。而且微分项在当前代码里**实际恒为零**：
+级联主体是“前馈 + 比例 + 有限差分微分”，另有可配置的**竖直积分项**（见 [§8.7](#87-竖直积分项可配置)）。仿真车辆配置 `ki_pz=0`，当前真机配置为 `0.30`。微分项在当前代码里**实际恒为零**：
 
 - `have_last_err_` 在 `init()` 里置 false（[se3_controller.hpp:304](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L304)），且**代码里从未被置回 true**。
 - 因此每拍都会执行 `if(have_last_err_==false) last_err = err`（如 [se3_controller.hpp:345-347](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L345-L347)），使 `d_err = err - last_err ≡ 0`。
@@ -409,7 +399,7 @@ output.thrust = clamp(thrust, min_output_thrust, max_output_thrust)
 
 几何含义：多旋翼只能沿机体 z 轴产生推力，所以把期望加速度投影到当前机体 z 轴，得到需要的推力大小，再用 `T_a_` 归一化（见第 10 节）、并钳到上下限。
 
-### 8.7 竖直积分项（可选，默认关闭）
+### 8.7 竖直积分项（可配置）
 
 > v2 新增。用于根治「随电池电压下降/载荷变化而缓慢掉高」——因为悬停所需推力 = f(机重, 当前电压)，不是常数，而无积分的前馈/比例链路只能在一个工作点精确，偏离后只能用稳态高度误差换取推力偏置。积分项把这个稳态缺口累积补上，使悬停推力自适应、稳态高度误差归零（等价于 PX4 定点模式那个让你「定点正常」的积分器）。
 
@@ -426,7 +416,7 @@ a_des     -= Ki_p ∘ int_err_p     # Ki_p=(0,0,ki_pz)：低于目标→加推�
 - **抗饱和（三重）**：① 上一拍推力饱和时**冻结累加**（`out_saturated_`，[L378](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L378)）；② 逐轴钳位 `int_limit_z`；③ **切换清零**——`resetIntegral()`（[L282](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L282)）在 [`setDesiredStateToCurrentOdom`](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L209) 里被调用，覆盖等待 OFFBOARD / 进入 OFFBOARD / 被接管，杜绝地面或待机期间积分饱和。
 - 增益来源：构造时由 rosparam `ki_pz` / `int_limit_z` 经 `setIntegral()`（[L278](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L278)）注入，并可经 `rqt_reconfigure` 在线整定（[se3_ctrl.h DynamicTuneCallback](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_ctrl.h#L76)）。
 
-**整定流程（务必低空、手放遥控器）**：`ki_pz` 默认 0（关闭，行为同无积分模式）。悬停中用 rqt 把 `ki_pz` 从 0 每次 +0.05 缓慢上调，直到随电压下降仍稳住高度、不缓慢下垂；若高度上下振荡则调小（典型 0.1–0.6，视机而定）。整定好后写入脚本 `SE3_KI_PZ` 默认值固化。**完整的逐步整定方法、判读标准与陷阱见 [ki_pz 整定指南](ki_pz_tuning_guide.md)。**
+**整定流程（务必低空、手放遥控器）**：悬停中用 rqt 从较小 `ki_pz` 开始逐步上调，直到随电压下降仍稳住高度、不缓慢下垂；若高度上下振荡则调小（典型范围随机体而异）。整定好后写入 [真机 controller.yaml](../deployment/config/controller.yaml) 固化。**完整步骤、判读标准与陷阱见 [ki_pz 整定指南](ki_pz_tuning_guide.md)。**
 
 ---
 
@@ -489,7 +479,7 @@ T_a_ 初值     = gravity_ / hover_percent_           （se3_controller.hpp:278�
 - **下限保护**：`T_a_ = max(T_a_, g / max_hover_percent)`（[se3_controller.hpp:479](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L479)），即 `max_hover_percent` 给 `T_a_` 设了下限，限制对推力权限的高估。
 
 ### 10.3 默认关闭的影响
-部署脚本里 `SE3_ENABLE_THRUST_ESTIMATION=false`（[start_real_px4_mid360_fastlio.sh:48](../scripts/start_real_px4_mid360_fastlio.sh#L48)）。此时 `estimateTa` 不被调用，**`T_a_` 固定在 `g/hover_percent` 不再更新**——但它仍然每拍被用于推力归一化（[se3_controller.hpp:377](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp#L377)）。换句话说：默认配置下，推力标定完全取决于你给的 `hover_percent`，把它调准是首要任务。
+[公共 controller.yaml](../common/config/controller.yaml) 设置 `enable_thrust_estimation: false`。此时 `estimateTa` 不被调用，**`T_a_` 固定在 `g/hover_percent` 不再更新**——但它仍然每拍被用于推力归一化（[se3_controller.hpp](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_controller.hpp)）。换句话说：默认配置下，推力标定完全取决于车辆 YAML 中的 `hover_percent`，把它调准是首要任务。
 
 ---
 
@@ -528,40 +518,47 @@ judge   = judge_x || judge_y || judge_z;
 - 默认 `auto_land_on_geofence_ = false`：越界**只 `ROS_WARN` 告警**，不限制轨迹、不压低控制量（[se3_ctrl.cpp:247-248](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L247-L248)）。
 - 设为 `true` 时：**同时满足「越界 && auto_land_on_geofence && 当前不在 LAND 模式」** 才切到 PX4 `AUTO.LAND` 并转入 `LANDED`（[se3_ctrl.cpp:250-255](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L250-L255)）。
 
-其他安全机制散见全文：进 OFFBOARD 前维持 setpoint 流、收到新轨迹前原地保持、被接管即降级、误差饱和限幅、里程计陈旧即停发、真机不自动解锁/不自动 OFFBOARD。
+其他安全机制散见全文：进 OFFBOARD 前维持 setpoint 流、收到新轨迹前原地保持、被接管即降级、误差饱和限幅、里程计陈旧即停发、真机 SE3 节点不自动解锁/不自动 OFFBOARD。
 
 ---
 
 ## 13. 参数全表
 
-### 13.1 部署脚本里的 `SE3_*`（运行时 `rosparam`）
-来自 [start_real_px4_mid360_fastlio.sh:40-65](../scripts/start_real_px4_mid360_fastlio.sh#L40-L65)，在 [第 378 行](../scripts/start_real_px4_mid360_fastlio.sh#L378) 通过 `rosparam set` 注入。**真机运行时以启动脚本注入值为准**；`se3_ctrl.cpp` 里的 `nh.param(..., fallback)` 只是脚本没设置参数时才会用到的兜底值。
+### 13.1 YAML 参数层
 
-| 环境变量 | 默认值 | 节点参数 | 含义 |
-|---|---|---|---|
-| `SE3_ENABLE_SIM` | `false` | `enable_sim` | 仿真模式；真机务必 false |
-| `SE3_AUTO_REQUEST_OFFBOARD` | `false` | `auto_request_offboard` | 自动切 OFFBOARD（仅 sim 生效） |
-| `SE3_AUTO_REQUEST_ARM` | `false` | `auto_request_arm` | 自动解锁（仅 sim 生效） |
-| `SE3_AUTO_LAND_ON_GEOFENCE` | `false` | `auto_land_on_geofence` | 越界自动降落；false 仅告警 |
-| `SE3_TAKEOFF_HEIGHT` | `0.3` | `takeoff_height` | 期望 z 初值/日志阈值（见 §6 澄清） |
-| `SE3_ENABLE_THRUST_ESTIMATION` | `false` | `enable_thrust_estimation` | 在线推力辨识；默认关 |
-| `SE3_USE_ACCELERATION_FEEDFORWARD` | `true` | `use_acceleration_feedforward` | 使用轨迹加速度前馈 |
-| `SE3_USE_YAW_RATE_FEEDFORWARD` | `true` | `use_yaw_rate_feedforward` | 读取轨迹偏航角速率；当前只进入被忽略的 `bodyrates`，实际 PX4 输出不受它影响 |
-| `SE3_MAX_FEEDFORWARD_ACC` | `1.2` | `max_feedforward_acc` | 加速度前馈限幅 (m/s²)，高于当前规划 `max_acc=0.8` |
-| `SE3_HOVER_PERCENT` | `0.90` | `hover_percent` | **悬停油门**，最关键；本机 MID-360 + Jetson 载荷实测偏高 |
-| `SE3_MAX_HOVER_PERCENT` | `0.95` | `max_hover_percent` | `T_a_` 下限对应的最大悬停油门 |
-| `SE3_MIN_OUTPUT_THRUST` | `0.20` | `min_output_thrust` | 输出油门下限 |
-| `SE3_MAX_OUTPUT_THRUST` | `1.00` | `max_output_thrust` | 输出油门上限；必须高于真实悬停油门，否则会被钳到悬停之下 |
-| `SE3_GEOFENCE_X` | `2.0` | `geo_fence/x` | x 半幅围栏 (±) |
-| `SE3_GEOFENCE_Y` | `2.0` | `geo_fence/y` | y 半幅围栏 (±) |
-| `SE3_GEOFENCE_Z` | `1.8` | `geo_fence/z` | z 上限围栏 |
-| `SE3_KI_PZ` | `0.0` | `ki_pz` | 竖直积分增益，0=关闭；在线整定后填入（见 §8.7） |
-| `SE3_INT_LIMIT_Z` | `5.0` | `int_limit_z` | 积分抗饱和钳位 [m·s] |
+[controller.launch](../common/launch/controller.launch) 先加载公共 YAML，再加载环境对应的车辆 YAML；后加载的同名参数覆盖公共值。`se3_ctrl.cpp` 的 `nh.param(..., fallback)` 只在 YAML 没提供参数时兜底。
+
+公共 [controller.yaml](../common/config/controller.yaml)：
+
+| 节点参数 | 默认值 | 含义 |
+|---|---:|---|
+| `enable_sim` | `false` | 仿真开关；仿真车辆 YAML 覆盖为 true |
+| `auto_request_offboard` | `false` | SE3 自动请求 OFFBOARD；两端默认关闭 |
+| `auto_request_arm` | `false` | SE3 自动解锁；两端默认关闭 |
+| `auto_land_on_geofence` | `false` | 越界自动降落；false 时仅告警 |
+| `enable_thrust_estimation` | `false` | 在线推力辨识 |
+| `use_acceleration_feedforward` | `true` | 使用轨迹加速度前馈 |
+| `use_yaw_rate_feedforward` | `true` | 读取 yaw rate；当前只进入被忽略的 `bodyrates` |
+| `max_feedforward_acc` | `1.2` | 加速度前馈限幅，当前高于 Planner `max_acc=0.8` |
+| `odom_timeout` | `0.2 s` | MAVROS 里程计最大接收间隔；30 Hz 下约容许 6 个更新周期 |
+
+车辆覆盖值：
+
+| 节点参数 | 真机 | 仿真 | 含义 |
+|---|---:|---:|---|
+| `enable_sim` | `false` | `true` | 环境标志 |
+| `hover_percent` | `0.50` | `0.755` | **悬停油门**；必须按载体标定 |
+| `max_hover_percent` | `0.95` | `0.85` | 在线估计的最大悬停比例约束 |
+| `min_output_thrust` | `0.20` | `0.20` | 输出推力下限 |
+| `max_output_thrust` | `1.00` | `0.95` | 输出推力上限 |
+| `geo_fence/x,y,z` | `2.0,2.0,1.8` | `50.0,50.0,6.0` | x/y 对称半幅与 z 上限 |
+| `ki_pz` | `0.30` | `0.0` | 竖直积分增益 |
+| `int_limit_z` | `5.0` | `5.0` | 积分抗饱和钳位 [m·s] |
 
 ### 13.2 代码中硬编码的增益
 见 [se3_ctrl.cpp:54-71](../third_party/Diff-Planner-PX4/src/se3_controller/src/se3_ctrl.cpp#L54-L71)，已在第 8.4 节列出。这些不是脚本参数，需改源码或用 dynamic_reconfigure。
 
-> 注意：`se3_ctrl.cpp:36-41` 中的 `takeoff_height=2.0`、`hover_percent=0.45`、`max_output_thrust=0.85` 等是 **C++ fallback 默认值**，不是本项目真机脚本默认值。只要按 `start_real_px4_mid360_fastlio.sh` 启动，实际会被 §13.1 的 rosparam 覆盖。
+> 注意：`se3_ctrl.cpp` 中的 `hover_percent=0.45`、`max_output_thrust=0.85` 等是 **C++ fallback**，不是仓库运行值。通过 `sim2real_common/controller.launch` 启动时以 §13.1 的 YAML 为准。
 
 ### 13.3 在线调参（dynamic_reconfigure）
 `DynamicTuneCallback`（[se3_ctrl.h:76-119](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_ctrl.h#L76-L119)）允许运行时通过 `rqt_reconfigure` 改全部 `Kp_*/Kd_*` 和 `limit_*`：回调把新值写入成员变量后调用 `se3_controller_.setup()` 应用（[se3_ctrl.h:111-114](../third_party/Diff-Planner-PX4/src/se3_controller/include/se3_controller/se3_ctrl.h#L111-L114)）。
@@ -576,20 +573,20 @@ judge   = judge_x || judge_y || judge_z;
 | | 规划器虚拟天花板/地板 | 控制器地理围栏 |
 |---|---|---|
 | 参数 | `virtual_ceil` / `virtual_ground`（`grid_map`） | `geo_fence/z` 等（本控制器） |
-| 部署变量 | `DIFF_PLANNER_VIRTUAL_CEIL=1.6` / `_GROUND=0.1` | `SE3_GEOFENCE_Z=1.8` |
+| 配置来源 | 公共 `planner.yaml`：`1.5 / 0.1` | 真机 `controller.yaml`：`1.8` |
 | 作用层级 | **规划层**：超过的空间被标记为不可通行 | **控制层**：监控**实际**里程计位置 |
 | 作用对象 | 规划出来的**轨迹** | 飞机**真实**到达的位置 |
 | 触发后 | 规划器不生成越界轨迹 | 仅告警（默认）/ 切 `AUTO.LAND`（开启时） |
 
-即使规划器严格遵守 `virtual_ceil`，飞机真实位置仍可能因跟踪误差、状态估计漂移、外界扰动而冲过去——围栏是独立于规划器的最后一道底线。**建议 `SE3_GEOFENCE_Z` 略高于 `VIRTUAL_CEIL`**（当前 1.8 > 1.6），这样正常贴顶飞行不会误触；只有在你启用 `auto_land_on_geofence=true` 时围栏才真正有「兜底降落」的意义。
+即使规划器严格遵守 `virtual_ceil`，飞机真实位置仍可能因跟踪误差、状态估计漂移、外界扰动而冲过去——围栏是独立于规划器的最后一道底线。**建议真机 `geo_fence/z` 略高于 `virtual_ceil`**（当前 1.8 > 1.5），这样正常贴顶飞行不会误触；只有启用 `auto_land_on_geofence=true` 时围栏才真正有“兜底降落”的意义。
 
 ---
 
 ## 15. 调参与排障指南
 
 ### 起步顺序
-1. **先标 `hover_percent`**：用遥控器手动悬停，读飞控日志/地面站的实际悬停油门，把 `SE3_HOVER_PERCENT` 设到接近值。当前启动脚本默认 `0.90` 是针对本机 MID-360 + Jetson 载荷的实测配置，不是通用值。
-2. 确认 `min/max_output_thrust` 给足余量（当前脚本默认 0.20–1.00）。如果真实悬停油门已经接近 1.0，控制器没有足够爬升余量。
+1. **先标 `hover_percent`**：用遥控器手动悬停，读飞控日志/地面站的实际悬停油门，把 [真机 controller.yaml](../deployment/config/controller.yaml) 设到接近值。当前 `0.50` 只适用于完成该标定的机体，不是通用值。
+2. 确认 `min_output_thrust`/`max_output_thrust` 给足余量（真机当前 0.20–1.00）。如果真实悬停油门已经接近上限，控制器没有足够爬升余量。
 3. 位置/速度跟踪不够紧再动 `Kp_p / Kp_v`（用 dynamic_reconfigure 在线试）。
 
 ### 常见故障
@@ -597,26 +594,25 @@ judge   = judge_x || judge_y || judge_z;
 | 现象 | 可能原因 | 排查方向 |
 |---|---|---|
 | 切 OFFBOARD 后掉高/蹿高 | `hover_percent` 与真机不符 | 重标悬停油门；必要时开 `enable_thrust_estimation` |
-| 进不去 OFFBOARD | 真机本就不自动切，需飞手遥控器操作；或 setpoint 流中断 | 确认有里程计、`/mavros/state` 正常；检查 §6 |
+| 进不去 OFFBOARD | 预热 setpoint 流中断，或 PX4 拒绝模式请求 | 确认有新鲜里程计、`/mavros/state` 正常；检查共享 `arm` 执行器日志和 §6 |
 | 收到轨迹但不跟随 | 未解锁/非 OFFBOARD 时轨迹被丢弃 | 看是否打印 "Ignoring trajectory until armed and OFFBOARD" |
 | 位置振荡 | `Kp` 偏高 | 调小 `Kp_p/Kp_v`（注意 `Kd` 当前无效，见 §8.5） |
 | 飞行中突然降落 | 触发了围栏 + `auto_land_on_geofence=true` | 检查围栏尺寸与实际飞行范围；看 "obs Land enabled" 日志 |
 | 频繁告警 "Geofence exceeded" | 实际位置越界但未开自动降落 | 调大围栏或人工接管 |
-| 完全不发姿态指令 | 里程计 >0.1s 陈旧，`calControl` 返回 false | 检查 FAST-LIO / odom 频率 |
+| 完全不发姿态指令 | MAVROS 里程计超过 `odom_timeout`（默认 0.2 s），`calControl` 返回 false | 检查 `/mavros/local_position/odom`；真机继续检查 FAST-LIO vision 回灌 |
 
 ---
 
 ## 16. 已知细节与陷阱（gotchas 汇总）
 
 1. **`TAKEOFF` 状态是死代码**——枚举里有，但从不被进入（§6）。
-2. **真机不自动 OFFBOARD、不自动解锁**——`trigger_offboard/arm` 仅在 `sim_enable && auto_request_*` 时动作（§6）。
-3. **`takeoff_height` 不真正驱动起飞**——有里程计时被当前位姿覆盖，仅作 odom 缺失兜底 + 一条日志（§6）。
-4. **微分项 `Kd_*` 当前恒为 0**——`have_last_err_` 永不置 true，使 `d_err ≡ 0`；靠调 `Kd` 加阻尼不起作用（§8.5）。
-5. **默认无积分项，但可选开启竖直积分**——无积分模式下稳态推力偏置只能靠高度误差换取补偿；随电压/载荷漂移会缓慢掉高，可用 `ki_pz` 开启竖直积分项自适应补偿（默认 0=关闭，§8.7）。
-6. **`bodyrates` 被丢弃**——`type_mask` 忽略角速率，PX4 只用姿态+油门；因此 jerk、yaw_rate、`Kp_a`、`Kp_q` 当前都不要当作有效输出通道来调（§11）。
-7. **`Kp_w / Kd_q / Kd_w` 在激活路径未使用**——只出现在被注释的替代实现里（§9.4）。
-8. **`Kp_q` 的 xy=5.5、`Kp_w` 的 xy=1.5**——不同矩阵，勿混淆；且当前二者都不改变实际 PX4 姿态/油门输出（§8.4、§11）。
-9. **围栏 z 仅判上限，无下限**；x/y 为对称 ±（§12）。
+2. **真机 SE3 节点不自行 OFFBOARD/解锁**——`trigger_offboard/arm` 仅在 `sim_enable && auto_request_*` 时动作（§6）；仓库级 `real.sh arm` 共享执行器负责 PX4 原生 AUTO.TAKEOFF 和后续 OFFBOARD 交接。
+3. **微分项 `Kd_*` 当前恒为 0**——`have_last_err_` 永不置 true，使 `d_err ≡ 0`；靠调 `Kd` 加阻尼不起作用（§8.5）。
+4. **竖直积分由车辆配置决定**——仿真 `ki_pz=0`，当前真机为 `0.30`；设为 0 时稳态推力偏置只能靠高度误差换取补偿（§8.7）。
+5. **`bodyrates` 被丢弃**——`type_mask` 忽略角速率，PX4 只用姿态+油门；因此 jerk、yaw_rate、`Kp_a`、`Kp_q` 当前都不要当作有效输出通道来调（§11）。
+6. **`Kp_w / Kd_q / Kd_w` 在激活路径未使用**——只出现在被注释的替代实现里（§9.4）。
+7. **`Kp_q` 的 xy=5.5、`Kp_w` 的 xy=1.5**——不同矩阵，勿混淆；且当前二者都不改变实际 PX4 姿态/油门输出（§8.4、§11）。
+8. **围栏 z 仅判上限，无下限**；x/y 为对称 ±（§12）。
 10. **推力估计默认关闭**——`T_a_` 固定 = g/hover_percent，`hover_percent` 标不准就会掉/蹿（§10.3）。
 11. **NED/`R_mid` 分支默认不执行**——本部署 `enu_frame_=true`（§5）。
 12. **里程计速度是机体系**——`vel_in_body_=true` 会把它旋到世界系（§5）。

@@ -1,330 +1,238 @@
-# diff-planner-px4-deployment
+# Diff-Planner PX4 Sim-to-Real
 
-这个仓库用于在 Jetson 真机上部署一套 ROS1 版无人机自主避障链路：MID-360/MID-360S 激光雷达提供点云和 IMU，FAST-LIO 输出里程计，Diff-Planner 生成局部避障轨迹，SE3 控制器通过 MAVROS 给 PX4 发送姿态和推力控制指令。
+本项目是一套基于 ROS1 Noetic 的无人机局部规划工程，包含 PX4 SITL 仿真和 Jetson 真机部署。仿真与真机使用同一套 Diff-Planner、轨迹转换、SE3 控制器和规划参数，只在传感器、定位、外参及机体标定层面分别适配。
 
-它不是通用无人机框架，而是把一套已经跑通的真机部署环境整理成可以迁移、可以复现的工程目录。
-
-整体链路如下：
+## 系统结构
 
 ```text
-Livox MID-360/MID-360S
-  -> livox_ros_driver2
-  -> FAST-LIO
-  -> /Odometry
-  -> odom_to_base.py
-  -> /Odometry_base
-  -> MAVROS vision pose + Diff-Planner
-  -> trajectory_msg_converter.py
-  -> SE3 controller
-  -> /mavros/setpoint_raw/attitude
-  -> PX4
+仿真：PX4 SITL + Gazebo + 模拟 MID-360
+真机：PX4 + MID-360 + FAST-LIO
+                  │
+                  ▼
+       /localization/odom
+       /localization/cloud_registered
+                  │
+                  ▼
+       Diff-Planner → traj_server
+                  │
+                  ▼
+       trajectory converter → SE3
+                  │
+                  ▼
+               MAVROS → PX4
 ```
 
-真机安全策略：
+公共定位接口约定：
 
-- 代码默认不会自动解锁。
-- 代码默认不会循环请求切换 OFFBOARD。
-- 是否切 OFFBOARD 由飞手通过遥控器决定。
-- 飞行过程中可以随时通过遥控器切回定点、姿态或其他模式接管。
-- MID-360 倾斜安装外参在 FAST-LIO 后面单独转换，不直接改雷达驱动或 FAST-LIO 内部逻辑。
+| Topic | 类型 | 坐标约定 |
+|---|---|---|
+| `/localization/odom` | `nav_msgs/Odometry` | pose 在 `world`，twist 在 `base_link`，`child_frame_id=base_link` |
+| `/localization/cloud_registered` | `sensor_msgs/PointCloud2` | 点云已转换到 `world` |
 
-## 仓库内容
+仿真直接适配 MAVROS odom 和模拟点云，不运行 FAST-LIO；真机使用 FAST-LIO，并把公共里程计回灌到 `/mavros/vision_pose/pose` 供 PX4 EKF 融合。
+
+## 环境要求
+
+所有命令均在仓库根目录执行。
+
+- Docker，并且当前用户可以访问 Docker daemon；
+- tmux；
+- 图形模式需要 X11；
+- 首次构建镜像需要联网下载系统依赖和固定版本的 PX4/MID360 仿真源码。
+
+运行时产生的 overlay、日志和 rosbag 位于 `runtime/`，不属于源码并被 Git 忽略。
+
+默认容器分工：仿真使用 `diff_planner_px4_sim`，Jetson 真机使用 `diff_planner_px4_real`；工作站上的 `ros_noetic` 只用于远程 RViz，不参与仿真或真机计算。
+
+使用 Gazebo 或 RViz 图形界面前，在宿主机授权容器内的 root 用户访问 X11：
+
+```bash
+xhost +SI:localuser:root
+```
+
+## 快速运行仿真
+
+首次启动会自动构建缺失的镜像和 ROS overlay：
+
+```bash
+./launch/sim.sh start
+```
+
+飞机启动后保持未解锁。推荐操作顺序：
+
+```bash
+./launch/sim.sh arm
+./launch/sim.sh goal 1.0 0.0 1.0
+./launch/sim.sh land
+./launch/sim.sh stop
+```
+
+`arm` 会让 SITL 解锁并使用 PX4 原生 `AUTO.TAKEOFF` 上升到相对 Home `1.0 m`，到达后由脚本自动切入 OFFBOARD；SE3 锁定切换瞬间的位姿悬停。`goal` 格式为：
 
 ```text
-docker/
-  Dockerfile                         Jetson 上使用的 ROS Noetic 镜像
-  docker_run_real.sh                 构建、启动、停止、重建容器
-
-scripts/
-  start_real_px4_mid360_fastlio.sh   Jetson 真机一键启动脚本
-  start_jetson_ros1_rviz.sh          本机打开 RViz 的辅助脚本
-  odom_to_base.py                    传感器里程计转换为 base_link 里程计
-  odom_to_pose.py                    /Odometry_base 转 MAVROS vision pose
-  rviz_goal_to_diff_planner.py       RViz 目标点桥接到 /goal
-
-config/
-  livox/MID360s_config.json          Livox 网络配置
-  rviz/jetson_real_stack.rviz        RViz 可视化配置
-
-local_pkgs/
-  px4_realflight_tools               本仓库维护的小型 ROS 工具包
-
-third_party/
-  Livox-SDK2
-  livox_ros_driver2
-  FAST_LIO
-  Diff-Planner-PX4
+./launch/sim.sh goal X Y Z [YAW_DEG]
 ```
 
-Docker 镜像内部保留两个 ROS 工作空间：
+- 坐标系固定为 `world`；
+- 省略 yaw 时不限定终点朝向；
+- 提供 yaw 时，单位为度；
+- 默认 Planner 高度范围为 `0.1 < Z < 3.0 m`；
+- 必须在 `arm` 完成并确认自动 OFFBOARD 交接后发布目标；此前的 RViz 目标不会排队。
 
-```text
-/root/livox_ws/src/livox_ros_driver2
-/root/catkin_ws/src/FAST_LIO
-/root/catkin_ws/src/Diff-Planner-PX4
-/root/catkin_ws/src/px4_realflight_tools
-```
+仿真和真机的 CLI `goal` 都执行同一份单进程检查逻辑：并行确认飞行状态、新鲜定位、连续 SE3 输出、Planner 高度围栏和两个目标消费者，再由该进程直接发布 `/goal`，避免为每项检查重复启动容器和 ROS 命令。
 
-## 硬件和网络假设
-
-当前配置默认假设：
-
-- Jetson 作为机载计算机。
-- 飞控通过 USB 连接 Jetson，设备通常是 `/dev/ttyACM0`。
-- MID-360/MID-360S 通过网线连接 Jetson。
-- Jetson 的雷达网卡 IP 是 `192.168.1.101`。
-- 雷达 IP 是 `192.168.1.199`。
-- QGC 所在电脑 IP 是 `10.0.30.196`。
-- Jetson 在 ROS1 网络中的 IP 类似 `10.0.30.108`。
-
-如果你的硬件或网络不同，优先检查这些位置：
-
-- `config/livox/MID360s_config.json`
-- `FCU_URL`
-- `FCU_DEVICE`
-- `GCS_URL`
-- `ROS_IP` 或 `ROS_IP_TARGET`
-- 本机 RViz 脚本中的 `JETSON_IP`
-
-## 在 Jetson 上部署
-
-先安装主机侧依赖：
+无图形界面运行：
 
 ```bash
-sudo apt update
-sudo apt install -y git docker.io tmux
-sudo usermod -aG docker "$USER"
+SIM_GAZEBO_GUI=false SIM_START_RVIZ=false ./launch/sim.sh restart
 ```
 
-加入 docker 用户组后，需要退出登录再重新登录。
+完整说明见 [仿真运行说明](docs/simulation.md)。
 
-克隆仓库：
+## 快速部署真机
+
+> `real.sh start/restart` 不会自动切换飞行模式或解锁；显式执行 `real.sh arm` 会请求 PX4 解锁，使用原生 `AUTO.TAKEOFF` 起飞，并在达到实际高度、确认连续预热 setpoint 后自动进入 OFFBOARD。命令验证 SE3 姿态/推力输出后才返回。首次飞行前必须完成 PX4 external-vision EKF、雷达外参、控制器和 failsafe 配置，并由飞手保留随时接管能力。
+
+先修改以下机体配置：
+
+- `deployment/config/livox/MID360s_config.json`：Jetson 和雷达 IP；
+- `deployment/config/controller.yaml`：悬停推力、积分、推力范围和围栏；
+- `MOUNT_*` 环境变量：`base_link → MID-360 内置 IMU（FAST-LIO body）` 外参，不能直接填写量到点云原点的平移。
+
+`MID360s_config.json` 中的重要参数：
+
+- `Mid360s.host_net_info[0].host_ip`：Jetson 直连雷达网卡的静态 IP，当前为 `192.168.1.101`；
+- `lidar_configs[0].ip`：MID-360S 的设备 IP，当前为 `192.168.1.199`；
+- `lidar_configs[0].extrinsic_parameter`：保持全零；本项目通过 `MOUNT_*` 在 FAST-LIO 后统一处理安装外参，避免重复补偿。
+
+两端 IP 必须处于同一子网。协议类型、UDP 端口、点云格式和扫描模式保持仓库默认值。
+
+在 Jetson 上构建并创建容器：
 
 ```bash
-cd /home/jetson2
-git clone https://github.com/dreamer198/diff-planner-px4-deployment.git
-cd diff-planner-px4-deployment
+./launch/real_container.sh build
+FCU_DEVICE=/dev/ttyACM0 ./launch/real_container.sh run
 ```
 
-构建镜像：
+启动完整 ROS 栈：
 
 ```bash
-./docker/docker_run_real.sh build
+FCU_URL='/dev/ttyACM0:921600' \
+GCS_URL='udp://:14555@172.20.10.3:14550' \
+ROS_IP=172.20.10.5 \
+MAVROS_TGT_SYSTEM=5 \
+PLANNER_RESOLUTION=0.11 \
+PLANNER_OBSTACLES_INFLATION=0.33 \
+./launch/real.sh start
 ```
 
-创建或重建容器：
+`MAVROS_TGT_SYSTEM` 必须与 PX4 的 `MAV_SYS_ID` 一致；当前真机实测为 `5`。
+两个 Planner 环境变量与公共默认值一致：`0.11 m` 分辨率、`0.33 m` 膨胀半径。后者相对 `0.65 m` 正方形机体的 `0.325 m` 半对角线只保留 `0.005 m` 理论余量，并正好量化为 3 个体素；省略这两个变量时使用相同的公共默认值。
+
+查看状态或日志：
 
 ```bash
-FCU_DEVICE=/dev/ttyACM0 \
-./docker/docker_run_real.sh restart
+./launch/real.sh status
+./launch/real.sh attach
 ```
 
-默认容器名是 `ros_noetic_realflight`。
-
-## 启动真机链路
-
-在 Jetson 上执行：
-
-```bash
-cd ~/diff-planner-px4-deployment
-FCU_URL='serial:///dev/ttyACM0:57600' \
-GCS_URL='udp://:14550@10.0.30.196:14550' \
-SE3_HOVER_PERCENT=0.50 \
-SE3_MAX_FEEDFORWARD_ACC=1.2 \
-DIFF_PLANNER_INFLATION_SIZE=0.2 \
-DIFF_PLANNER_VIRTUAL_CEIL=1.5 \
-DIFF_PLANNER_VIRTUAL_GROUND=0.1 \
-./scripts/start_real_px4_mid360_fastlio.sh restart
-```
-
-`DIFF_PLANNER_VIRTUAL_CEIL` 是规划器虚拟天花板高度，超过该 z 值的空间会被规划器视为不可通行。
-
-`SE3_HOVER_PERCENT=0.50` 是本机（机体/电池/桨调整后）实测真实悬停油门；`SE3_KI_PZ=0.30` 是竖直积分增益，消除随电压/载荷的缓慢掉高。整定方法见 [docs/ki_pz_tuning_guide.md](docs/ki_pz_tuning_guide.md)。
-
-`SE3_GEOFENCE_Z` 只由 `se3_controller_node` 用于超限检测。默认 `SE3_AUTO_LAND_ON_GEOFENCE=false` 时，超限后只打印告警，不会限制规划器轨迹，也不会主动压低控制指令。如需让它触发 PX4 降落，需要显式设置 `SE3_AUTO_LAND_ON_GEOFENCE=true`，并建议让 `SE3_GEOFENCE_Z` 略高于 `DIFF_PLANNER_VIRTUAL_CEIL`。
-
-常用命令：
-
-```bash
-./scripts/start_real_px4_mid360_fastlio.sh status
-./scripts/start_real_px4_mid360_fastlio.sh attach
-./scripts/start_real_px4_mid360_fastlio.sh stop
-./scripts/start_real_px4_mid360_fastlio.sh restart
-```
-
-`attach` 会进入 tmux 会话。常用 tmux 操作：
-
-- `Ctrl-b n`：切到下一个窗口
-- `Ctrl-b p`：切到上一个窗口
-- `Ctrl-b d`：退出 attach，不停止程序
-
-一键启动脚本会按顺序启动：
-
-1. `roscore`
-2. `livox_ros_driver2`
-3. `FAST-LIO`
-4. `odom_to_base.py`
-5. `mavros`
-6. `odom_to_pose.py`
-7. `Diff-Planner`
-8. `trajectory_msg_converter.py`
-9. `se3_controller_node`
-
-## MID-360 安装外参
-
-当前默认假设 MID-360：
-
-- 比飞控高 `0.10 m`
-- 相对机体系前倾 `30 deg`
-
-可以通过环境变量修改：
-
-```bash
-MOUNT_X=0.0
-MOUNT_Y=0.0
-MOUNT_Z=0.10
-MOUNT_ROLL_DEG=0.0
-MOUNT_PITCH_DEG=30.0
-MOUNT_YAW_DEG=0.0
-```
-
-外参转换发生在 FAST-LIO 后面：
-
-```text
-/Odometry -> odom_to_base.py -> /Odometry_base
-```
-
-FAST-LIO 和原始点云仍保持传感器坐标逻辑，下游规划器、控制器、MAVROS vision pose 使用转换后的 `/Odometry_base`。
-
-## 在本机打开 RViz
-
-Jetson 上运行的是容器里的 ROS1。如果本机主要是 ROS2，建议在本机也准备一个 ROS1 Docker 容器用于 RViz。
-
-本机容器要求：
-
-- 默认容器名是 `ros_noetic`。
-- 容器内需要有 ROS Noetic 和 RViz。
-- 容器最好使用 host 网络，否则 ROS1 跨机器通信容易失败。
-- 容器需要能访问 X11 显示。
-
-在本机执行：
-
-```bash
-/home/dreamer198/diff-planner-px4-deployment/scripts/start_jetson_ros1_rviz.sh
-```
-
-如需覆盖默认配置：
+在同网段工作站的 ROS Noetic GUI 容器中打开 RViz：
 
 ```bash
 CONTAINER_NAME=ros_noetic \
-JETSON_IP=10.0.30.108 \
-LOCAL_IP=10.0.30.196 \
-/home/dreamer198/diff-planner-px4-deployment/scripts/start_jetson_ros1_rviz.sh
+JETSON_IP=172.20.10.5 \
+LOCAL_IP=172.20.10.3 \
+RVIZ_GOAL_Z=1.0 \
+RVIZ_GOAL_FRAME=world \
+./launch/real_rviz.sh
 ```
 
-这个脚本会：
+真机详细配置和飞前检查见 [真机部署说明](docs/deployment.md)。
 
-- 连接到 `ROS_MASTER_URI=http://JETSON_IP:11311`
-- 发布 `world -> camera_init` 和 `world -> map` 静态 TF
-- 把 RViz 的 `/move_base_simple/goal` 和 `/clicked_point` 桥接到 `/goal`
-- 用 `config/rviz/jetson_real_stack.rviz` 打开 RViz
+## 目录结构
 
-## 通过终端发送目标点
+| 目录 | 内容 |
+|---|---|
+| `common/` | 仿真和真机共享的 ROS launch、参数、目标桥及完整 Mission 状态机 |
+| `simulation/` | 仿真镜像、PX4/Gazebo 资产、车辆标定和适配节点 |
+| `deployment/` | 真机镜像、Livox/FAST-LIO 适配、外参和机体标定 |
+| `launch/` | 宿主机上的容器和完整系统入口 |
+| `third_party/` | Diff-Planner、SE3、FAST-LIO、Livox SDK/驱动源码 |
+| `docs/` | 仿真、真机部署、算法、控制器和参数说明 |
+| `runtime/` | 构建缓存、运行日志和 rosbag，自动生成 |
 
-除了在 RViz 中点目标，也可以直接发布 `/goal`：
+根目录 `launch/` 只负责系统编排；ROS XML launch 位于各自 ROS package 内。
+
+## 配置归属
+
+| 文件 | 用途 |
+|---|---|
+| `common/config/planner.yaml` | 两端唯一的 Planner 和地图默认参数 |
+| `common/config/trajectory_server.yaml` | 轨迹采样和 yaw 参数 |
+| `common/config/controller.yaml` | 两端共享的控制器安全默认值 |
+| `simulation/config/controller.yaml` | 仿真 Iris 机体标定 |
+| `deployment/config/controller.yaml` | 真机标定和围栏 |
+| `deployment/config/livox/MID360s_config.json` | 真机 Livox 网络配置 |
+| `simulation/versions.env` | 仿真 PX4 和 MID360 插件固定版本 |
+
+规划参数只维护一份公共配置，不应在 `simulation/` 和 `deployment/` 中复制。
+
+## 常用命令
+
+| 命令 | 作用 |
+|---|---|
+| `./launch/sim.sh start/restart/stop` | 启动、重启或停止仿真 |
+| `./launch/sim.sh build/test` | 构建 overlay 或运行测试 |
+| `./launch/sim.sh status/attach/shell` | 查看状态、日志或进入容器 |
+| `./launch/sim.sh arm/land/goal .../mission FILE` | SITL 单目标或顺序航点飞行操作 |
+| `./launch/sim_container.sh ...` | 单独管理仿真镜像和容器 |
+| `./launch/real_container.sh ...` | 管理真机镜像和容器 |
+| `./launch/real.sh start/restart/stop` | 管理真机 ROS/tmux 栈 |
+| `./launch/real.sh status/attach` | 查看真机运行状态和日志 |
+| `./launch/real.sh arm/land/goal .../mission FILE` | 真机原生起飞、单目标或顺序航点及自动降落操作，带定位、Planner 确认和遥控器接管门禁 |
+| `./launch/real_rviz.sh` | 从工作站连接 Jetson 并打开 RViz |
+| `./launch/real_bag.sh ...` | 在 Jetson 安全回放真机 bag，不启动飞控链路 |
+| `./launch/real_bag_rviz.sh` | 使用离线专用 RViz 查看原始扫描、累计场景地图和轨迹 |
+
+也可以使用统一转发入口，例如：
 
 ```bash
-rostopic pub -1 /goal geometry_msgs/PoseStamped "header:
-  frame_id: 'world'
-pose:
-  position:
-    x: 3.4
-    y: 0.8
-    z: 1.0
-  orientation:
-    w: 1.0"
+./launch/stack.sh sim restart
+./launch/stack.sh real status
 ```
 
-正常流程是：先让规划器生成轨迹，再由飞手通过遥控器切换到 OFFBOARD，随后无人机开始跟踪轨迹。
+## 测试与日志
 
-## 起飞前检查
+运行自动构建、单元测试和 launch 校验：
 
-建议至少检查：
+```bash
+./launch/sim.sh test
+```
 
-- `/Odometry_base` 是否稳定，且机体前后左右上下移动方向正确。
-- `/mavros/vision_pose/pose` 是否稳定。
-- RViz 中点云、局部地图、障碍物膨胀和规划轨迹是否正常。
-- OFFBOARD 前是否已经有有效轨迹。
-- 遥控器是否可以随时切回其他模式接管。
+常用日志位置：
 
-这个仓库不替代飞控校准、PX4 参数设置、QGC 安全检查和试飞场地安全流程。
+- 仿真：`runtime/simulation/runs/<run-id>/`；
+- 真机 rosbag 和容器 ROS 日志：`runtime/flight_bags/`；
+- 真机宿主 tmux 日志：`~/diff-planner-px4-deployment_logs/<run-id>/`。
 
-## 参考项目和论文
+真机默认调试包包含定位、控制与规划轨迹、Livox 原始点云、FAST-LIO 较高密度去畸变点云、规划器输入点云和 2 Hz 膨胀地图，并使用 LZ4 和约 5 GB 分卷。原始 `CustomMsg` 在离线回放时转换为等密度 `PointCloud2` 供 RViz 显示。具体选项见 [真机部署说明](docs/deployment.md#日志与-rosbag)。
 
-本仓库主要参考和集成了以下项目。
+## 安全说明
 
-路径规划和轨迹生成：
+- 飞手和遥控器始终拥有最终控制权；`real.sh arm` 会请求 PX4 解锁和原生 `AUTO.TAKEOFF`，执行前必须解除 Kill 并确认场地净空；
+- `real.sh arm` 成功返回表示原生起飞、自动 OFFBOARD 和 SE3 输出验证均已完成；飞手仍须确认定位、点云和 PX4 EKF 正常，并保留随时切回人工模式的能力；
+- OFFBOARD 前发布的目标不会排队，必须在 `/mavros/state` 确认 OFFBOARD 后重新发布；
+- SE3 围栏不能替代 PX4 的 RC、Offboard、电池和估计器 failsafe；
+- `hover_percent`、`ki_pz`、推力限制和雷达外参必须针对实际机体重新验证；
+- 建议先卸桨完成接口和方向检查，再进行受控低空测试。
 
-- [Tfly6/Diff-Planner-PX4](https://github.com/Tfly6/Diff-Planner-PX4)
-- [DifferentialRobotics/Diff-Planner](https://github.com/DifferentialRobotics/Diff-Planner)
-- [ZJU-FAST-Lab/EGO-Planner-v2](https://github.com/ZJU-FAST-Lab/EGO-Planner-v2)
-- [EGO-Planner: An ESDF-free Gradient-based Local Planner for Quadrotors](https://arxiv.org/abs/2008.08835)
+## 进一步阅读
 
-激光惯性里程计：
-
-- [hku-mars/FAST_LIO](https://github.com/hku-mars/FAST_LIO)
-- [FAST-LIO: A Fast, Robust LiDAR-inertial Odometry Package by Tightly-Coupled Iterated Kalman Filter](https://arxiv.org/abs/2010.08196)
-- [FAST-LIO2: Fast Direct LiDAR-inertial Odometry](https://arxiv.org/abs/2107.06829)
-
-Livox 雷达驱动：
-
-- [Livox-SDK/Livox-SDK2](https://github.com/Livox-SDK/Livox-SDK2)
-- [Livox-SDK/livox_ros_driver2](https://github.com/Livox-SDK/livox_ros_driver2)
-
-PX4 和 MAVROS：
-
-- [PX4/PX4-Autopilot](https://github.com/PX4/PX4-Autopilot)
-- [mavlink/mavros](https://github.com/mavlink/mavros)
-
-SE3 控制：
-
-- [HITSZ-MAS/se3_controller](https://github.com/HITSZ-MAS/se3_controller)
-- [Geometric Tracking Control of a Quadrotor UAV on SE(3)](https://www.researchgate.net/publication/224220605_Geometric_Tracking_Control_of_a_Quadrotor_UAV_on_SE3)
-- [Control of Complex Maneuvers for a Quadrotor UAV using Geometric Methods on SE(3)](https://arxiv.org/abs/1003.2005)
-
-
-室外测试步骤
-1、选点位
-固定在某个位置和朝向上电，抱着无人机找出合适的目标点位，记录坐标值（x,y,z）
-docker exec -it ros_noetic_realflight bash
-rostopic list
-rostopic echo ...
-
-2、远程启动程序
-ssh jetson2@10.251.142.1
-FCU_URL='serial:///dev/ttyACM0:57600' GCS_URL='udp://:14550@10.251.142.172:14550' SE3_HOVER_PERCENT=0.5 SE3_MAX_FEEDFORWARD_ACC=1.2 DIFF_PLANNER_INFLATION_SIZE=0.3 DIFF_PLANNER_VIRTUAL_CEIL=1.0 DIFF_PLANNER_VIRTUAL_GROUND=0.1 ./scripts/start_real_px4_mid360_fastlio.sh restart
-
-3、本机启动rviz
-CONTAINER_NAME=ros_noetic JETSON_IP=10.251.142.1 LOCAL_IP=10.251.142.172 /home/dreamer198/diff-planner-px4-deployment/scripts/start_jetson_ros1_rviz.sh
-
-<!-- 发点 -->
-ssh jetson2@10.251.142.1
-docker exec -it ros_noetic_realflight bash -lc 'source ~/.bashrc && rostopic pub -1 /goal geometry_msgs/PoseStamped "header:
-  frame_id: world
-pose:
-  position:
-    x: 7.84
-    y: 17.45
-    z: 0.75
-  orientation:
-    w: 1.0"'
-
-docker exec -it ros_noetic_realflight bash -lc 'source ~/.bashrc && rostopic pub -1 /goal geometry_msgs/PoseStamped "header:
-  frame_id: world
-pose:
-  position:
-    x: 0.0
-    y: 0.0
-    z: 0.75
-  orientation:
-    w: 1.0"'
+- [仿真运行说明](docs/simulation.md)
+- [真机部署说明](docs/deployment.md)
+- [公共 Sim-to-Real 接口](common/README.md)
+- [仿真参数说明](docs/simulation_parameters.md)
+- [Diff-Planner 原理](docs/diff_planner_principles.md)
+- [SE3 控制器](docs/se3_controller.md)
+- [竖直积分增益整定](docs/ki_pz_tuning_guide.md)
+- [轨迹跟踪掉高排查](docs/trajectory_tracking_altitude.md)

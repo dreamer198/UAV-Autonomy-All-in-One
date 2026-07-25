@@ -1,5 +1,6 @@
 // #include <fstream>
 #include <plan_manage/planner_manager.h>
+#include <plan_manage/planning_recovery_utils.h>
 #include <thread>
 #include "visualization_msgs/Marker.h" // zx-todo
 
@@ -157,6 +158,12 @@ namespace diff_planner
     }
 
     /*** STEP 3: Store and display results ***/
+    if (flag_success && !setLocalTrajFromOpt(best_MJO, touch_goal))
+    {
+      ROS_ERROR("Optimized trajectory could not be validated/stored; treating this replan as failed.");
+      flag_success = false;
+    }
+
     cout << "Success=" << (flag_success ? "yes" : "no") << endl;
     if (flag_success)
     {
@@ -171,7 +178,6 @@ namespace diff_planner
       //      << ",optimize:" << t_opt.toSec()
       //      << ",avg_time=" << sum_time / count_success << endl;
 
-      setLocalTrajFromOpt(best_MJO, touch_goal);
       cstr_pts = best_MJO.getInitConstraintPoints(ploy_traj_opt_->get_cps_num_prePiece_());
       visualization_->displayOptimalList(cstr_pts, 0);
 
@@ -322,48 +328,114 @@ namespace diff_planner
     return true;
   }
 
-  void DiffPlannerManager::getLocalTarget(
+  bool DiffPlannerManager::getLocalTarget(
       const double planning_horizen, const Eigen::Vector3d &start_pt,
       const Eigen::Vector3d &global_end_pt, Eigen::Vector3d &local_target_pos,
       Eigen::Vector3d &local_target_vel, bool &touch_goal)
   {
-    double t;
     touch_goal = false;
 
-    traj_.global_traj.last_glb_t_of_lc_tgt = traj_.global_traj.glb_t_of_lc_tgt;
-
-    double t_step = planning_horizen / 20 / pp_.max_vel_;
-    // double dist_min = 9999, dist_min_t = 0.0;
-    for (t = traj_.global_traj.glb_t_of_lc_tgt;
-         t < (traj_.global_traj.global_start_time + traj_.global_traj.duration);
-         t += t_step)
+    const double global_start_time = traj_.global_traj.global_start_time;
+    const double global_end_time = global_start_time + traj_.global_traj.duration;
+    const double map_resolution = grid_map_->getResolution();
+    if (!std::isfinite(planning_horizen) || planning_horizen <= 0.0 ||
+        !std::isfinite(pp_.max_vel_) || pp_.max_vel_ <= 0.0 ||
+        !std::isfinite(map_resolution) || map_resolution <= 0.0 ||
+        !std::isfinite(global_start_time) || !std::isfinite(global_end_time) ||
+        global_end_time < global_start_time)
     {
-      Eigen::Vector3d pos_t = traj_.global_traj.traj.getPos(t - traj_.global_traj.global_start_time);
-      double dist = (pos_t - start_pt).norm();
+      ROS_ERROR_THROTTLE(1.0, "Cannot select a local target because planner timing parameters are invalid.");
+      return false;
+    }
+
+    const double previous_target_time = std::fmax(
+        global_start_time,
+        std::fmin(traj_.global_traj.glb_t_of_lc_tgt, global_end_time));
+    const double target_search_step = planning_horizen / 20.0 / pp_.max_vel_;
+    double candidate_time = global_end_time;
+    bool candidate_is_goal = true;
+
+    for (double sample_time = previous_target_time;
+         sample_time < global_end_time;
+         sample_time += target_search_step)
+    {
+      const Eigen::Vector3d pos_t =
+          traj_.global_traj.traj.getPos(sample_time - global_start_time);
+      const double dist = (pos_t - start_pt).norm();
 
       if (dist >= planning_horizen)
       {
-        local_target_pos = pos_t;
-        traj_.global_traj.glb_t_of_lc_tgt = t;
+        candidate_time = sample_time;
+        candidate_is_goal = false;
         break;
       }
     }
 
-    if ((t - traj_.global_traj.global_start_time) >= traj_.global_traj.duration - 1e-5) // Last global point
+    const auto position_at_time = [&](const double world_time) {
+      return traj_.global_traj.traj.getPos(world_time - global_start_time);
+    };
+    Eigen::Vector3d candidate_pos =
+        candidate_is_goal ? global_end_pt : position_at_time(candidate_time);
+    const Eigen::Vector3d original_candidate_pos = candidate_pos;
+    double selected_time = candidate_time;
+    bool backed_away_from_obstacle = false;
+
+    if (grid_map_->getInflateOccupancy(candidate_pos) != 0)
     {
-      local_target_pos = global_end_pt;
-      traj_.global_traj.glb_t_of_lc_tgt = traj_.global_traj.global_start_time + traj_.global_traj.duration;
-      touch_goal = true;
+      const double collision_check_step = map_resolution / pp_.max_vel_;
+      const bool found_free_target =
+          planning_recovery_utils::findFreeTimeByBacktracking(
+              previous_target_time, candidate_time, collision_check_step,
+              [&](const double world_time) {
+                const Eigen::Vector3d pos = position_at_time(world_time);
+                return grid_map_->getInflateOccupancy(pos) != 0;
+              },
+              selected_time);
+
+      if (!found_free_target)
+      {
+        ROS_WARN_THROTTLE(
+            1.0,
+            "Local target is occupied and no free fallback exists on the current global-trajectory segment.");
+        return false;
+      }
+
+      candidate_pos = position_at_time(selected_time);
+      const double minimum_progress = map_resolution;
+      if ((candidate_pos - start_pt).norm() < minimum_progress)
+      {
+        ROS_WARN_THROTTLE(
+            1.0,
+            "Local target is occupied and the nearest free fallback does not provide forward progress.");
+        return false;
+      }
+
+      backed_away_from_obstacle = true;
+      ROS_WARN_THROTTLE(
+          1.0,
+          "Local target (%.2f, %.2f, %.2f) is occupied; using free fallback (%.2f, %.2f, %.2f).",
+          original_candidate_pos(0), original_candidate_pos(1), original_candidate_pos(2),
+          candidate_pos(0), candidate_pos(1), candidate_pos(2));
     }
 
-    if ((global_end_pt - local_target_pos).norm() < (pp_.max_vel_ * pp_.max_vel_) / (2 * pp_.max_acc_))
+    local_target_pos = candidate_pos;
+    touch_goal = candidate_is_goal && !backed_away_from_obstacle;
+
+    if (backed_away_from_obstacle ||
+        (global_end_pt - local_target_pos).norm() <
+            (pp_.max_vel_ * pp_.max_vel_) / (2 * pp_.max_acc_))
     {
       local_target_vel = Eigen::Vector3d::Zero();
     }
     else
     {
-      local_target_vel = traj_.global_traj.traj.getVel(t - traj_.global_traj.global_start_time);
+      local_target_vel =
+          traj_.global_traj.traj.getVel(selected_time - global_start_time);
     }
+
+    traj_.global_traj.last_glb_t_of_lc_tgt = previous_target_time;
+    traj_.global_traj.glb_t_of_lc_tgt = selected_time;
+    return true;
   }
 
   bool DiffPlannerManager::setLocalTrajFromOpt(const poly_traj::MinJerkOpt &opt, const bool touch_goal)
@@ -372,12 +444,15 @@ namespace diff_planner
     Eigen::MatrixXd cps = opt.getInitConstraintPoints(getCpsNumPrePiece());
     PtsChk_t pts_to_check;
     bool ret = ploy_traj_opt_->computePointsToCheck(traj, ConstraintPoints::two_thirds_id(cps, touch_goal), pts_to_check);
-    if (ret && pts_to_check.size() >= 1 && pts_to_check.back().size() >= 1)
+    const bool valid_check_points =
+        ret && !pts_to_check.empty() && !pts_to_check.back().empty();
+    if (!valid_check_points)
     {
-      traj_.setLocalTraj(traj, pts_to_check, ros::Time::now().toSec());
+      return false;
     }
 
-    return ret;
+    traj_.setLocalTraj(traj, pts_to_check, ros::Time::now().toSec());
+    return true;
   }
 
   bool DiffPlannerManager::EmergencyStop(Eigen::Vector3d stop_pos)
@@ -390,9 +465,7 @@ namespace diff_planner
     stopMJO.reset(headState, tailState, 2);
     stopMJO.generate(stop_pos, Eigen::Vector2d(1.0, 1.0));
 
-    setLocalTrajFromOpt(stopMJO, false);
-
-    return true;
+    return setLocalTrajFromOpt(stopMJO, false);
   }
 
   bool DiffPlannerManager::checkCollision(int drone_id)

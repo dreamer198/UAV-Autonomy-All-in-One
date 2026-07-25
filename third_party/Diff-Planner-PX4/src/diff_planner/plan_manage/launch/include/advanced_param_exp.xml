@@ -37,6 +37,8 @@
     <arg name="point4_z"/>
     <arg name="flight_type"/>
     <arg name="drone_id"/>
+    <arg name="goal_yaw_tolerance_deg" default="5.0"/>
+    <arg name="goal_position_tolerance" default="0.2"/>
     <!-- main node -->
     <!-- <node pkg="diff_planner" name="diff_planner_node" type="diff_planner_node" output="screen" launch-prefix="valgrind"> -->
     <node pkg="diff_planner" name="drone_$(arg drone_id)_diff_planner_node" type="diff_planner_node" output="screen">
@@ -57,6 +59,8 @@
         <param name="fsm/planning_horizon" value="$(arg planning_horizon)" type="double"/>
         <!--always set to 1.5 times grater than sensing horizen-->
         <param name="fsm/emergency_time" value="1.0" type="double"/>
+        <param name="fsm/goal_yaw_tolerance_deg" value="$(arg goal_yaw_tolerance_deg)" type="double"/>
+        <param name="fsm/goal_position_tolerance" value="$(arg goal_position_tolerance)" type="double"/>
         <param name="fsm/realworld_experiment" value="true"/>
         <param name="fsm/fail_safe" value="true"/>
         <!-- Allow final goal modification -->
@@ -82,7 +86,7 @@
         <param name="grid_map/resolution" value="$(arg map_resolution)" />
         <param name="grid_map/local_update_range_x" value="$(arg local_map_size_x)" />
         <param name="grid_map/local_update_range_y" value="$(arg local_map_size_y)" />
-        <param name="grid_map/local_update_range_z" value="$(arg local_map_size_z)" /> <!-- different meaning between grid_map.cpp and grid_map_bigmap.cpp -->
+        <param name="grid_map/local_update_range_z" value="$(arg local_map_size_z)" />
         <param name="grid_map/obstacles_inflation" value="$(arg inflation_size)" />
         <param name="grid_map/enable_virtual_wall" value="$(arg enable_virtual_wall)"/>
         <param name="grid_map/virtual_ceil" value="$(arg virtual_ceil)"/>
