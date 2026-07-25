@@ -1,0 +1,99 @@
+{
+  "bounds_max": [
+    61.65,
+    -0.0364426606833,
+    3.981885411260052
+  ],
+  "bounds_min": [
+    -0.120791277208,
+    -19.03,
+    0.0
+  ],
+  "cloud_stride": 2,
+  "cloud_topic": "/localization/cloud_registered",
+  "corridor_radius": 7.0,
+  "forest_bounds": {
+    "max_x": 61.65,
+    "max_y": -0.0364426606833,
+    "min_x": -0.120791277208,
+    "min_y": -19.03
+  },
+  "forest_corner_clearance": 1.5,
+  "forest_fill_spacing": 2.0,
+  "forest_path_clearance": 0.65,
+  "forest_seed": 151241,
+  "forest_statistics": {
+    "density_grid_shape": [
+      261,
+      105
+    ],
+    "density_score_max": 26.104157490525825,
+    "density_score_min": 8.165556128803443,
+    "density_threshold": 8.13339663939374,
+    "rectangle_completion": {
+      "bounds": {
+        "max_x": 61.65,
+        "max_y": -0.0364426606833,
+        "min_x": -0.120791277208,
+        "min_y": -19.03
+      },
+      "corner_clearance": 1.5,
+      "edge_margin": 0.507,
+      "fill_spacing": 2.0,
+      "filled_tree_count": 99,
+      "measured_tree_count": 91,
+      "path_clearance": 0.65
+    }
+  },
+  "geometry_mode": "forest",
+  "ground_z": 0.0,
+  "initial_pose": {
+    "qw": 0.9992148383487083,
+    "qx": -0.009287461049099128,
+    "qy": -0.0385107882752628,
+    "qz": -0.0006075174435494502,
+    "time": 0.07930183410644531,
+    "x": -0.12079127720801995,
+    "y": -0.03644266068333327,
+    "yaw": -0.0005002300870832716,
+    "z": 0.008064800351144912
+  },
+  "mesh_faces": 11780,
+  "mesh_file": "meshes/scene.obj",
+  "mesh_vertices": 11780,
+  "min_observations": 2,
+  "obstacle_max_z": 3.2,
+  "obstacle_min_z": 0.18,
+  "odom_topic": "/localization/odom",
+  "self_filter_radius": 0.35,
+  "source_bag": "se3_test_20260723_151241_0.bag",
+  "source_bag_size": 1230885542,
+  "statistics": {
+    "accepted_cloud_points": 561724,
+    "bag_end_time": 1784791073.2850344,
+    "bag_start_time": 1784790843.4960084,
+    "candidate_voxels": 124093,
+    "cloud_messages": 2298,
+    "duration": 229.7890260219574,
+    "processed_cloud_messages": 1149,
+    "retained_voxels": 82135,
+    "unique_voxels_across_scans": 556634
+  },
+  "tree_count": 190,
+  "tree_crown_radius": 0.78,
+  "tree_density_quantile": 0.8,
+  "tree_grid_size": 0.28,
+  "tree_max_height": 4.2,
+  "tree_min_height": 2.5,
+  "tree_min_spacing": 1.2,
+  "tree_smoothing_radius": 0.4,
+  "tree_trunk_radius": 0.19,
+  "voxel_size": 0.14,
+  "wind_direction": [
+    1.0,
+    0.0,
+    0.0
+  ],
+  "wind_speed": 0.0,
+  "world_file": "se3_outdoor_reconstruction.world"
+}

@@ -1,0 +1,104 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <world name="se3_outdoor_bag_reconstruction">
+    <light name="sun" type="directional">
+      <pose>0 0 30 0 0 0</pose>
+      <diffuse>0.85 0.85 0.82 1</diffuse>
+      <specular>0.15 0.15 0.15 1</specular>
+      <direction>-0.45 0.15 -0.88</direction>
+      <cast_shadows>true</cast_shadows>
+    </light>
+    <model name="ground_plane">
+      <static>true</static>
+      <pose>30.764604 -9.533221 0.000000 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100.000 100.000</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <cast_shadows>false</cast_shadows>
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100.000 100.000</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.18 0.22 0.14 1</ambient>
+            <diffuse>0.32 0.38 0.24 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="bag_reconstructed_environment">
+      <static>true</static>
+      <link name="environment_link">
+        <collision name="environment_collision">
+          <geometry>
+            <mesh><uri>file:///etc/sim2real/simulation/scenes/outdoor_rectangular_forest/meshes/scene.obj</uri></mesh>
+          </geometry>
+          <max_contacts>20</max_contacts>
+        </collision>
+        <visual name="environment_visual">
+          <cast_shadows>true</cast_shadows>
+          <geometry>
+            <mesh><uri>file:///etc/sim2real/simulation/scenes/outdoor_rectangular_forest/meshes/scene.obj</uri></mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <plugin name="wind_plugin" filename="libgazebo_wind_plugin.so">
+      <frameId>base_link</frameId>
+      <robotNamespace/>
+      <windVelocityMean>0.000000</windVelocityMean>
+      <windVelocityMax>0.000000</windVelocityMax>
+      <windVelocityVariance>0</windVelocityVariance>
+      <windDirectionMean>1.000000000 0.000000000 0.000000000</windDirectionMean>
+      <windDirectionVariance>0</windDirectionVariance>
+      <windGustStart>0</windGustStart>
+      <windGustDuration>0</windGustDuration>
+      <windGustVelocityMean>0</windGustVelocityMean>
+      <windGustVelocityMax>0</windGustVelocityMax>
+      <windGustVelocityVariance>0</windGustVelocityVariance>
+      <windGustDirectionMean>1 0 0</windGustDirectionMean>
+      <windGustDirectionVariance>0</windGustDirectionVariance>
+      <windPubTopic>world_wind</windPubTopic>
+    </plugin>
+    <gravity>0 0 -9.8066</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <physics name="default_physics" default="0" type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+      <ode>
+        <solver><type>quick</type><iters>20</iters><sor>1.3</sor></solver>
+        <constraints>
+          <cfm>0</cfm>
+          <erp>0.2</erp>
+          <contact_max_correcting_vel>100</contact_max_correcting_vel>
+          <contact_surface_layer>0.001</contact_surface_layer>
+        </constraints>
+      </ode>
+    </physics>
+    <scene>
+      <ambient>0.45 0.45 0.42 1</ambient>
+      <background>0.72 0.78 0.82 1</background>
+      <shadows>true</shadows>
+    </scene>
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <latitude_deg>0</latitude_deg>
+      <longitude_deg>0</longitude_deg>
+      <elevation>0</elevation>
+      <heading_deg>0</heading_deg>
+    </spherical_coordinates>
+  </world>
+</sdf>

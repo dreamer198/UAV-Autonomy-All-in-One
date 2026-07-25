@@ -1,0 +1,13 @@
+newmtl tree_trunk
+Ka 0.16 0.09 0.035
+Kd 0.34 0.18 0.07
+Ks 0.01 0.01 0.01
+d 1.0
+illum 2
+
+newmtl tree_crown
+Ka 0.08 0.16 0.06
+Kd 0.20 0.43 0.16
+Ks 0.015 0.02 0.012
+d 1.0
+illum 2

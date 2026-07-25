@@ -138,7 +138,7 @@ Actions:
 
 Useful overrides:
   SIM_GAZEBO_GUI=false SIM_START_RVIZ=false ./launch/sim.sh restart
-  ./launch/sim.sh --scene se3_test_20260723_151241_0 restart
+  ./launch/sim.sh --scene outdoor_rectangular_forest restart
   SIM_WORLD=/root/simulation_runtime/reconstructed/test/world.world \
     SIM_SPAWN_X=0 SIM_SPAWN_Y=0 ./launch/sim.sh restart
   ./launch/sim.sh arm

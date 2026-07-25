@@ -10,9 +10,11 @@ CONTAINER_NAME="${SIM_DEV_CONTAINER:-diff_planner_px4_sim}"
 BAG_NAME="${OUTDOOR_SIM_BAG_NAME:-se3_test_20260723_151241_0.bag}"
 BAG_HOST="${OUTDOOR_SIM_BAG_HOST:-$PROJECT_ROOT/runtime/simulation/flight_bags/$BAG_NAME}"
 BAG_CONTAINER="${OUTDOOR_SIM_BAG_CONTAINER:-/root/simulation_runtime/flight_bags/$BAG_NAME}"
-SCENE_NAME="${OUTDOOR_SIM_SCENE_NAME:-${BAG_NAME%.bag}}"
+SCENE_NAME="${OUTDOOR_SIM_SCENE_NAME:-outdoor_rectangular_forest}"
 OUTPUT_HOST="${OUTDOOR_SIM_OUTPUT_HOST:-$PROJECT_ROOT/runtime/simulation/reconstructed/$SCENE_NAME}"
 OUTPUT_CONTAINER="${OUTDOOR_SIM_OUTPUT_CONTAINER:-/root/simulation_runtime/reconstructed/$SCENE_NAME}"
+ASSET_HOST="${OUTDOOR_SIM_ASSET_HOST:-$PROJECT_ROOT/simulation/config/scenes/$SCENE_NAME}"
+ASSET_CONTAINER="${OUTDOOR_SIM_ASSET_CONTAINER:-/etc/sim2real/simulation/scenes/$SCENE_NAME}"
 GENERATOR_CONTAINER="/workspaces/sim2real_ws/src/sim2real_simulation/scripts/reconstruct_bag_world.py"
 
 VOXEL_SIZE="${OUTDOOR_SIM_VOXEL_SIZE:-0.14}"
@@ -21,6 +23,23 @@ MIN_OBSERVATIONS="${OUTDOOR_SIM_MIN_OBSERVATIONS:-2}"
 CORRIDOR_RADIUS="${OUTDOOR_SIM_CORRIDOR_RADIUS:-7.0}"
 OBSTACLE_MIN_Z="${OUTDOOR_SIM_OBSTACLE_MIN_Z:-0.18}"
 OBSTACLE_MAX_Z="${OUTDOOR_SIM_OBSTACLE_MAX_Z:-3.2}"
+GEOMETRY_MODE="${OUTDOOR_SIM_GEOMETRY_MODE:-forest}"
+TREE_GRID_SIZE="${OUTDOOR_SIM_TREE_GRID_SIZE:-0.28}"
+TREE_SMOOTHING_RADIUS="${OUTDOOR_SIM_TREE_SMOOTHING_RADIUS:-0.40}"
+TREE_MIN_SPACING="${OUTDOOR_SIM_TREE_MIN_SPACING:-1.20}"
+TREE_DENSITY_QUANTILE="${OUTDOOR_SIM_TREE_DENSITY_QUANTILE:-0.80}"
+TREE_TRUNK_RADIUS="${OUTDOOR_SIM_TREE_TRUNK_RADIUS:-0.19}"
+TREE_CROWN_RADIUS="${OUTDOOR_SIM_TREE_CROWN_RADIUS:-0.78}"
+TREE_MIN_HEIGHT="${OUTDOOR_SIM_TREE_MIN_HEIGHT:-2.50}"
+TREE_MAX_HEIGHT="${OUTDOOR_SIM_TREE_MAX_HEIGHT:-4.20}"
+FOREST_MIN_X="${OUTDOOR_SIM_FOREST_MIN_X:--0.120791277208}"
+FOREST_MAX_X="${OUTDOOR_SIM_FOREST_MAX_X:-61.65}"
+FOREST_MIN_Y="${OUTDOOR_SIM_FOREST_MIN_Y:--19.03}"
+FOREST_MAX_Y="${OUTDOOR_SIM_FOREST_MAX_Y:--0.0364426606833}"
+FOREST_FILL_SPACING="${OUTDOOR_SIM_FOREST_FILL_SPACING:-2.0}"
+FOREST_PATH_CLEARANCE="${OUTDOOR_SIM_FOREST_PATH_CLEARANCE:-0.65}"
+FOREST_CORNER_CLEARANCE="${OUTDOOR_SIM_FOREST_CORNER_CLEARANCE:-1.50}"
+FOREST_SEED="${OUTDOOR_SIM_FOREST_SEED:-151241}"
 WIND_SPEED="${OUTDOOR_SIM_WIND_SPEED:-0.0}"
 WIND_DIRECTION_X="${OUTDOOR_SIM_WIND_DIRECTION_X:-1.0}"
 WIND_DIRECTION_Y="${OUTDOOR_SIM_WIND_DIRECTION_Y:-0.0}"
@@ -29,12 +48,12 @@ usage() {
   cat <<'EOF'
 Usage: outdoor_bag_sim.sh {generate|start|stop|status|attach|shell|arm|land|goal}
 
-  generate           Reconstruct the complete Gazebo world from the bag.
+  generate           Reconstruct and publish the versioned Gazebo forest asset.
   start              Compatibility alias for the unified sim.sh scene command.
   Other actions      Compatibility aliases for the corresponding sim.sh action.
 
 New simulations should use the unified entrypoint directly:
-  ./launch/sim.sh --scene se3_test_20260723_151241_0 restart
+  ./launch/sim.sh --scene outdoor_rectangular_forest restart
   ./launch/sim.sh arm
   ./launch/sim.sh goal X Y Z [YAW]
   ./launch/sim.sh land
@@ -46,6 +65,13 @@ Optional geometry/environment overrides:
   OUTDOOR_SIM_VOXEL_SIZE=0.14
   OUTDOOR_SIM_MIN_OBSERVATIONS=2
   OUTDOOR_SIM_CORRIDOR_RADIUS=7.0
+  OUTDOOR_SIM_TREE_MIN_SPACING=1.20
+  OUTDOOR_SIM_TREE_DENSITY_QUANTILE=0.80
+  OUTDOOR_SIM_TREE_CROWN_RADIUS=0.78
+  OUTDOOR_SIM_TREE_MAX_HEIGHT=4.20
+  OUTDOOR_SIM_FOREST_FILL_SPACING=2.0
+  OUTDOOR_SIM_FOREST_PATH_CLEARANCE=0.65
+  OUTDOOR_SIM_GEOMETRY_MODE=forest
   OUTDOOR_SIM_WIND_SPEED=0.0
   OUTDOOR_SIM_WIND_DIRECTION_X=1 OUTDOOR_SIM_WIND_DIRECTION_Y=0
   SIM_GAZEBO_GUI=false SIM_START_RVIZ=false
@@ -63,6 +89,8 @@ ensure_container() {
 
 generate_scene() {
   [ -f "$BAG_HOST" ] || die "Repaired bag not found: $BAG_HOST"
+  command -v rsync >/dev/null 2>&1 ||
+    die "Missing host command required to publish the scene: rsync"
   ensure_container
   mkdir -p "$OUTPUT_HOST"
   echo "[INFO] Reconstructing the full recorded flight corridor."
@@ -78,15 +106,36 @@ generate_scene() {
         --corridor-radius '$CORRIDOR_RADIUS' \
         --obstacle-min-z '$OBSTACLE_MIN_Z' \
         --obstacle-max-z '$OBSTACLE_MAX_Z' \
+        --geometry-mode '$GEOMETRY_MODE' \
+        --tree-grid-size '$TREE_GRID_SIZE' \
+        --tree-smoothing-radius '$TREE_SMOOTHING_RADIUS' \
+        --tree-min-spacing '$TREE_MIN_SPACING' \
+        --tree-density-quantile '$TREE_DENSITY_QUANTILE' \
+        --tree-trunk-radius '$TREE_TRUNK_RADIUS' \
+        --tree-crown-radius '$TREE_CROWN_RADIUS' \
+        --tree-min-height '$TREE_MIN_HEIGHT' \
+        --tree-max-height '$TREE_MAX_HEIGHT' \
+        --forest-min-x '$FOREST_MIN_X' \
+        --forest-max-x '$FOREST_MAX_X' \
+        --forest-min-y '$FOREST_MIN_Y' \
+        --forest-max-y '$FOREST_MAX_Y' \
+        --forest-fill-spacing '$FOREST_FILL_SPACING' \
+        --forest-path-clearance '$FOREST_PATH_CLEARANCE' \
+        --forest-corner-clearance '$FOREST_CORNER_CLEARANCE' \
+        --forest-seed '$FOREST_SEED' \
+        --mesh-uri 'file://$ASSET_CONTAINER/meshes/scene.obj' \
         --wind-speed '$WIND_SPEED' \
         --wind-direction '$WIND_DIRECTION_X' '$WIND_DIRECTION_Y' '$WIND_DIRECTION_Z'
     "
+  mkdir -p "$ASSET_HOST"
+  rsync -a --delete "$OUTPUT_HOST/" "$ASSET_HOST/"
+  echo "[INFO] Published versioned scene asset: $ASSET_HOST"
 }
 
 ensure_scene() {
-  if [ ! -f "$OUTPUT_HOST/se3_outdoor_reconstruction.world" ] || \
-     [ ! -f "$OUTPUT_HOST/meshes/scene.obj" ] || \
-     [ ! -f "$OUTPUT_HOST/metadata.json" ]; then
+  if [ ! -f "$ASSET_HOST/se3_outdoor_reconstruction.world" ] || \
+     [ ! -f "$ASSET_HOST/meshes/scene.obj" ] || \
+     [ ! -f "$ASSET_HOST/metadata.json" ]; then
     generate_scene
   fi
 }

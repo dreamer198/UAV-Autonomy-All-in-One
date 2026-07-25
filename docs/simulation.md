@@ -41,12 +41,13 @@ PX4 SITL + Gazebo + iris_mid360
 切换 Gazebo 场景仍使用同一个入口。例如加载室外 bag 重建场景：
 
 ```bash
-./launch/sim.sh --scene se3_test_20260723_151241_0 restart
+./launch/sim.sh --scene outdoor_rectangular_forest restart
 ```
 
 之后的 `arm/goal/mission/land/stop` 命令不变。场景配置位于
-`simulation/config/scenes/*.env`，只保存 world 路径和出生位姿；控制器、Planner、
-传感器适配和飞行状态机不会随场景切换。也可以不创建场景配置，直接临时覆盖：
+`simulation/config/scenes/*.env`；可版本化的重建资产位于同名子目录。配置只保存
+world 路径和出生位姿，控制器、Planner、传感器适配和飞行状态机不会随场景切换。
+也可以不创建场景配置，直接临时覆盖：
 
 ```bash
 SIM_WORLD=/root/simulation_runtime/reconstructed/new_scene/world.world \

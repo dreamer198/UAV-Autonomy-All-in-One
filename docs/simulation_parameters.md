@@ -80,7 +80,7 @@ Planner，因此不使用 Planner 的
 
 默认场景的 world 是 `ego_swarm.world`，使用 ODE 物理引擎。使用
 `./launch/sim.sh --scene NAME restart` 可只替换 world 和出生位姿，场景文件位于
-`simulation/config/scenes/*.env`。
+`simulation/config/scenes/*.env`，随仓库分发的重建网格位于对应同名子目录。
 
 | 参数 | 当前值 |
 |---|---:|
