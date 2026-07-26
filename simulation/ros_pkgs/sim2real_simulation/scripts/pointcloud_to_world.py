@@ -16,8 +16,13 @@ class PointCloudToWorld:
             '~output_topic', '/localization/cloud_registered')
         self.source_frame = rospy.get_param('~source_frame', 'livox_link')
         self.lookup_timeout = rospy.get_param('~lookup_timeout', 0.1)
-        self.use_latest_on_extrapolation = rospy.get_param(
-            '~use_latest_on_extrapolation', True)
+        requested_latest_fallback = bool(rospy.get_param(
+            '~use_latest_on_extrapolation', False))
+        if requested_latest_fallback:
+            rospy.logwarn(
+                "~use_latest_on_extrapolation is unsafe and is ignored; "
+                "clouds without a transform at their measurement timestamp "
+                "are dropped.")
         self.filter_enable = rospy.get_param('~filter_enable', True)
         self.voxel_leaf_size = rospy.get_param('~voxel_leaf_size', 0.08)
         self.min_range = rospy.get_param('~min_range', 0.2)
@@ -49,7 +54,15 @@ class PointCloudToWorld:
         # 处理 Gazebo 命名空间（例如 "Mid360::livox_link" -> "livox_link"）
         if '::' in frame_id:
             frame_id = frame_id.split('::')[-1]
-        stamp = msg.header.stamp if msg.header.stamp != rospy.Time() else rospy.Time(0)
+        if msg.header.stamp == rospy.Time():
+            self.tf_fail_count += 1
+            rospy.logwarn_throttle(
+                self.log_interval,
+                "Dropping pointcloud without a measurement timestamp "
+                "(fail_count=%d).",
+                self.tf_fail_count)
+            return
+        stamp = msg.header.stamp
 
         try:
             transform = self.buffer.lookup_transform(
@@ -66,32 +79,13 @@ class PointCloudToWorld:
                 exc, self.tf_fail_count, stamp.to_sec())
             return
         except tf2_ros.ExtrapolationException as exc:
-            if not self.use_latest_on_extrapolation:
-                self.tf_fail_count += 1
-                rospy.logwarn_throttle(
-                    self.log_interval,
-                    "TF lookup failed: %s (fail_count=%d, cloud_stamp=%.3f)",
-                    exc, self.tf_fail_count, stamp.to_sec())
-                return
             self.tf_extrap_count += 1
             rospy.logwarn_throttle(
                 self.log_interval,
-                "TF extrapolation: %s (extrap_count=%d, cloud_stamp=%.3f). Falling back to latest TF.",
+                "Dropping cloud because its measurement-time TF is "
+                "unavailable: %s (extrap_count=%d, cloud_stamp=%.3f).",
                 exc, self.tf_extrap_count, stamp.to_sec())
-            try:
-                transform = self.buffer.lookup_transform(
-                    self.target_frame,
-                    frame_id,
-                    rospy.Time(0),
-                    rospy.Duration(self.lookup_timeout)
-                )
-            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as exc2:
-                self.tf_fail_count += 1
-                rospy.logwarn_throttle(
-                    self.log_interval,
-                    "TF lookup failed: %s (fail_count=%d)",
-                    exc2, self.tf_fail_count)
-                return
+            return
 
         cloud_out = do_transform_cloud(msg, transform)
         cloud_out.header.frame_id = self.target_frame

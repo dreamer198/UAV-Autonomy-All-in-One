@@ -38,7 +38,7 @@
     <arg name="flight_type"/>
     <arg name="drone_id"/>
     <arg name="goal_yaw_tolerance_deg" default="5.0"/>
-    <arg name="goal_position_tolerance" default="0.2"/>
+    <arg name="goal_position_tolerance" default="0.35"/>
     <!-- main node -->
     <!-- <node pkg="diff_planner" name="diff_planner_node" type="diff_planner_node" output="screen" launch-prefix="valgrind"> -->
     <node pkg="diff_planner" name="drone_$(arg drone_id)_diff_planner_node" type="diff_planner_node" output="screen">
@@ -91,7 +91,6 @@
         <param name="grid_map/enable_virtual_wall" value="$(arg enable_virtual_wall)"/>
         <param name="grid_map/virtual_ceil" value="$(arg virtual_ceil)"/>
         <param name="grid_map/virtual_ground" value="$(arg virtual_ground)"/>
-        <param name="grid_map/ground_height" value="-0.01"/>
         <!-- camera parameter -->
         <param name="grid_map/cx" value="$(arg cx)"/>
         <param name="grid_map/cy" value="$(arg cy)"/>
@@ -100,7 +99,6 @@
         <!-- depth filter -->
         <param name="grid_map/use_depth_filter" value="true"/>
         <param name="grid_map/depth_filter_tolerance" value="0.15"/>
-        <param name="grid_map/depth_filter_maxdist" value="5.0"/>
         <param name="grid_map/depth_filter_mindist" value="0.2"/>
         <param name="grid_map/depth_filter_margin" value="2"/>
         <param name="grid_map/k_depth_scaling_factor" value="1000.0"/>
@@ -113,15 +111,12 @@
         <param name="grid_map/p_occ" value="0.80"/>
         <param name="grid_map/fading_time" value="-1.0"/>
         <param name="grid_map/min_ray_length" value="0.1"/>
-        <param name="grid_map/max_ray_length" value="4.5"/>
-        <param name="grid_map/visualization_truncate_height" value="1.9"/>
         <param name="grid_map/show_occ_time" value="false"/>
         <param name="grid_map/pose_type" value="2"/>
         <param name="grid_map/frame_id" value="world"/>
         <!-- planner manager -->
         <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
         <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
-        <param name="manager/max_jer" value="$(arg max_jer)" type="double"/>
         <param name="manager/polyTraj_piece_length" value="1.5" type="double"/>
         <param name="manager/feasibility_tolerance" value="0.05" type="double"/>
         <param name="manager/planning_horizon" value="$(arg planning_horizon)" type="double"/>
@@ -143,6 +138,5 @@
         <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>
         <param name="optimization/acc_tolerance" value="1.0" type="double"/>
         <param name="optimization/max_jer" value="$(arg max_jer)" type="double"/>
-        <param name="optimization/record_opt" value="true"/>
     </node>
 </launch>

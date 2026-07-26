@@ -33,10 +33,30 @@ class PlannerConfigTest(unittest.TestCase):
         self.assertGreater(visualization_period, 0.0)
         self.assertGreaterEqual(visualization_period, 0.5)
 
-    def test_goal_distance_guard_is_enabled(self):
-        max_goal_distance = float(self.config["fsm"]["max_goal_distance"])
-        self.assertTrue(math.isfinite(max_goal_distance))
-        self.assertEqual(max_goal_distance, 200.0)
+    def test_stuck_detection_allows_startup_and_reversal_transients(self):
+        fsm = self.config["fsm"]
+        progress_threshold = float(fsm["stuck_progress_threshold"])
+        timeout = float(fsm["stuck_timeout"])
+        goal_tolerance = float(fsm["goal_position_tolerance"])
+
+        self.assertTrue(math.isfinite(progress_threshold))
+        self.assertTrue(math.isfinite(timeout))
+        self.assertTrue(math.isfinite(goal_tolerance))
+        self.assertEqual(progress_threshold, 0.1)
+        self.assertEqual(timeout, 5.0)
+        self.assertEqual(goal_tolerance, 0.35)
+
+    def test_replan_failures_use_a_timed_retry_window(self):
+        fsm = self.config["fsm"]
+        retry_interval = float(fsm["replan_retry_interval"])
+        failure_timeout = float(fsm["replan_failure_timeout"])
+
+        self.assertTrue(math.isfinite(retry_interval))
+        self.assertTrue(math.isfinite(failure_timeout))
+        self.assertGreater(retry_interval, 0.0)
+        self.assertGreater(failure_timeout, retry_interval)
+        self.assertEqual(retry_interval, 0.1)
+        self.assertEqual(failure_timeout, 1.0)
 
     def test_inflation_matches_current_airframe_baseline(self):
         grid_map = self.config["grid_map"]

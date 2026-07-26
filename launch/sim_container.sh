@@ -32,12 +32,14 @@ GPU_MODE_REQUESTED="${SIM_GPU_MODE:-auto}"
 
 usage() {
   cat <<'EOF'
-Usage: sim_container.sh {build|run|stop|restart|recreate|rm|shell|status|verify}
+Usage: sim_container.sh {build|run|stop|restart|recreate|rm|shell|status|verify} [--force]
 
 Builds and manages the repository-owned PX4/Gazebo/Mid360 simulation image.
 The host Diff-Planner-PX4 source is mounted read-only; its build products are
 kept under runtime/simulation/catkin_ws. No pre-existing ros_noetic container
 is used. SIM_GPU_MODE defaults to auto and accepts auto|nvidia|dri|none.
+Container mutation is refused while a simulation stack is active. --force is
+reserved for recovery after normal './launch/sim.sh stop' cannot be used.
 EOF
 }
 
@@ -114,13 +116,31 @@ active_simulation_detected() {
 
   container_running || return 1
   docker top "$CONTAINER_NAME" -eo args 2>/dev/null |
-    grep -Eq '(^|[ /])(roscore|rosmaster|gzserver|gzclient|mavros_node|px4)([[:space:]]|$)|outdoor_mid360\.launch'
+    grep -Eq '(^|[ /])(roscore|rosmaster|gzserver|gzclient|mavros_node|px4|se3_controller_node|diff_planner_node|traj_server)([[:space:]]|$)|outdoor_mid360\.launch|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
 }
 
 require_inactive_simulation() {
+  local force="${1:-false}"
+  if [ "$force" = "true" ]; then
+    warn "--force bypasses the active-simulation container interlock."
+    return 0
+  fi
   active_simulation_detected &&
-    die "Refusing to recreate '$CONTAINER_NAME' while a simulation stack is active. Run './launch/sim.sh stop' first."
+    die "Refusing to mutate '$CONTAINER_NAME' while a simulation stack is active. Run './launch/sim.sh stop' first."
   return 0
+}
+
+append_extra_args() {
+  local value="$1" destination_name="$2" variable_name="$3"
+  local -n output_array_ref="$destination_name"
+  [ -n "$value" ] || return 0
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] ||
+    die "$variable_name must be a single line of whitespace-separated Docker arguments."
+  local -a parsed=()
+  read -r -a parsed <<<"$value"
+  [ "${#parsed[@]}" -gt 0 ] ||
+    die "$variable_name did not contain a usable Docker argument."
+  output_array_ref+=("${parsed[@]}")
 }
 
 canonical_path() {
@@ -128,13 +148,13 @@ canonical_path() {
 }
 
 mount_source_for() {
-  local destination="$1"
-  docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$destination\"}}{{.Source}}{{end}}{{end}}" "$CONTAINER_NAME"
+  local mount_destination="$1"
+  docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.Source}}{{end}}{{end}}" "$CONTAINER_NAME"
 }
 
 mount_rw_for() {
-  local destination="$1"
-  docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$destination\"}}{{.RW}}{{end}}{{end}}" "$CONTAINER_NAME"
+  local mount_destination="$1"
+  docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.RW}}{{end}}{{end}}" "$CONTAINER_NAME"
 }
 
 verify_mounts() {
@@ -246,11 +266,7 @@ build_image() {
     --build-arg "BUILD_JOBS=$IMAGE_BUILD_JOBS"
   )
 
-  if [ -n "$EXTRA_BUILD_ARGS" ]; then
-    # shellcheck disable=SC2206
-    local extra_args=( $EXTRA_BUILD_ARGS )
-    build_args+=("${extra_args[@]}")
-  fi
+  append_extra_args "$EXTRA_BUILD_ARGS" build_args SIM_DOCKER_BUILD_ARGS
 
   info "Building repository-owned simulation image: $IMAGE_NAME"
   docker build "${build_args[@]}" -t "$IMAGE_NAME" -f "$DOCKERFILE" "$PROJECT_ROOT"
@@ -356,19 +372,16 @@ create_container() {
     docker_args+=(-v "$HOME/.Xauthority:/root/.Xauthority:ro")
   fi
 
-  if [ -n "$EXTRA_DOCKER_ARGS" ]; then
-    # shellcheck disable=SC2206
-    local extra_args=( $EXTRA_DOCKER_ARGS )
-    docker_args+=("${extra_args[@]}")
-  fi
+  append_extra_args "$EXTRA_DOCKER_ARGS" docker_args SIM_EXTRA_DOCKER_ARGS
 
-  info "Creating planner development container: $CONTAINER_NAME (graphics=$gpu_mode)"
+  info "Creating autonomy simulation container: $CONTAINER_NAME (graphics=$gpu_mode)"
   docker run "${docker_args[@]}" "$IMAGE_NAME" tail -f /dev/null >/dev/null
   verify_mounts
   verify_environment
 }
 
 run_container() {
+  local force="${1:-false}"
   need_cmd docker
   need_cmd realpath
   resolve_gpu_mode >/dev/null
@@ -377,9 +390,9 @@ run_container() {
     ensure_image
     if ! (verify_mounts); then
       validate_container_inputs
-      require_inactive_simulation
-      warn "Container layout is stale; recreating it for the unified Sim-to-Real workspace."
-      remove_container
+      require_inactive_simulation "$force"
+      warn "Container layout is stale; recreating it for the UAV Autonomy All-in-One workspace."
+      remove_container_unchecked
       create_container
       return
     fi
@@ -396,8 +409,10 @@ run_container() {
 }
 
 stop_container() {
+  local force="${1:-false}"
   need_cmd docker
   if container_running; then
+    require_inactive_simulation "$force"
     info "Stopping container: $CONTAINER_NAME"
     docker stop "$CONTAINER_NAME" >/dev/null
   else
@@ -405,7 +420,7 @@ stop_container() {
   fi
 }
 
-remove_container() {
+remove_container_unchecked() {
   need_cmd docker
   if container_exists; then
     info "Removing container: $CONTAINER_NAME"
@@ -415,15 +430,24 @@ remove_container() {
   fi
 }
 
+remove_container() {
+  local force="${1:-false}"
+  if container_exists; then
+    require_inactive_simulation "$force"
+  fi
+  remove_container_unchecked
+}
+
 recreate_container() {
-  require_inactive_simulation
+  local force="${1:-false}"
   validate_container_inputs
-  remove_container
+  require_inactive_simulation "$force"
+  remove_container_unchecked
   create_container
 }
 
 shell_container() {
-  run_container
+  run_container false
   exec docker exec -it \
     -e ROS_MASTER_URI=http://127.0.0.1:11311 \
     -e ROS_IP=127.0.0.1 \
@@ -443,35 +467,58 @@ status_container() {
   fi
 }
 
+parse_force_arg() {
+  if [ "$#" -eq 0 ]; then
+    printf 'false\n'
+  elif [ "$#" -eq 1 ] && [ "$1" = "--force" ]; then
+    printf 'true\n'
+  else
+    usage >&2
+    return 1
+  fi
+}
+
 main() {
   local action="${1:-}"
+  shift || true
+  local force
   case "$action" in
     build)
+      [ "$#" -eq 0 ] || die "Usage: $0 build"
       build_image
       ;;
     run)
-      run_container
+      force="$(parse_force_arg "$@")"
+      run_container "$force"
       ;;
     stop)
-      stop_container
+      force="$(parse_force_arg "$@")"
+      stop_container "$force"
       ;;
     restart)
-      stop_container
-      run_container
+      force="$(parse_force_arg "$@")"
+      require_inactive_simulation "$force"
+      stop_container "$force"
+      run_container "$force"
       ;;
     recreate)
-      recreate_container
+      force="$(parse_force_arg "$@")"
+      recreate_container "$force"
       ;;
     rm)
-      remove_container
+      force="$(parse_force_arg "$@")"
+      remove_container "$force"
       ;;
     shell)
+      [ "$#" -eq 0 ] || die "Usage: $0 shell"
       shell_container
       ;;
     status)
+      [ "$#" -eq 0 ] || die "Usage: $0 status"
       status_container
       ;;
     verify)
+      [ "$#" -eq 0 ] || die "Usage: $0 verify"
       need_cmd docker
       need_cmd realpath
       verify_mounts

@@ -11,9 +11,11 @@ BAG_NAME="${OUTDOOR_SIM_BAG_NAME:-se3_test_20260723_151241_0.bag}"
 BAG_HOST="${OUTDOOR_SIM_BAG_HOST:-$PROJECT_ROOT/runtime/simulation/flight_bags/$BAG_NAME}"
 BAG_CONTAINER="${OUTDOOR_SIM_BAG_CONTAINER:-/root/simulation_runtime/flight_bags/$BAG_NAME}"
 SCENE_NAME="${OUTDOOR_SIM_SCENE_NAME:-outdoor_rectangular_forest}"
-OUTPUT_HOST="${OUTDOOR_SIM_OUTPUT_HOST:-$PROJECT_ROOT/runtime/simulation/reconstructed/$SCENE_NAME}"
+OUTPUT_ROOT="$PROJECT_ROOT/runtime/simulation/reconstructed"
+OUTPUT_HOST="${OUTDOOR_SIM_OUTPUT_HOST:-$OUTPUT_ROOT/$SCENE_NAME}"
 OUTPUT_CONTAINER="${OUTDOOR_SIM_OUTPUT_CONTAINER:-/root/simulation_runtime/reconstructed/$SCENE_NAME}"
-ASSET_HOST="${OUTDOOR_SIM_ASSET_HOST:-$PROJECT_ROOT/simulation/config/scenes/$SCENE_NAME}"
+ASSET_ROOT="$PROJECT_ROOT/simulation/config/scenes"
+ASSET_HOST="${OUTDOOR_SIM_ASSET_HOST:-$ASSET_ROOT/$SCENE_NAME}"
 ASSET_CONTAINER="${OUTDOOR_SIM_ASSET_CONTAINER:-/etc/sim2real/simulation/scenes/$SCENE_NAME}"
 GENERATOR_CONTAINER="/workspaces/sim2real_ws/src/sim2real_simulation/scripts/reconstruct_bag_world.py"
 
@@ -87,7 +89,48 @@ ensure_container() {
   "$CONTAINER_SCRIPT" run
 }
 
+validate_publish_paths() {
+  command -v realpath >/dev/null 2>&1 || die "Missing host command: realpath"
+  [[ "$SCENE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] ||
+    die "OUTDOOR_SIM_SCENE_NAME must contain only letters, digits, '_' and '-'."
+  local output_root_real asset_root_real output_real asset_real
+  local output_container_real asset_container_real
+  output_root_real="$(realpath -m "$OUTPUT_ROOT")"
+  asset_root_real="$(realpath -m "$ASSET_ROOT")"
+  output_real="$(realpath -m "$OUTPUT_HOST")"
+  asset_real="$(realpath -m "$ASSET_HOST")"
+  output_container_real="$(realpath -m "$OUTPUT_CONTAINER")"
+  asset_container_real="$(realpath -m "$ASSET_CONTAINER")"
+  case "$output_real" in
+    "$output_root_real"/*) ;;
+    *) die "OUTDOOR_SIM_OUTPUT_HOST must stay below $output_root_real (got: $output_real)" ;;
+  esac
+  case "$asset_real" in
+    "$asset_root_real"/*) ;;
+    *) die "OUTDOOR_SIM_ASSET_HOST must stay below $asset_root_real (got: $asset_real)" ;;
+  esac
+  case "$output_container_real" in
+    /root/simulation_runtime/reconstructed/*) ;;
+    *) die "OUTDOOR_SIM_OUTPUT_CONTAINER must stay below /root/simulation_runtime/reconstructed." ;;
+  esac
+  case "$asset_container_real" in
+    /etc/sim2real/simulation/scenes/*) ;;
+    *) die "OUTDOOR_SIM_ASSET_CONTAINER must stay below /etc/sim2real/simulation/scenes." ;;
+  esac
+  case "$output_real/" in
+    "$asset_real/"*|"$asset_root_real/"*) die "Reconstruction output and scene asset paths must not overlap." ;;
+  esac
+  case "$asset_real/" in
+    "$output_real/"*|"$output_root_real/"*) die "Reconstruction output and scene asset paths must not overlap." ;;
+  esac
+  OUTPUT_HOST="$output_real"
+  ASSET_HOST="$asset_real"
+  OUTPUT_CONTAINER="$output_container_real"
+  ASSET_CONTAINER="$asset_container_real"
+}
+
 generate_scene() {
+  validate_publish_paths
   [ -f "$BAG_HOST" ] || die "Repaired bag not found: $BAG_HOST"
   command -v rsync >/dev/null 2>&1 ||
     die "Missing host command required to publish the scene: rsync"
@@ -95,44 +138,81 @@ generate_scene() {
   mkdir -p "$OUTPUT_HOST"
   echo "[INFO] Reconstructing the full recorded flight corridor."
   docker exec -i \
-    "$CONTAINER_NAME" bash -lc "
+    -e "BAG_CONTAINER=$BAG_CONTAINER" \
+    -e "OUTPUT_CONTAINER=$OUTPUT_CONTAINER" \
+    -e "GENERATOR_CONTAINER=$GENERATOR_CONTAINER" \
+    -e "VOXEL_SIZE=$VOXEL_SIZE" \
+    -e "CLOUD_STRIDE=$CLOUD_STRIDE" \
+    -e "MIN_OBSERVATIONS=$MIN_OBSERVATIONS" \
+    -e "CORRIDOR_RADIUS=$CORRIDOR_RADIUS" \
+    -e "OBSTACLE_MIN_Z=$OBSTACLE_MIN_Z" \
+    -e "OBSTACLE_MAX_Z=$OBSTACLE_MAX_Z" \
+    -e "GEOMETRY_MODE=$GEOMETRY_MODE" \
+    -e "TREE_GRID_SIZE=$TREE_GRID_SIZE" \
+    -e "TREE_SMOOTHING_RADIUS=$TREE_SMOOTHING_RADIUS" \
+    -e "TREE_MIN_SPACING=$TREE_MIN_SPACING" \
+    -e "TREE_DENSITY_QUANTILE=$TREE_DENSITY_QUANTILE" \
+    -e "TREE_TRUNK_RADIUS=$TREE_TRUNK_RADIUS" \
+    -e "TREE_CROWN_RADIUS=$TREE_CROWN_RADIUS" \
+    -e "TREE_MIN_HEIGHT=$TREE_MIN_HEIGHT" \
+    -e "TREE_MAX_HEIGHT=$TREE_MAX_HEIGHT" \
+    -e "FOREST_MIN_X=$FOREST_MIN_X" \
+    -e "FOREST_MAX_X=$FOREST_MAX_X" \
+    -e "FOREST_MIN_Y=$FOREST_MIN_Y" \
+    -e "FOREST_MAX_Y=$FOREST_MAX_Y" \
+    -e "FOREST_FILL_SPACING=$FOREST_FILL_SPACING" \
+    -e "FOREST_PATH_CLEARANCE=$FOREST_PATH_CLEARANCE" \
+    -e "FOREST_CORNER_CLEARANCE=$FOREST_CORNER_CLEARANCE" \
+    -e "FOREST_SEED=$FOREST_SEED" \
+    -e "ASSET_CONTAINER=$ASSET_CONTAINER" \
+    -e "WIND_SPEED=$WIND_SPEED" \
+    -e "WIND_DIRECTION_X=$WIND_DIRECTION_X" \
+    -e "WIND_DIRECTION_Y=$WIND_DIRECTION_Y" \
+    -e "WIND_DIRECTION_Z=$WIND_DIRECTION_Z" \
+    "$CONTAINER_NAME" bash -lc '
       set -eo pipefail
       source /root/.bashrc
-      python3 '$GENERATOR_CONTAINER' \
-        '$BAG_CONTAINER' '$OUTPUT_CONTAINER' \
-        --voxel-size '$VOXEL_SIZE' \
-        --cloud-stride '$CLOUD_STRIDE' \
-        --min-observations '$MIN_OBSERVATIONS' \
-        --corridor-radius '$CORRIDOR_RADIUS' \
-        --obstacle-min-z '$OBSTACLE_MIN_Z' \
-        --obstacle-max-z '$OBSTACLE_MAX_Z' \
-        --geometry-mode '$GEOMETRY_MODE' \
-        --tree-grid-size '$TREE_GRID_SIZE' \
-        --tree-smoothing-radius '$TREE_SMOOTHING_RADIUS' \
-        --tree-min-spacing '$TREE_MIN_SPACING' \
-        --tree-density-quantile '$TREE_DENSITY_QUANTILE' \
-        --tree-trunk-radius '$TREE_TRUNK_RADIUS' \
-        --tree-crown-radius '$TREE_CROWN_RADIUS' \
-        --tree-min-height '$TREE_MIN_HEIGHT' \
-        --tree-max-height '$TREE_MAX_HEIGHT' \
-        --forest-min-x '$FOREST_MIN_X' \
-        --forest-max-x '$FOREST_MAX_X' \
-        --forest-min-y '$FOREST_MIN_Y' \
-        --forest-max-y '$FOREST_MAX_Y' \
-        --forest-fill-spacing '$FOREST_FILL_SPACING' \
-        --forest-path-clearance '$FOREST_PATH_CLEARANCE' \
-        --forest-corner-clearance '$FOREST_CORNER_CLEARANCE' \
-        --forest-seed '$FOREST_SEED' \
-        --mesh-uri 'file://$ASSET_CONTAINER/meshes/scene.obj' \
-        --wind-speed '$WIND_SPEED' \
-        --wind-direction '$WIND_DIRECTION_X' '$WIND_DIRECTION_Y' '$WIND_DIRECTION_Z'
-    "
+      python3 "$GENERATOR_CONTAINER" \
+        "$BAG_CONTAINER" "$OUTPUT_CONTAINER" \
+        --voxel-size "$VOXEL_SIZE" \
+        --cloud-stride "$CLOUD_STRIDE" \
+        --min-observations "$MIN_OBSERVATIONS" \
+        --corridor-radius "$CORRIDOR_RADIUS" \
+        --obstacle-min-z "$OBSTACLE_MIN_Z" \
+        --obstacle-max-z "$OBSTACLE_MAX_Z" \
+        --geometry-mode "$GEOMETRY_MODE" \
+        --tree-grid-size "$TREE_GRID_SIZE" \
+        --tree-smoothing-radius "$TREE_SMOOTHING_RADIUS" \
+        --tree-min-spacing "$TREE_MIN_SPACING" \
+        --tree-density-quantile "$TREE_DENSITY_QUANTILE" \
+        --tree-trunk-radius "$TREE_TRUNK_RADIUS" \
+        --tree-crown-radius "$TREE_CROWN_RADIUS" \
+        --tree-min-height "$TREE_MIN_HEIGHT" \
+        --tree-max-height "$TREE_MAX_HEIGHT" \
+        --forest-min-x "$FOREST_MIN_X" \
+        --forest-max-x "$FOREST_MAX_X" \
+        --forest-min-y "$FOREST_MIN_Y" \
+        --forest-max-y "$FOREST_MAX_Y" \
+        --forest-fill-spacing "$FOREST_FILL_SPACING" \
+        --forest-path-clearance "$FOREST_PATH_CLEARANCE" \
+        --forest-corner-clearance "$FOREST_CORNER_CLEARANCE" \
+        --forest-seed "$FOREST_SEED" \
+        --mesh-uri "file://$ASSET_CONTAINER/meshes/scene.obj" \
+        --wind-speed "$WIND_SPEED" \
+        --wind-direction "$WIND_DIRECTION_X" "$WIND_DIRECTION_Y" "$WIND_DIRECTION_Z"
+    '
+  if [ ! -f "$OUTPUT_HOST/se3_outdoor_reconstruction.world" ] ||
+    [ ! -f "$OUTPUT_HOST/meshes/scene.obj" ] ||
+    [ ! -f "$OUTPUT_HOST/metadata.json" ]; then
+    die "Scene generator did not produce the expected world, mesh and metadata files."
+  fi
   mkdir -p "$ASSET_HOST"
-  rsync -a --delete "$OUTPUT_HOST/" "$ASSET_HOST/"
+  rsync -a --delete -- "$OUTPUT_HOST/" "$ASSET_HOST/"
   echo "[INFO] Published versioned scene asset: $ASSET_HOST"
 }
 
 ensure_scene() {
+  validate_publish_paths
   if [ ! -f "$ASSET_HOST/se3_outdoor_reconstruction.world" ] || \
      [ ! -f "$ASSET_HOST/meshes/scene.obj" ] || \
      [ ! -f "$ASSET_HOST/metadata.json" ]; then
@@ -141,10 +221,13 @@ ensure_scene() {
 }
 
 sim_command() {
-  ensure_scene
   env \
     SIM_DEV_CONTAINER="$CONTAINER_NAME" \
     "$SIM_SCRIPT" --scene "$SCENE_NAME" "$@"
+}
+
+container_running() {
+  [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" = "true" ]
 }
 
 main() {
@@ -155,9 +238,18 @@ main() {
       generate_scene
       ;;
     start)
+      ensure_scene
       sim_command restart
       ;;
-    stop|status|attach|shell|arm|land|goal)
+    shell)
+      container_running || die "Simulation container is not running; use the unified start command first."
+      [ "$#" -eq 0 ] || die "Usage: $0 shell"
+      exec docker exec -it \
+        -e ROS_MASTER_URI=http://127.0.0.1:11311 \
+        -e ROS_IP=127.0.0.1 \
+        "$CONTAINER_NAME" bash -lc 'source /root/.bashrc && exec bash'
+      ;;
+    stop|status|attach|arm|land|goal)
       sim_command "$action" "$@"
       ;;
     *)

@@ -21,23 +21,29 @@ elif [[ "${1:-}" == --scene=* ]]; then
   shift
 fi
 
-if [[ "$SCENE" == */* ]]; then
-  if [[ "$SCENE" = /* ]]; then
-    SCENE_CONFIG="$SCENE"
-  else
-    SCENE_CONFIG="$PROJECT_ROOT/$SCENE"
-  fi
-else
-  SCENE_FILE="$SCENE"
-  [[ "$SCENE_FILE" == *.env ]] || SCENE_FILE+=".env"
-  SCENE_CONFIG="$PROJECT_ROOT/simulation/config/scenes/$SCENE_FILE"
-fi
+SCENE="${SCENE%.env}"
+[[ "$SCENE" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || {
+  echo "[ERROR] Scene names may contain only letters, digits, '_' and '-'; paths are not accepted." >&2
+  exit 1
+}
+SCENE_DIR="$PROJECT_ROOT/simulation/config/scenes"
+SCENE_CONFIG="$SCENE_DIR/$SCENE.env"
 [ -f "$SCENE_CONFIG" ] || {
   echo "[ERROR] Simulation scene config not found: $SCENE_CONFIG" >&2
   exit 1
 }
-# Scene profiles only describe the Gazebo world and vehicle spawn pose.
-# Explicit SIM_WORLD/SIM_SPAWN_* environment variables always take priority.
+SCENE_DIR_REAL="$(realpath -e "$SCENE_DIR")"
+SCENE_CONFIG_REAL="$(realpath -e "$SCENE_CONFIG")"
+case "$SCENE_CONFIG_REAL" in
+  "$SCENE_DIR_REAL"/*.env) ;;
+  *)
+    echo "[ERROR] Scene config resolves outside the repository scene directory: $SCENE_CONFIG" >&2
+    exit 1
+    ;;
+esac
+# Scene profiles are the single source for the Gazebo world and spawn pose.
+# This keeps world existence checks and recorded initial poses versioned
+# together instead of accepting ad-hoc container paths at startup.
 # shellcheck disable=SC1090
 source "$SCENE_CONFIG"
 
@@ -60,8 +66,10 @@ RUNTIME_HOST="${SIM_RUNTIME_HOST:-$PROJECT_ROOT/runtime/simulation}"
 HOST_LOG_DIR="${SIM_HOST_LOG_DIR:-$RUNTIME_HOST/runs/$RUN_ID/tmux}"
 SESSION_MARKER="$RUNTIME_HOST/active/${SESSION_NAME}.owner"
 DEV_SESSION_MARKER="$DEV_RUNTIME/active/${SESSION_NAME}.owner"
-START_LOCK="$RUNTIME_HOST/active/${SESSION_NAME}.start.lock"
+LIFECYCLE_LOCK_DIR="/tmp/uav-autonomy-aio-${UID}"
+START_LOCK="$LIFECYCLE_LOCK_DIR/simulation.lifecycle.lock"
 START_LOCK_FD=""
+START_LOCK_DEPTH=0
 START_CREATED_SESSION=false
 
 ROS_MASTER_URI="${ROS_MASTER_URI:-http://127.0.0.1:11311}"
@@ -76,13 +84,13 @@ WAIT_INTERVAL="${SIM_WAIT_INTERVAL:-2}"
 BUILD_JOBS="${SIM_BUILD_JOBS:-4}"
 SKIP_BUILD="${SIM_SKIP_BUILD:-false}"
 GAZEBO_GUI="${SIM_GAZEBO_GUI:-true}"
-WORLD="${SIM_WORLD:-${SCENE_WORLD:-}}"
-SPAWN_X="${SIM_SPAWN_X:-${SCENE_SPAWN_X:-2.0}}"
-SPAWN_Y="${SIM_SPAWN_Y:-${SCENE_SPAWN_Y:-0.0}}"
-SPAWN_Z="${SIM_SPAWN_Z:-${SCENE_SPAWN_Z:-0.0}}"
-SPAWN_ROLL="${SIM_SPAWN_ROLL:-${SCENE_SPAWN_ROLL:-0.0}}"
-SPAWN_PITCH="${SIM_SPAWN_PITCH:-${SCENE_SPAWN_PITCH:-0.0}}"
-SPAWN_YAW="${SIM_SPAWN_YAW:-${SCENE_SPAWN_YAW:-0.0}}"
+WORLD="${SCENE_WORLD:-}"
+SPAWN_X="${SCENE_SPAWN_X:-2.0}"
+SPAWN_Y="${SCENE_SPAWN_Y:-0.0}"
+SPAWN_Z="${SCENE_SPAWN_Z:-0.0}"
+SPAWN_ROLL="${SCENE_SPAWN_ROLL:-0.0}"
+SPAWN_PITCH="${SCENE_SPAWN_PITCH:-0.0}"
+SPAWN_YAW="${SCENE_SPAWN_YAW:-0.0}"
 START_PLANNER="${SIM_START_PLANNER:-true}"
 START_SE3="${SIM_START_SE3:-true}"
 START_GOAL_BRIDGE="${SIM_START_GOAL_BRIDGE:-true}"
@@ -102,17 +110,40 @@ DISARMED_PREARM_MODE="${SIM_DISARMED_PREARM_MODE:-AUTO.LOITER}"
 TAKEOFF_ALTITUDE_FIELD="${SIM_TAKEOFF_ALTITUDE_FIELD:-auto}"
 PX4_HOVER_THRUST="${SIM_PX4_HOVER_THRUST:-0.755}"
 COMMAND_TIMEOUT="${SIM_COMMAND_TIMEOUT:-15}"
-DRONE_ID="${SIM_DRONE_ID:-0}"
+REQUESTED_DRONE_ID="${SIM_DRONE_ID:-0}"
+# The current integration is intentionally single-vehicle. Keep every launch,
+# topic and command on drone_0 instead of exposing a partially wired ID knob.
 PLANNER_CONFIG="${SIM_PLANNER_CONFIG:-}"
 CONTROLLER_CONFIG="${SIM_CONTROLLER_CONFIG:-/etc/sim2real/simulation/controller.yaml}"
 RVIZ_CONFIG="${SIM_RVIZ_CONFIG:-/etc/sim2real/simulation/rviz/sim.rviz}"
 REQUIRE_ARMED_GOAL="${SIM_REQUIRE_ARMED_GOAL:-true}"
-TEST_PACKAGES="${SIM_TEST_PACKAGES:-diff_planner sim2real_common sim2real_simulation}"
+TEST_PACKAGES="${SIM_TEST_PACKAGES:-path_searching diff_planner sim2real_common sim2real_simulation}"
 MISSION_RUNNER_HOST="$PROJECT_ROOT/common/scripts/waypoint_mission.py"
 MISSION_EXECUTOR_HOST="$PROJECT_ROOT/common/scripts/mission_executor.py"
 ARM_EXECUTOR_HOST="$PROJECT_ROOT/common/scripts/arm_executor.py"
 GOAL_EXECUTOR_HOST="$PROJECT_ROOT/common/scripts/goal_executor.py"
 PREFLIGHT_TIMEOUT="${SIM_PREFLIGHT_TIMEOUT:-5.0}"
+# Keep simulation recording lifecycle-equivalent to real.sh: recording starts
+# with the stack, uses LZ4 split bags at reduced CPU priority, enforces a free
+# space floor, and is finalized before the remaining ROS processes stop.
+START_ROSBAG="${SIM_START_ROSBAG:-true}"
+ROSBAG_DIR="${SIM_ROSBAG_DIR:-$DEV_RUNTIME/flight_bags}"
+ROSBAG_PREFIX="${SIM_ROSBAG_PREFIX:-se3_test}"
+ROSBAG_NODE_NAME="${SIM_ROSBAG_NODE_NAME:-/flight_recorder}"
+ROSBAG_TOPICS="${SIM_ROSBAG_TOPICS:-/clock /tf /tf_static /gazebo/model_states /mavros/local_position/odom /localization/odom /localization/cloud_registered /livox/imu /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/battery /mavros/altitude /mavros/rc/in /mavros/setpoint_raw/attitude /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local /command/trajectory /desire_odom_pub /drone_0_planning/pos_cmd /drone_0_planning/trajectory /drone_0_planning/data_display /drone_0_diff_planner_node/grid_map/occupancy_inflate /goal}"
+ROSBAG_TOPICS_QUOTED=""
+ROSBAG_EXTRA_ARGS="${SIM_ROSBAG_EXTRA_ARGS:-}"
+ROSBAG_EXTRA_ARGS_QUOTED=""
+ROSBAG_RECORD_RAW_LIDAR="${SIM_ROSBAG_RECORD_RAW_LIDAR:-true}"
+ROSBAG_SPLIT_SIZE_MB="${SIM_ROSBAG_SPLIT_SIZE_MB:-1024}"
+ROSBAG_MAX_SPLITS="${SIM_ROSBAG_MAX_SPLITS:-10}"
+ROSBAG_NICE_LEVEL="${SIM_ROSBAG_NICE_LEVEL:-10}"
+ROSBAG_MIN_FREE_GB="${SIM_ROSBAG_MIN_FREE_GB:-5}"
+ROSBAG_STOP_TIMEOUT="${SIM_ROSBAG_STOP_TIMEOUT:-60}"
+ROSBAG_STATE_FILE="${SIM_ROSBAG_STATE_FILE:-$ROSBAG_DIR/.active_recording_prefix}"
+if [ "$ROSBAG_RECORD_RAW_LIDAR" = "true" ] && [[ " $ROSBAG_TOPICS " != *" /livox/lidar "* ]]; then
+  ROSBAG_TOPICS+=" /livox/lidar"
+fi
 
 usage() {
   cat <<'EOF'
@@ -132,19 +163,20 @@ Actions:
                         Publish a world-frame goal after OFFBOARD + arm.
                         Omit YAW_DEG to leave the final yaw unconstrained.
   mission FILE          Native takeoff if needed, enter OFFBOARD, execute the
-                        ordered JSON waypoints, then automatically land.
+                        ordered JSON waypoints, and obey land_after_mission.
                         A mode change away from OFFBOARD aborts the mission.
   shell                 Open a shell in the repository-owned simulation container.
 
-Useful overrides:
-  SIM_GAZEBO_GUI=false SIM_START_RVIZ=false ./launch/sim.sh restart
+Stack examples:
+  ./launch/sim.sh start
   ./launch/sim.sh --scene outdoor_rectangular_forest restart
-  SIM_WORLD=/root/simulation_runtime/reconstructed/test/world.world \
-    SIM_SPAWN_X=0 SIM_SPAWN_Y=0 ./launch/sim.sh restart
-  ./launch/sim.sh arm
+  SIM_GAZEBO_GUI=false SIM_START_RVIZ=false ./launch/sim.sh restart
+  SIM_START_ROSBAG=false ./launch/sim.sh restart
+
+Flight examples:
+  SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
   ./launch/sim.sh goal 1.0 0.0 1.0
   ./launch/sim.sh goal 1.0 0.0 1.0 0
-  SIM_SKIP_BUILD=true ./launch/sim.sh start
 EOF
 }
 
@@ -176,6 +208,10 @@ require_number() {
 }
 
 validate_bool_config() {
+  [[ "$SESSION_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] ||
+    die "SIM_SESSION_NAME may contain only letters, digits, '_' and '-'."
+  [ "$REQUESTED_DRONE_ID" = "0" ] ||
+    die "Only one vehicle is supported; SIM_DRONE_ID must be unset or 0 (got: $REQUESTED_DRONE_ID)."
   require_bool SIM_SKIP_BUILD "$SKIP_BUILD"
   require_bool SIM_GAZEBO_GUI "$GAZEBO_GUI"
   require_bool SIM_START_PLANNER "$START_PLANNER"
@@ -184,12 +220,43 @@ validate_bool_config() {
   require_bool SIM_START_RVIZ "$START_RVIZ"
   require_bool SIM_CLOUD_FILTER_ENABLE "$CLOUD_FILTER_ENABLE"
   require_bool SIM_REQUIRE_ARMED_GOAL "$REQUIRE_ARMED_GOAL"
-  require_number SIM_SPAWN_X "$SPAWN_X"
-  require_number SIM_SPAWN_Y "$SPAWN_Y"
-  require_number SIM_SPAWN_Z "$SPAWN_Z"
-  require_number SIM_SPAWN_ROLL "$SPAWN_ROLL"
-  require_number SIM_SPAWN_PITCH "$SPAWN_PITCH"
-  require_number SIM_SPAWN_YAW "$SPAWN_YAW"
+  require_bool SIM_START_ROSBAG "$START_ROSBAG"
+  require_bool SIM_ROSBAG_RECORD_RAW_LIDAR "$ROSBAG_RECORD_RAW_LIDAR"
+  [[ "$ROSBAG_NODE_NAME" =~ ^/[A-Za-z][A-Za-z0-9_]*$ ]] ||
+    die "SIM_ROSBAG_NODE_NAME must be a top-level ROS node name such as /flight_recorder."
+  local arg quoted topic
+  local -a parsed_rosbag_args=()
+  local -a parsed_rosbag_topics=()
+  ROSBAG_EXTRA_ARGS_QUOTED=""
+  ROSBAG_TOPICS_QUOTED=""
+  read -r -a parsed_rosbag_topics <<<"$ROSBAG_TOPICS"
+  [ "${#parsed_rosbag_topics[@]}" -gt 0 ] ||
+    die "SIM_ROSBAG_TOPICS must contain at least one absolute ROS topic."
+  for topic in "${parsed_rosbag_topics[@]}"; do
+    [[ "$topic" =~ ^/([A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*$ ]] ||
+      die "SIM_ROSBAG_TOPICS contains an invalid absolute ROS topic: $topic"
+    printf -v quoted '%q' "$topic"
+    ROSBAG_TOPICS_QUOTED+=" $quoted"
+  done
+  [[ "$ROSBAG_EXTRA_ARGS" != *$'\n'* &&
+    "$ROSBAG_EXTRA_ARGS" != *$'\r'* ]] ||
+    die "SIM_ROSBAG_EXTRA_ARGS must be one line of whitespace-separated arguments."
+  read -r -a parsed_rosbag_args <<<"$ROSBAG_EXTRA_ARGS"
+  for arg in "${parsed_rosbag_args[@]}"; do
+    case "$arg" in
+      -O*|-o*|--out*|--m*|--si*|__name:=*)
+        die "SIM_ROSBAG_EXTRA_ARGS may not override managed output, split-retention, or node-name options."
+        ;;
+    esac
+    printf -v quoted '%q' "$arg"
+    ROSBAG_EXTRA_ARGS_QUOTED+=" $quoted"
+  done
+  require_number SCENE_SPAWN_X "$SPAWN_X"
+  require_number SCENE_SPAWN_Y "$SPAWN_Y"
+  require_number SCENE_SPAWN_Z "$SPAWN_Z"
+  require_number SCENE_SPAWN_ROLL "$SPAWN_ROLL"
+  require_number SCENE_SPAWN_PITCH "$SPAWN_PITCH"
+  require_number SCENE_SPAWN_YAW "$SPAWN_YAW"
   require_number SIM_CLOUD_VOXEL_LEAF_SIZE "$CLOUD_VOXEL_LEAF_SIZE"
   require_number SIM_CLOUD_MIN_RANGE "$CLOUD_MIN_RANGE"
   require_number SIM_CLOUD_MAX_RANGE "$CLOUD_MAX_RANGE"
@@ -204,6 +271,18 @@ validate_bool_config() {
     relative|local|auto) ;;
     *) die "SIM_TAKEOFF_ALTITUDE_FIELD must be relative, local, or auto (got: $TAKEOFF_ALTITUDE_FIELD)." ;;
   esac
+  if [ "$START_ROSBAG" = "true" ]; then
+    [[ "$ROSBAG_SPLIT_SIZE_MB" =~ ^[1-9][0-9]*$ ]] ||
+      die "SIM_ROSBAG_SPLIT_SIZE_MB must be a positive integer (got: $ROSBAG_SPLIT_SIZE_MB)."
+    [[ "$ROSBAG_MAX_SPLITS" =~ ^[1-9][0-9]*$ ]] ||
+      die "SIM_ROSBAG_MAX_SPLITS must be a positive integer (got: $ROSBAG_MAX_SPLITS)."
+    [[ "$ROSBAG_NICE_LEVEL" =~ ^([0-9]|1[0-9])$ ]] ||
+      die "SIM_ROSBAG_NICE_LEVEL must be an integer from 0 to 19 (got: $ROSBAG_NICE_LEVEL)."
+    [[ "$ROSBAG_MIN_FREE_GB" =~ ^[0-9]+$ ]] ||
+      die "SIM_ROSBAG_MIN_FREE_GB must be a non-negative integer (got: $ROSBAG_MIN_FREE_GB)."
+    [[ "$ROSBAG_STOP_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
+      die "SIM_ROSBAG_STOP_TIMEOUT must be a positive integer (got: $ROSBAG_STOP_TIMEOUT)."
+  fi
 }
 
 need_cmd() {
@@ -225,11 +304,35 @@ ensure_prereqs() {
 }
 
 acquire_start_lock() {
+  if [ "$START_LOCK_DEPTH" -gt 0 ]; then
+    START_LOCK_DEPTH=$((START_LOCK_DEPTH + 1))
+    return 0
+  fi
   need_cmd flock
   mkdir -p "$(dirname "$START_LOCK")" || die "Cannot create the simulation lock directory."
   exec {START_LOCK_FD}>"$START_LOCK" || die "Cannot open the simulation start lock: $START_LOCK"
   flock -n "$START_LOCK_FD" ||
-    die "Another simulation start/restart is already in progress for session '$SESSION_NAME'."
+    die "Another simulation lifecycle operation is already in progress."
+  START_LOCK_DEPTH=1
+}
+
+release_start_lock() {
+  [ "$START_LOCK_DEPTH" -gt 0 ] || return 0
+  START_LOCK_DEPTH=$((START_LOCK_DEPTH - 1))
+  [ "$START_LOCK_DEPTH" -eq 0 ] || return 0
+  flock -u "$START_LOCK_FD" >/dev/null 2>&1 || true
+  exec {START_LOCK_FD}>&-
+  START_LOCK_FD=""
+}
+
+first_simulation_owner_marker() {
+  local marker
+  for marker in "$RUNTIME_HOST"/active/*.owner; do
+    [ -e "$marker" ] || continue
+    printf '%s\n' "$marker"
+    return 0
+  done
+  return 1
 }
 
 ensure_simulator_container() {
@@ -327,6 +430,203 @@ create_window() {
   enable_window_logging "$window_name"
 }
 
+managed_rosbag_pids() {
+  container_exists "$DEV_CONTAINER" && container_running "$DEV_CONTAINER" || return 1
+  docker exec -i \
+    -e "ROSBAG_STATE_FILE=$ROSBAG_STATE_FILE" \
+    -e "ROSBAG_NODE_REMAP=__name:=${ROSBAG_NODE_NAME#/}" \
+    "$DEV_CONTAINER" bash -lc '
+      [ -s "$ROSBAG_STATE_FILE" ] || exit 1
+      IFS= read -r expected_prefix < "$ROSBAG_STATE_FILE"
+      [ -n "$expected_prefix" ] || exit 1
+      found=false
+      for cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "$cmdline" ] || continue
+        argv=()
+        mapfile -d "" -t argv < "$cmdline" 2>/dev/null || true
+        [ "${#argv[@]}" -gt 0 ] || continue
+        is_rosbag_record=false
+        for ((i = 0; i < ${#argv[@]}; i++)); do
+          case "${argv[$i]}" in
+            */rosbag/record) is_rosbag_record=true ;;
+            */rosbag)
+              if ((i + 1 < ${#argv[@]})) &&
+                [ "${argv[$((i + 1))]}" = "record" ]; then
+                is_rosbag_record=true
+              fi
+              ;;
+          esac
+        done
+        [ "$is_rosbag_record" = "true" ] || continue
+        output_prefix=""
+        has_owned_name=false
+        expect_prefix=false
+        for arg in "${argv[@]}"; do
+          if [ "$expect_prefix" = "true" ]; then
+            output_prefix="$arg"
+            expect_prefix=false
+            continue
+          fi
+          case "$arg" in
+            -O|--output-name) expect_prefix=true ;;
+            --output-name=*) output_prefix="${arg#--output-name=}" ;;
+          esac
+          [ "$arg" != "$ROSBAG_NODE_REMAP" ] || has_owned_name=true
+        done
+        if [ "$has_owned_name" = "true" ] && [ "$output_prefix" = "$expected_prefix" ]; then
+          basename "$(dirname "$cmdline")"
+          found=true
+        fi
+      done
+      [ "$found" = "true" ]
+    '
+}
+
+rosbag_node_process_running() {
+  container_exists "$DEV_CONTAINER" && container_running "$DEV_CONTAINER" || return 1
+  docker exec -i \
+    -e "ROSBAG_NODE_REMAP=__name:=${ROSBAG_NODE_NAME#/}" \
+    "$DEV_CONTAINER" bash -lc '
+      for cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "$cmdline" ] || continue
+        argv=()
+        mapfile -d "" -t argv < "$cmdline" 2>/dev/null || true
+        [ "${#argv[@]}" -gt 0 ] || continue
+        is_rosbag_record=false
+        for ((i = 0; i < ${#argv[@]}; i++)); do
+          case "${argv[$i]}" in
+            */rosbag/record) is_rosbag_record=true ;;
+            */rosbag)
+              if ((i + 1 < ${#argv[@]})) &&
+                [ "${argv[$((i + 1))]}" = "record" ]; then
+                is_rosbag_record=true
+              fi
+              ;;
+          esac
+        done
+        [ "$is_rosbag_record" = "true" ] || continue
+        for arg in "${argv[@]}"; do
+          [ "$arg" != "$ROSBAG_NODE_REMAP" ] || exit 0
+        done
+      done
+      exit 1
+    '
+}
+
+rosbag_record_process_running() {
+  managed_rosbag_pids >/dev/null 2>&1
+}
+
+current_rosbag_output_prefix() {
+  container_exists "$DEV_CONTAINER" && container_running "$DEV_CONTAINER" || return 1
+  docker exec -i \
+    -e "ROSBAG_STATE_FILE=$ROSBAG_STATE_FILE" \
+    "$DEV_CONTAINER" bash -lc '
+      [ -s "$ROSBAG_STATE_FILE" ] || exit 1
+      IFS= read -r prefix < "$ROSBAG_STATE_FILE"
+      [ -n "$prefix" ] || exit 1
+      printf "%s\n" "$prefix"
+    '
+}
+
+write_rosbag_state() {
+  local output_prefix="$1"
+  docker exec -i \
+    -e "RECORDING_PREFIX=$output_prefix" \
+    -e "ROSBAG_STATE_FILE=$ROSBAG_STATE_FILE" \
+    "$DEV_CONTAINER" bash -lc '
+      mkdir -p "$(dirname "$ROSBAG_STATE_FILE")"
+      state_tmp="${ROSBAG_STATE_FILE}.tmp.$$"
+      printf "%s\n" "$RECORDING_PREFIX" > "$state_tmp"
+      mv -f -- "$state_tmp" "$ROSBAG_STATE_FILE"
+    '
+}
+
+finalize_indexed_active_bags() {
+  local output_prefix="$1"
+  [ -n "$output_prefix" ] || return 0
+
+  docker exec -i \
+    -e "BAG_PREFIX=$output_prefix" \
+    -e "ROSBAG_STATE_FILE=$ROSBAG_STATE_FILE" \
+    "$DEV_CONTAINER" bash -lc '
+      source /opt/ros/noetic/setup.bash
+      failed=false
+      for active in "${BAG_PREFIX}"_*.bag.active; do
+        [ -e "$active" ] || continue
+        final="${active%.active}"
+        if [ -e "$final" ]; then
+          echo "[WARN] Cannot finalize $active because $final already exists." >&2
+          failed=true
+        elif rosbag info "$active" >/dev/null 2>&1; then
+          mv -- "$active" "$final"
+          echo "[INFO] Finalized indexed bag: $final"
+        else
+          echo "[WARN] Bag is not fully indexed; leaving it for rosbag reindex: $active" >&2
+          failed=true
+        fi
+      done
+      if [ "$failed" = "false" ]; then
+        rm -f "$ROSBAG_STATE_FILE"
+      fi
+      [ "$failed" = "false" ]
+    '
+}
+
+stop_rosbag_gracefully() {
+  local waited=0 timeout="$ROSBAG_STOP_TIMEOUT"
+  local output_prefix=""
+
+  if ! [[ "$timeout" =~ ^[1-9][0-9]*$ ]]; then
+    warn "Invalid SIM_ROSBAG_STOP_TIMEOUT=$timeout; using 60 seconds."
+    timeout=60
+  fi
+  if ! container_exists "$DEV_CONTAINER" || ! container_running "$DEV_CONTAINER"; then
+    return 0
+  fi
+
+  output_prefix="$(current_rosbag_output_prefix 2>/dev/null || true)"
+  if ! rosbag_record_process_running; then
+    if rosbag_node_process_running; then
+      warn "A recorder uses the reserved node name but is not linked to this stack's state file; leaving it untouched."
+      return 1
+    fi
+    finalize_indexed_active_bags "$output_prefix" || true
+    return 0
+  fi
+
+  info "Requesting managed rosbag recorder shutdown; timeout ${timeout}s ..."
+  managed_rosbag_pids |
+    docker exec -i "$DEV_CONTAINER" bash -lc \
+      'while IFS= read -r pid; do [[ "$pid" =~ ^[0-9]+$ ]] && kill -INT "$pid" 2>/dev/null || true; done'
+
+  while rosbag_record_process_running; do
+    if [ "$waited" -ge "$timeout" ]; then
+      warn "Managed rosbag did not exit within ${timeout}s; sending TERM."
+      managed_rosbag_pids |
+        docker exec -i "$DEV_CONTAINER" bash -lc \
+          'while IFS= read -r pid; do [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true; done'
+      sleep 2
+      if rosbag_record_process_running; then
+        warn "Managed rosbag still did not exit; sending KILL to that recorder only."
+        managed_rosbag_pids |
+          docker exec -i "$DEV_CONTAINER" bash -lc \
+            'while IFS= read -r pid; do [[ "$pid" =~ ^[0-9]+$ ]] && kill -KILL "$pid" 2>/dev/null || true; done'
+      fi
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if rosbag_record_process_running; then
+    warn "Managed rosbag recorder is still running; its active bag was left untouched."
+    return 1
+  fi
+  info "Managed rosbag recorder exited after ${waited}s."
+  finalize_indexed_active_bags "$output_prefix" || true
+}
+
 wait_for_condition() {
   local stage="$1"
   local container="$2"
@@ -410,7 +710,28 @@ if [ "$migrated_underlay" = true ]; then
 fi
 
 read -r -a build_args <<< "$SIM_CATKIN_BUILD_ARGS"
-catkin build --no-status "${build_args[@]}"
+build_output="$(mktemp)"
+cleanup_build_output() {
+  rm -f "$build_output"
+}
+trap cleanup_build_output EXIT
+
+if catkin build --no-status "${build_args[@]}" 2>&1 | tee "$build_output"; then
+  :
+else
+  build_status="${PIPESTATUS[0]}"
+  if grep -Eq \
+    'internal compiler error: (Segmentation fault|Bus error|Aborted)|cc1plus.*(Segmentation fault|Bus error)' \
+    "$build_output"; then
+    echo "[WARN] GCC crashed while compiling the overlay; retrying once serially (-j1 -p1)." >&2
+    catkin build --no-status -j1 -p1
+  else
+    exit "$build_status"
+  fi
+fi
+
+cleanup_build_output
+trap - EXIT
 
 source "$SIM_DEV_WORKSPACE/devel/setup.bash"
 for package in diff_planner se3_controller traj_utils rviz_plugins sim2real_common sim2real_simulation; do
@@ -523,20 +844,23 @@ cleanup_failed_start() {
 start_stack() {
   ensure_prereqs
   acquire_start_lock
+  local active_marker=""
+  active_marker="$(first_simulation_owner_marker 2>/dev/null || true)"
+  [ -z "$active_marker" ] ||
+    die "A simulation ownership marker already exists: $active_marker. Stop that stack before starting another."
   if tmux_has_session; then
     die "Simulation session '$SESSION_NAME' already exists. Use '$0 attach' or '$0 restart'."
-  fi
-  if [ -f "$SESSION_MARKER" ]; then
-    die "A stale simulation ownership marker exists: $SESSION_MARKER. Run '$0 stop' before starting again."
   fi
   if container_running "$DEV_CONTAINER" && master_is_running; then
     die "A ROS master is already running on 127.0.0.1:11311 outside session '$SESSION_NAME'. Stop the manual stack first."
   fi
 
   ensure_simulator_container
+  rosbag_node_process_running &&
+    die "A rosbag recorder already uses the reserved node name '$ROSBAG_NODE_NAME'. Stop or rename it before starting simulation."
   if [ -n "$WORLD" ]; then
     ros_exec "$SIMULATOR_CONTAINER" "test -f '$WORLD'" >/dev/null ||
-      die "SIM_WORLD does not exist inside '$SIMULATOR_CONTAINER': $WORLD"
+      die "Scene '$SCENE' references a world that does not exist inside '$SIMULATOR_CONTAINER': $WORLD"
   fi
 
   # ROS commands in the container and tmux logging on the host share this
@@ -612,7 +936,7 @@ start_stack() {
 
   if [ "$START_PLANNER" = "true" ]; then
     local planner_cmd
-    planner_cmd='exec roslaunch sim2real_common planner.launch odom_topic:=/localization/odom cloud_topic:=/localization/cloud_registered'
+    planner_cmd='exec roslaunch sim2real_common planner.launch drone_id:=0 odom_topic:=/localization/odom cloud_topic:=/localization/cloud_registered'
     if [ -n "$PLANNER_CONFIG" ]; then
       planner_cmd+=" planner_config:=$PLANNER_CONFIG"
     fi
@@ -620,11 +944,11 @@ start_stack() {
     wait_for_condition "Diff-Planner nodes" "$DEV_CONTAINER" \
       "rosnode list | grep -q 'diff_planner_node' && rosnode list | grep -q 'traj_server'" planner
     ros_exec "$DEV_CONTAINER" \
-      "ground=\$(rosparam get /drone_0_diff_planner_node/grid_map/virtual_ground); ceil=\$(rosparam get /drone_0_diff_planner_node/grid_map/virtual_ceil); awk -v z='$RVIZ_GOAL_Z' -v ground=\"\$ground\" -v ceil=\"\$ceil\" 'BEGIN { exit !(z > ground && z < ceil) }'" >/dev/null || \
-      die "SIM_RVIZ_GOAL_Z=$RVIZ_GOAL_Z must be strictly between the shared planner virtual ground and ceiling."
+      "ground=\$(rosparam get /drone_0_diff_planner_node/grid_map/virtual_ground); ceil=\$(rosparam get /drone_0_diff_planner_node/grid_map/virtual_ceil); inflation=\$(rosparam get /drone_0_diff_planner_node/grid_map/obstacles_inflation); awk -v z='$RVIZ_GOAL_Z' -v ground=\"\$ground\" -v ceil=\"\$ceil\" -v inflation=\"\$inflation\" 'BEGIN { exit !(z > ground + inflation && z < ceil - inflation) }'" >/dev/null || \
+      die "SIM_RVIZ_GOAL_Z=$RVIZ_GOAL_Z does not leave obstacle-inflation clearance inside the shared Planner vertical fence."
 
     create_window traj_converter "$DEV_CONTAINER" \
-      'exec roslaunch sim2real_common trajectory_converter.launch'
+      'exec roslaunch sim2real_common trajectory_converter.launch drone_id:=0'
     wait_for_condition "shared trajectory converter" "$DEV_CONTAINER" \
       "rosnode list | grep -qx '/trajectory_msg_converter' && rostopic list | grep -qx '/command/trajectory'" traj_converter
   else
@@ -651,6 +975,33 @@ start_stack() {
     info "RViz 2D goal bridge skipped (SIM_START_GOAL_BRIDGE=false)."
   fi
 
+  if [ "$START_ROSBAG" = "true" ]; then
+    local available_mb min_free_mb rosbag_min_space_arg
+    min_free_mb=$((ROSBAG_MIN_FREE_GB * 1024))
+    rosbag_min_space_arg=""
+    if [ "$ROSBAG_MIN_FREE_GB" -gt 0 ]; then
+      rosbag_min_space_arg="--min-space=${ROSBAG_MIN_FREE_GB}G"
+    fi
+    available_mb="$(ros_exec "$DEV_CONTAINER" "mkdir -p '$ROSBAG_DIR' && df -Pm '$ROSBAG_DIR' | awk 'NR == 2 {print \$4}'" | tail -n 1)"
+    if ! [[ "$available_mb" =~ ^[0-9]+$ ]]; then
+      die "Unable to determine free space for $ROSBAG_DIR."
+    fi
+    if [ "$ROSBAG_MIN_FREE_GB" -gt 0 ] && [ "$available_mb" -lt "$min_free_mb" ]; then
+      die "Only ${available_mb} MB is free in $ROSBAG_DIR; at least ${min_free_mb} MB is required."
+    fi
+
+    write_rosbag_state "$ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}"
+    create_window rosbag "$DEV_CONTAINER" \
+      "exec nice -n '$ROSBAG_NICE_LEVEL' rosbag record --lz4 --split --size='$ROSBAG_SPLIT_SIZE_MB' --max-splits='$ROSBAG_MAX_SPLITS' --repeat-latched $rosbag_min_space_arg -O '$ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}' __name:='${ROSBAG_NODE_NAME#/}'$ROSBAG_TOPICS_QUOTED$ROSBAG_EXTRA_ARGS_QUOTED"
+    wait_for_condition "rosbag recorder" "$DEV_CONTAINER" \
+      "rosnode list | grep -qx '$ROSBAG_NODE_NAME'" rosbag
+    info "Recording split bags with prefix (container): $ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}"
+    info "Rosbag retention cap: ${ROSBAG_MAX_SPLITS} x ${ROSBAG_SPLIT_SIZE_MB} MB (about $((ROSBAG_MAX_SPLITS * ROSBAG_SPLIT_SIZE_MB)) MB); oldest split files are removed automatically."
+    info "Simulation bags persist on the host under: $RUNTIME_HOST/flight_bags/"
+  else
+    info "rosbag recording skipped because SIM_START_ROSBAG=false."
+  fi
+
   if [ "$START_RVIZ" = "true" ]; then
     ros_exec "$DEV_CONTAINER" "test -f '$RVIZ_CONFIG'" >/dev/null ||
       die "Simulation RViz config not found in the container: $RVIZ_CONFIG"
@@ -665,6 +1016,7 @@ start_stack() {
   info "The vehicle is safe/disarmed by default. Use '$0 arm' before publishing a flight goal."
   trap - ERR EXIT INT TERM
   START_CREATED_SESSION=false
+  release_start_lock
 }
 
 kill_matching() {
@@ -717,7 +1069,8 @@ request_land() {
   fi
 
   info "Requesting simulated landing..."
-  if ! ros_exec "$DEV_CONTAINER" "rosservice call /land '{}' >/dev/null 2>&1"; then
+  if ! ros_exec "$DEV_CONTAINER" \
+    "rosservice call /land \"data: true\" 2>/dev/null | grep -q 'success: True'"; then
     warn "/land service failed; falling back to PX4 AUTO.LAND."
     ros_exec "$DEV_CONTAINER" \
       "rosservice call /mavros/set_mode \"base_mode: 0
@@ -738,21 +1091,35 @@ custom_mode: 'AUTO.LAND'\" >/dev/null"
 
 stop_stack() {
   ensure_prereqs
+  acquire_start_lock
   local owned_stack=false
   local has_session=false
+  local stopping_rosbag_prefix=""
 
-  if tmux_has_session; then
+  if [ -f "$SESSION_MARKER" ]; then
     owned_stack=true
-    has_session=true
-  elif [ -f "$SESSION_MARKER" ]; then
-    owned_stack=true
-    warn "tmux session is gone, but an owned simulation marker remains; cleaning orphaned processes."
+    if tmux_has_session; then
+      has_session=true
+    else
+      warn "tmux session is gone, but an owned simulation marker remains; cleaning orphaned processes."
+    fi
+  elif tmux_has_session; then
+    warn "tmux session '$SESSION_NAME' has no repository ownership marker; leaving that unrelated session untouched."
   else
     info "Simulation tmux session is not running: $SESSION_NAME"
   fi
 
   if [ "$owned_stack" = "true" ]; then
     request_land || true
+  fi
+
+  if [ "$owned_stack" = "true" ]; then
+    if container_exists "$DEV_CONTAINER" && container_running "$DEV_CONTAINER"; then
+      stopping_rosbag_prefix="$(current_rosbag_output_prefix 2>/dev/null || true)"
+    fi
+    stop_rosbag_gracefully || true
+  elif rosbag_node_process_running; then
+    warn "A rosbag recorder is running, but no simulation owner session or marker exists; leaving it untouched."
   fi
 
   if [ "$has_session" = "true" ]; then
@@ -784,24 +1151,44 @@ stop_stack() {
       "traj_server" "diff_planner_node" "trajectory_msg_converter.py" "rviz_2d_goal_bridge.py" "rviz"
     kill_matching "$SIMULATOR_CONTAINER" KILL \
       "outdoor_mid360.launch" "mavros_node" "gzserver" "gzclient" "PX4-Autopilot.*px4" "rosmaster" "roscore"
+    if rosbag_record_process_running; then
+      warn "Managed rosbag is still active; skipping bag finalization."
+    else
+      finalize_indexed_active_bags "$stopping_rosbag_prefix" || true
+    fi
     remove_session_marker
   fi
   info "Simulation processes stopped; containers were left running for fast reuse."
+  release_start_lock
 }
 
 status_stack() {
   ensure_prereqs
+  local healthy=true
   info "Containers:"
   docker ps -a \
     --filter "name=^/${SIMULATOR_CONTAINER}$" \
     --filter "name=^/${DEV_CONTAINER}$" \
     --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+  container_running "$DEV_CONTAINER" || healthy=false
 
   if tmux_has_session; then
     info "tmux session '$SESSION_NAME' windows:"
     tmux list-windows -t "$SESSION_NAME" -F '#I:#W pane=#{pane_dead} command=#{pane_current_command}'
+    if tmux list-panes -t "$SESSION_NAME" -F '#{pane_dead}' | grep -qx 1; then
+      warn "One or more simulation tmux panes have exited."
+      healthy=false
+    fi
+    if [ ! -f "$SESSION_MARKER" ]; then
+      warn "Simulation session exists without its ownership marker: $SESSION_MARKER"
+      healthy=false
+    fi
   else
     info "tmux session is not running: $SESSION_NAME"
+    healthy=false
+    if [ -f "$SESSION_MARKER" ]; then
+      warn "A stale simulation ownership marker remains: $SESSION_MARKER"
+    fi
   fi
 
   if container_running "$DEV_CONTAINER" && master_is_running; then
@@ -810,13 +1197,20 @@ status_stack() {
       "for package in diff_planner se3_controller traj_utils rviz_plugins sim2real_common sim2real_simulation; do printf '%s=' \"\$package\"; rospack find \"\$package\"; done"
     info "Core ROS nodes:"
     ros_exec "$DEV_CONTAINER" \
-      "rosnode list | grep -E 'sitl|gazebo|mavros|diff_planner|traj_server|se3_controller|pointcloud|traj_msg|goal_bridge|rviz' || true"
+      "rosnode list | grep -E 'sitl|gazebo|mavros|diff_planner|traj_server|se3_controller|pointcloud|traj_msg|goal_bridge|flight_recorder|rviz' || true"
+    if rosbag_record_process_running; then
+      info "rosbag recorder is active: $(current_rosbag_output_prefix 2>/dev/null || echo unknown-prefix)"
+    else
+      info "rosbag recorder is not running."
+    fi
     info "MAVROS state:"
     ros_exec "$DEV_CONTAINER" \
       "timeout 4 rostopic echo -n 1 /mavros/state 2>/dev/null || true"
   else
     info "ROS master is not reachable."
+    healthy=false
   fi
+  [ "$healthy" = "true" ]
 }
 
 attach_stack() {
@@ -881,7 +1275,7 @@ publish_goal() {
   ros_exec "$DEV_CONTAINER" \
     "python3 -u - '$x' '$y' '$z' \
       $yaw_arg $armed_arg \
-      --drone-id '$DRONE_ID' \
+      --drone-id 0 \
       --preflight-timeout '$PREFLIGHT_TIMEOUT' \
       --odometry-topic /localization/odom \
       --controller-node /se3_controller_node \
@@ -918,14 +1312,17 @@ run_waypoint_mission() {
   local mission_rc=0
   if ros_exec "$DEV_CONTAINER" \
     "python3 -u '$container_executor' '$container_mission' \
-      --drone-id '$DRONE_ID' \
+      --drone-id 0 \
       --default-takeoff-height '$TAKEOFF_HEIGHT' \
+      --px4-hover-thrust '$PX4_HOVER_THRUST' \
+      --disarmed-prearm-mode '$DISARMED_PREARM_MODE' \
       --preflight-timeout '$PREFLIGHT_TIMEOUT' \
       --command-timeout '$COMMAND_TIMEOUT' \
       --takeoff-timeout '$TAKEOFF_TIMEOUT' \
       --takeoff-tolerance '$TAKEOFF_TOLERANCE' \
       --takeoff-stable-time '$TAKEOFF_STABLE_TIME' \
-      --takeoff-max-vertical-speed '$TAKEOFF_MAX_VERTICAL_SPEED'"; then
+      --takeoff-max-vertical-speed '$TAKEOFF_MAX_VERTICAL_SPEED' \
+      --odometry-topic /localization/odom"; then
     mission_rc=0
   else
     mission_rc=$?
@@ -963,6 +1360,7 @@ main() {
       ;;
     test)
       test_overlay
+      return 0
       ;;
     start)
       start_stack
@@ -971,8 +1369,10 @@ main() {
       stop_stack
       ;;
     restart)
+      acquire_start_lock
       stop_stack
       start_stack
+      release_start_lock
       ;;
     status)
       status_stack

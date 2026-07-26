@@ -1,4 +1,5 @@
 #include "plan_env/grid_map.h"
+#include "plan_env/raycast_filter_utils.h"
 
 #include <cmath>
 
@@ -40,6 +41,12 @@ void GridMap::initMap(ros::NodeHandle &nh)
   node_.param("grid_map/p_occ", mp_.p_occ_, 0.80);
   node_.param("grid_map/fading_time", mp_.fading_time_, 1000.0);
   node_.param("grid_map/min_ray_length", mp_.min_ray_length_, 0.1);
+  if (!plan_env::raycast_filter::isValidMinimumRayLength(
+          mp_.min_ray_length_))
+  {
+    ROS_WARN("grid_map/min_ray_length must be finite and non-negative; using 0.1 m.");
+    mp_.min_ray_length_ = 0.1;
+  }
 
   node_.param("grid_map/visualize_all_directions", mp_.visualize_all_directions_, false);
   node_.param("grid_map/show_occ_time", mp_.show_occ_time_, false);
@@ -590,16 +597,30 @@ void GridMap::raycastFromCloud()
   for (int i = 0; i < md_.proj_points_cnt_; ++i)
   {
     pt_w = md_.proj_points_[i];
+    if (!pt_w.allFinite() || !md_.camera_pos_.allFinite())
+    {
+      continue;
+    }
 
     int vox_idx;
     if (!isInBuf(pt_w))
     {
       pt_w = closetPointInMap(pt_w, md_.camera_pos_);
+      if (!plan_env::raycast_filter::shouldProcessRay(
+              md_.camera_pos_, pt_w, mp_.min_ray_length_))
+      {
+        continue;
+      }
       vox_idx = setCacheOccupancy(pt_w, 0);
       pts_num++;
     }
     else
     {
+      if (!plan_env::raycast_filter::shouldProcessRay(
+              md_.camera_pos_, pt_w, mp_.min_ray_length_))
+      {
+        continue;
+      }
       vox_idx = setCacheOccupancy(pt_w, 1);
       pts_num++;
     }
@@ -667,17 +688,31 @@ void GridMap::raycastProcess()
   {
     int vox_idx;
     pt_w = md_.proj_points_[i];
+    if (!pt_w.allFinite() || !md_.camera_pos_.allFinite())
+    {
+      continue;
+    }
 
     // set flag for projected point
 
     if (!isInBuf(pt_w))
     {
       pt_w = closetPointInMap(pt_w, md_.camera_pos_);
+      if (!plan_env::raycast_filter::shouldProcessRay(
+              md_.camera_pos_, pt_w, mp_.min_ray_length_))
+      {
+        continue;
+      }
       pts_num++;
       vox_idx = setCacheOccupancy(pt_w, 0);
     }
     else
     {
+      if (!plan_env::raycast_filter::shouldProcessRay(
+              md_.camera_pos_, pt_w, mp_.min_ray_length_))
+      {
+        continue;
+      }
       pts_num++;
       vox_idx = setCacheOccupancy(pt_w, 1);
     }

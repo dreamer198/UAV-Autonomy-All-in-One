@@ -20,7 +20,30 @@ class SimulationOdometryAdapter:
         )
         self.frame_id = rospy.get_param("~frame_id", "world")
         self.child_frame_id = rospy.get_param("~child_frame_id", "base_link")
+        self.expected_input_frame_id = rospy.get_param(
+            "~expected_input_frame_id", "map"
+        )
+        self.expected_input_child_frame_id = rospy.get_param(
+            "~expected_input_child_frame_id", "base_link"
+        )
+        self.allow_identity_frame_alias = bool(
+            rospy.get_param("~allow_identity_frame_alias", False)
+        )
         self.publish_tf = bool(rospy.get_param("~publish_tf", True))
+        if (
+            (
+                self.frame_id.lstrip("/")
+                != self.expected_input_frame_id.lstrip("/")
+                or self.child_frame_id.lstrip("/")
+                != self.expected_input_child_frame_id.lstrip("/")
+            )
+            and not self.allow_identity_frame_alias
+        ):
+            raise ValueError(
+                "Changing odometry frame names without transforming the pose "
+                "or twist is disabled. Set ~allow_identity_frame_alias:=true "
+                "only when both frame pairs are explicitly known to coincide."
+            )
 
         self.publisher = rospy.Publisher(output_topic, Odometry, queue_size=20)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster()
@@ -34,8 +57,38 @@ class SimulationOdometryAdapter:
             self.frame_id,
             self.child_frame_id,
         )
+        if self.allow_identity_frame_alias:
+            rospy.logwarn(
+                "simulation odometry adapter uses an explicit identity frame "
+                "alias: %s -> %s; pose/twist values are not transformed.",
+                self.expected_input_frame_id,
+                self.frame_id,
+            )
 
     def callback(self, msg):
+        input_frame = msg.header.frame_id.lstrip("/")
+        input_child_frame = msg.child_frame_id.lstrip("/")
+        if input_frame != self.expected_input_frame_id.lstrip("/"):
+            rospy.logerr_throttle(
+                1.0,
+                "Dropping simulation odometry with unexpected frame '%s' "
+                "(expected '%s').",
+                input_frame,
+                self.expected_input_frame_id,
+            )
+            return
+        if (
+            input_child_frame
+            != self.expected_input_child_frame_id.lstrip("/")
+        ):
+            rospy.logerr_throttle(
+                1.0,
+                "Dropping simulation odometry with unexpected child frame "
+                "'%s' (expected '%s').",
+                input_child_frame,
+                self.expected_input_child_frame_id,
+            )
+            return
         output = copy.deepcopy(msg)
         output.header.frame_id = self.frame_id
         output.child_frame_id = self.child_frame_id
@@ -54,6 +107,9 @@ class SimulationOdometryAdapter:
 
 
 if __name__ == "__main__":
-    rospy.init_node("sim_odometry_adapter")
-    SimulationOdometryAdapter()
-    rospy.spin()
+    try:
+        rospy.init_node("sim_odometry_adapter")
+        SimulationOdometryAdapter()
+        rospy.spin()
+    except (rospy.ROSInterruptException, ValueError) as exc:
+        rospy.logerr(str(exc))

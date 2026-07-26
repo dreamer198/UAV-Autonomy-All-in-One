@@ -93,8 +93,22 @@ def disarmed_mode_requires_stabilized(mode):
     return mode == "OFFBOARD" or bool(mode and mode.startswith("AUTO."))
 
 
+def disarmed_mode_requires_reset(mode, target_mode):
+    """Return whether PX4 must enter the configured safe pre-arm mode."""
+    if target_mode == "STABILIZED":
+        return disarmed_mode_requires_stabilized(mode)
+    return mode != target_mode
+
+
 def px4_flight_termination_active(system_status):
     return int(system_status) == MAV_STATE_FLIGHT_TERMINATION
+
+
+def flight_director_recovery_mode(reason):
+    """Choose a recoverable PX4 native mode without relying on OFFBOARD."""
+    if "localization" in str(reason).lower():
+        return "AUTO.LAND"
+    return "AUTO.LOITER"
 
 
 class SharedMissionExecutor:
@@ -115,7 +129,9 @@ class SharedMissionExecutor:
         self.condition = threading.Condition()
         self.abort_requested = False
         self.state = None
+        self.state_received_at = 0.0
         self.relative_altitude = None
+        self.altitude_received_at = 0.0
         self.vertical_velocity = None
         self.odom_received_at = 0.0
         self.position_setpoint_count = 0
@@ -127,16 +143,24 @@ class SharedMissionExecutor:
         # Warm the exact waypoint runner that will execute the mission while
         # PX4 is still disarmed/climbing. This removes the post-takeoff ROS
         # publisher/subscriber startup pause.
-        self.runner = WaypointMission(config, args.drone_id)
+        self.runner = WaypointMission(
+            config,
+            args.drone_id,
+            state_topic=args.state_topic,
+            odometry_topic=args.odometry_topic,
+        )
 
         rospy.Subscriber(
-            "/mavros/state", State, self._state_callback, queue_size=1
+            args.state_topic, State, self._state_callback, queue_size=1
         )
         rospy.Subscriber(
-            "/mavros/altitude", Altitude, self._altitude_callback, queue_size=1
+            args.altitude_topic,
+            Altitude,
+            self._altitude_callback,
+            queue_size=1,
         )
         rospy.Subscriber(
-            "/localization/odom",
+            args.odometry_topic,
             Odometry,
             self._odom_callback,
             queue_size=1,
@@ -167,11 +191,13 @@ class SharedMissionExecutor:
     def _state_callback(self, message):
         with self.condition:
             self.state = message
+            self.state_received_at = time.monotonic()
             self.condition.notify_all()
 
     def _altitude_callback(self, message):
         with self.condition:
             self.relative_altitude = message.relative
+            self.altitude_received_at = time.monotonic()
             self.condition.notify_all()
 
     def _odom_callback(self, message):
@@ -205,14 +231,35 @@ class SharedMissionExecutor:
             raise FlightDirectorError("mission executor was interrupted")
 
     def _check_localization_interlock(self):
-        reason = localization_fault_reason(
-            self.rospy.get_param(LOCALIZATION_FAULT_PARAM, "")
-        )
+        try:
+            value = self.rospy.get_param(LOCALIZATION_FAULT_PARAM, "")
+        except Exception as exc:
+            raise FlightDirectorError(
+                "localization safety interlock could not be read: {}".format(
+                    exc
+                )
+            )
+        reason = localization_fault_reason(value)
         if reason:
             raise FlightDirectorError(
                 "localization safety interlock is latched: {}. Restart the "
                 "complete simulation/real stack before another mission".format(
                     reason
+                )
+            )
+
+    def _check_localization_health(self):
+        """Fail closed when the interlock or live odometry is unavailable."""
+        self._check_localization_interlock()
+        now = time.monotonic()
+        with self.condition:
+            odom_received_at = self.odom_received_at
+        age = now - odom_received_at
+        if odom_received_at <= 0.0 or age > self.config["odom_timeout"]:
+            raise FlightDirectorError(
+                "localization odometry is unavailable or stale "
+                "(age {:.2f}s, limit {:.2f}s)".format(
+                    age, self.config["odom_timeout"]
                 )
             )
 
@@ -241,53 +288,80 @@ class SharedMissionExecutor:
             raise FlightDirectorError("SE3 controller is not running")
 
         deadline = time.monotonic() + self.args.preflight_timeout
-        with self.condition:
-            while True:
-                self._check_abort()
-                self._check_localization_interlock()
-                now = time.monotonic()
-                setpoint_age = now - self.position_setpoint_received_at
-                position_stream_ready = preflight_position_stream_ready(
-                    self.state.armed if self.state is not None else False,
-                    self.position_setpoint_count,
-                    setpoint_age,
-                    self.args.odom_timeout,
+        while True:
+            self._check_abort()
+            self._check_localization_interlock()
+            now = time.monotonic()
+            with self.condition:
+                state = self.state
+                state_received_at = self.state_received_at
+                relative_altitude = self.relative_altitude
+                altitude_received_at = self.altitude_received_at
+                odom_received_at = self.odom_received_at
+                position_setpoint_count = self.position_setpoint_count
+                position_setpoint_received_at = (
+                    self.position_setpoint_received_at
                 )
-                ready = (
-                    self.state is not None
-                    and self.relative_altitude is not None
-                    and math.isfinite(float(self.relative_altitude))
-                    and now - self.odom_received_at <= self.args.odom_timeout
-                    and position_stream_ready
+            state_is_fresh = (
+                state is not None
+                and now - state_received_at <= self.config["state_timeout"]
+            )
+            altitude_is_fresh = (
+                relative_altitude is not None
+                and now - altitude_received_at <= self.args.altitude_timeout
+            )
+            odom_is_fresh = (
+                odom_received_at > 0.0
+                and now - odom_received_at <= self.config["odom_timeout"]
+            )
+            position_stream_ready = preflight_position_stream_ready(
+                state.armed if state_is_fresh else False,
+                position_setpoint_count,
+                now - position_setpoint_received_at,
+                self.config["odom_timeout"],
+            )
+            if state_is_fresh and state.armed and not odom_is_fresh:
+                raise FlightDirectorError(
+                    "localization odometry is unavailable or stale while "
+                    "the vehicle is armed"
                 )
-                if ready:
-                    break
-                remaining = deadline - now
-                if remaining <= 0.0:
-                    missing = []
-                    if self.state is None:
-                        missing.append("MAVROS state")
-                    if self.relative_altitude is None or not math.isfinite(
-                        float(self.relative_altitude)
-                    ):
-                        missing.append("relative altitude")
-                    if now - self.odom_received_at > self.args.odom_timeout:
-                        missing.append("fresh localization")
-                    if not position_stream_ready:
-                        missing.append("ten fresh position hold setpoints")
-                    raise FlightDirectorError(
-                        "mission preflight was not ready within {:.1f}s; "
-                        "missing: {}".format(
-                            self.args.preflight_timeout,
-                            ", ".join(missing) or "unknown condition",
-                        )
+            ready = (
+                state_is_fresh
+                and altitude_is_fresh
+                and math.isfinite(float(relative_altitude))
+                and odom_is_fresh
+                and position_stream_ready
+            )
+            if ready:
+                break
+            remaining = deadline - now
+            if remaining <= 0.0:
+                missing = []
+                if not state_is_fresh:
+                    missing.append("fresh MAVROS state")
+                if (
+                    not altitude_is_fresh
+                    or not math.isfinite(float(relative_altitude))
+                ):
+                    missing.append("fresh relative altitude")
+                if not odom_is_fresh:
+                    missing.append("fresh localization")
+                if not position_stream_ready:
+                    missing.append("ten fresh position hold setpoints")
+                raise FlightDirectorError(
+                    "mission preflight was not ready within {:.1f}s; "
+                    "missing: {}".format(
+                        self.args.preflight_timeout,
+                        ", ".join(missing) or "unknown condition",
                     )
+                )
+            with self.condition:
                 self.condition.wait(min(remaining, 0.1))
-        if not self.state.connected:
+        if not state.connected:
             raise FlightDirectorError("MAVROS is not connected to PX4")
         if (
-            not self.state.armed
-            and px4_flight_termination_active(self.state.system_status)
+            not state.armed
+            and px4_flight_termination_active(state.system_status)
         ):
             raise FlightDirectorError(
                 "PX4 reports FLIGHT_TERMINATION (system_status=8); release "
@@ -299,24 +373,54 @@ class SharedMissionExecutor:
         with self.condition:
             return self.state, self.relative_altitude
 
-    def _reset_disarmed_to_stabilized(self):
+    def _state_is_fresh(self, now=None):
+        if now is None:
+            now = time.monotonic()
+        with self.condition:
+            return (
+                self.state is not None
+                and now - self.state_received_at
+                <= self.config["state_timeout"]
+            )
+
+    def _altitude_is_fresh(self, now=None):
+        if now is None:
+            now = time.monotonic()
+        with self.condition:
+            return (
+                self.relative_altitude is not None
+                and now - self.altitude_received_at
+                <= self.args.altitude_timeout
+            )
+
+    def _reset_disarmed_mode(self):
+        target_mode = self.args.disarmed_prearm_mode
         self.rospy.logwarn(
-            "PX4 is disarmed in %s; returning to STABILIZED before takeoff.",
+            "PX4 is disarmed in %s; entering %s before takeoff.",
             self.state.mode,
+            target_mode,
         )
         deadline = time.monotonic() + self.args.command_timeout
         while time.monotonic() < deadline:
             self._check_abort()
+            self._check_localization_health()
             state, _ = self._state_snapshot()
-            if state is None or not state.connected:
+            if (
+                state is None
+                or not self._state_is_fresh()
+                or not state.connected
+            ):
                 raise FlightDirectorError("PX4 state became unavailable")
             if state.armed:
                 raise FlightDirectorError(
                     "PX4 armed unexpectedly while resetting its disarmed mode"
                 )
-            if state.mode == "STABILIZED":
+            if state.mode == target_mode:
                 return
-            if not disarmed_mode_requires_stabilized(state.mode):
+            if (
+                target_mode == "STABILIZED"
+                and not disarmed_mode_requires_stabilized(state.mode)
+            ):
                 self.rospy.loginfo(
                     "PX4 is already disarmed in pilot mode %s; leaving that "
                     "mode unchanged.",
@@ -324,18 +428,48 @@ class SharedMissionExecutor:
                 )
                 return
             try:
-                self.set_mode(base_mode=0, custom_mode="STABILIZED")
+                self.set_mode(base_mode=0, custom_mode=target_mode)
             except self.rospy.ServiceException:
                 pass
             with self.condition:
                 self.condition.wait(0.1)
         raise FlightDirectorError(
-            "PX4 did not enter disarmed STABILIZED within {:.1f}s".format(
-                self.args.command_timeout
+            "PX4 did not enter disarmed {} within {:.1f}s".format(
+                target_mode, self.args.command_timeout
             )
         )
 
     def _configure_takeoff(self):
+        if self.args.px4_hover_thrust is not None:
+            try:
+                hover_response = self.param_set(
+                    param_id="MPC_THR_HOVER",
+                    value=self.ParamValue(
+                        integer=0, real=self.args.px4_hover_thrust
+                    ),
+                )
+            except self.rospy.ServiceException as exc:
+                raise FlightDirectorError(
+                    "unable to configure MPC_THR_HOVER: {}".format(exc)
+                )
+            if (
+                not hover_response.success
+                or abs(
+                    float(hover_response.value.real)
+                    - self.args.px4_hover_thrust
+                )
+                > 1e-3
+            ):
+                raise FlightDirectorError(
+                    "PX4 rejected MPC_THR_HOVER={}".format(
+                        self.args.px4_hover_thrust
+                    )
+                )
+            self.rospy.loginfo(
+                "PX4 native controller hover thrust set to %.3f.",
+                self.args.px4_hover_thrust,
+            )
+
         try:
             radius_response = self.param_get(param_id="NAV_MC_ALT_RAD")
         except self.rospy.ServiceException as exc:
@@ -414,7 +548,7 @@ class SharedMissionExecutor:
                 param_id="NAV_MC_ALT_RAD",
                 value=self.ParamValue(integer=0, real=original),
             )
-        except self.rospy.ServiceException as exc:
+        except Exception as exc:
             self.rospy.logerr(
                 "Unable to restore NAV_MC_ALT_RAD=%.2f: %s", original, exc
             )
@@ -437,6 +571,7 @@ class SharedMissionExecutor:
         accepted = False
         while time.monotonic() < deadline:
             self._check_abort()
+            self._check_localization_health()
             try:
                 response = self.arm_vehicle(value=True)
             except self.rospy.ServiceException:
@@ -455,8 +590,14 @@ class SharedMissionExecutor:
         deadline = time.monotonic() + self.args.command_timeout
         while time.monotonic() < deadline:
             self._check_abort()
+            self._check_localization_health()
             state, _ = self._state_snapshot()
-            if state is not None and state.armed and state.mode == "AUTO.TAKEOFF":
+            if (
+                state is not None
+                and self._state_is_fresh()
+                and state.armed
+                and state.mode == "AUTO.TAKEOFF"
+            ):
                 self.rospy.loginfo("PX4 is armed in AUTO.TAKEOFF.")
                 return
             try:
@@ -478,10 +619,17 @@ class SharedMissionExecutor:
         stable_since = None
         while time.monotonic() < deadline:
             self._check_abort()
+            self._check_localization_health()
             state, altitude = self._state_snapshot()
-            if state is None or not state.connected or not state.armed:
+            if (
+                state is None
+                or not self._state_is_fresh()
+                or not state.connected
+                or not state.armed
+            ):
                 raise FlightDirectorError(
-                    "PX4 disconnected or disarmed during AUTO.TAKEOFF"
+                    "PX4 state became stale, disconnected or disarmed during "
+                    "AUTO.TAKEOFF"
                 )
             if state.mode not in ("AUTO.TAKEOFF", "AUTO.LOITER"):
                 raise FlightDirectorError(
@@ -510,10 +658,17 @@ class SharedMissionExecutor:
             with self.condition:
                 vertical_velocity = self.vertical_velocity
                 odom_is_fresh = (
-                    now - self.odom_received_at <= self.args.odom_timeout
+                    now - self.odom_received_at
+                    <= self.config["odom_timeout"]
+                )
+                altitude_is_fresh = (
+                    self.relative_altitude is not None
+                    and now - self.altitude_received_at
+                    <= self.args.altitude_timeout
                 )
             ready = (
                 odom_is_fresh
+                and altitude_is_fresh
                 and native_takeoff_handoff_ready(
                     state.mode,
                     altitude,
@@ -561,9 +716,11 @@ class SharedMissionExecutor:
         )
         while time.monotonic() < deadline:
             self._check_abort()
+            self._check_localization_health()
             state, _ = self._state_snapshot()
             if (
                 state is None
+                or not self._state_is_fresh()
                 or not state.connected
                 or not state.armed
                 or state.mode not in ("AUTO.TAKEOFF", "AUTO.LOITER")
@@ -576,6 +733,7 @@ class SharedMissionExecutor:
                 self.condition.wait(max(0.0, min(0.05, deadline - time.monotonic())))
 
     def _enter_and_verify_offboard(self):
+        self._check_localization_health()
         state, _ = self._state_snapshot()
         already_offboard = state is not None and state.mode == "OFFBOARD"
         with self.condition:
@@ -585,21 +743,35 @@ class SharedMissionExecutor:
             with self.condition:
                 position_baseline = self.position_setpoint_count
             warmup_deadline = time.monotonic() + self.args.preflight_timeout
-            with self.condition:
-                while self.position_setpoint_count - position_baseline < 10:
-                    self._check_abort()
-                    remaining = warmup_deadline - time.monotonic()
-                    if remaining <= 0.0:
-                        raise FlightDirectorError(
-                            "ten fresh hold setpoints were not available before OFFBOARD"
-                        )
+            while True:
+                self._check_abort()
+                self._check_localization_health()
+                with self.condition:
+                    enough_position_setpoints = (
+                        self.position_setpoint_count - position_baseline >= 10
+                    )
+                if enough_position_setpoints:
+                    break
+                remaining = warmup_deadline - time.monotonic()
+                if remaining <= 0.0:
+                    raise FlightDirectorError(
+                        "ten fresh hold setpoints were not available before "
+                        "OFFBOARD"
+                    )
+                with self.condition:
                     self.condition.wait(min(remaining, 0.1))
 
             deadline = time.monotonic() + self.args.command_timeout
             while time.monotonic() < deadline:
                 self._check_abort()
+                self._check_localization_health()
                 state, _ = self._state_snapshot()
-                if state is None or not state.connected or not state.armed:
+                if (
+                    state is None
+                    or not self._state_is_fresh()
+                    or not state.connected
+                    or not state.armed
+                ):
                     raise FlightDirectorError(
                         "PX4 state is not connected and armed before OFFBOARD"
                     )
@@ -631,25 +803,36 @@ class SharedMissionExecutor:
             )
 
         attitude_deadline = time.monotonic() + self.args.preflight_timeout
-        with self.condition:
-            while self.attitude_setpoint_count - attitude_baseline < 5:
-                self._check_abort()
+        while True:
+            self._check_abort()
+            self._check_localization_health()
+            now = time.monotonic()
+            with self.condition:
+                enough_attitude_setpoints = (
+                    self.attitude_setpoint_count - attitude_baseline >= 5
+                )
                 state = self.state
-                if (
-                    state is None
-                    or not state.connected
-                    or not state.armed
-                    or state.mode != "OFFBOARD"
-                ):
-                    raise FlightDirectorError(
-                        "PX4 left armed OFFBOARD before SE3 output was verified",
-                        EXIT_MANUAL_TAKEOVER,
-                    )
-                remaining = attitude_deadline - time.monotonic()
-                if remaining <= 0.0:
-                    raise FlightDirectorError(
-                        "five SE3 attitude/thrust setpoints were not observed after OFFBOARD"
-                    )
+                state_received_at = self.state_received_at
+            if (
+                state is None
+                or now - state_received_at > self.config["state_timeout"]
+                or not state.connected
+                or not state.armed
+                or state.mode != "OFFBOARD"
+            ):
+                raise FlightDirectorError(
+                    "PX4 left armed OFFBOARD before SE3 output was verified",
+                    EXIT_MANUAL_TAKEOVER,
+                )
+            if enough_attitude_setpoints:
+                break
+            remaining = attitude_deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise FlightDirectorError(
+                    "five SE3 attitude/thrust setpoints were not observed "
+                    "after OFFBOARD"
+                )
+            with self.condition:
                 self.condition.wait(min(remaining, 0.1))
         self.rospy.loginfo("PX4 is armed in OFFBOARD; starting waypoints now.")
 
@@ -670,8 +853,10 @@ class SharedMissionExecutor:
                 )
             self._enter_and_verify_offboard()
             return
-        if disarmed_mode_requires_stabilized(state.mode):
-            self._reset_disarmed_to_stabilized()
+        if disarmed_mode_requires_reset(
+            state.mode, self.args.disarmed_prearm_mode
+        ):
+            self._reset_disarmed_mode()
         self._configure_takeoff()
         self.rospy.logwarn(
             "Requesting PX4 arming and AUTO.TAKEOFF; propellers may start immediately."
@@ -688,12 +873,18 @@ class SharedMissionExecutor:
         while time.monotonic() < deadline:
             self._check_abort()
             state, _ = self._state_snapshot()
-            if state is None or not state.connected:
+            if (
+                state is None
+                or not self._state_is_fresh()
+                or not state.connected
+            ):
                 raise FlightDirectorError("PX4 disconnected before mission landing")
             if not state.armed:
                 self.rospy.loginfo("Vehicle is already disarmed after mission.")
-                if disarmed_mode_requires_stabilized(state.mode):
-                    self._reset_disarmed_to_stabilized()
+                if disarmed_mode_requires_reset(
+                    state.mode, self.args.disarmed_prearm_mode
+                ):
+                    self._reset_disarmed_mode()
                 return
             if state.mode == "AUTO.LAND":
                 self.rospy.loginfo(
@@ -726,14 +917,20 @@ class SharedMissionExecutor:
         while time.monotonic() < deadline:
             self._check_abort()
             state, _ = self._state_snapshot()
-            if state is None or not state.connected:
+            if (
+                state is None
+                or not self._state_is_fresh()
+                or not state.connected
+            ):
                 raise FlightDirectorError("PX4 disconnected during mission landing")
             if not state.armed:
                 self.rospy.loginfo(
                     "PX4 landing completed and the vehicle is disarmed."
                 )
-                if disarmed_mode_requires_stabilized(state.mode):
-                    self._reset_disarmed_to_stabilized()
+                if disarmed_mode_requires_reset(
+                    state.mode, self.args.disarmed_prearm_mode
+                ):
+                    self._reset_disarmed_mode()
                 return
             if state.mode != "AUTO.LAND":
                 raise FlightDirectorError(
@@ -749,6 +946,93 @@ class SharedMissionExecutor:
             "the vehicle and take over with the RC".format(
                 self.args.landing_timeout
             )
+        )
+
+    def _request_safe_recovery(self, reason):
+        """Confirm LOITER after a director failure, falling back to LAND."""
+        state, _ = self._state_snapshot()
+        if (
+            state is None
+            or not self._state_is_fresh()
+            or not state.connected
+            or not state.armed
+        ):
+            return
+        if state.mode == "AUTO.LAND":
+            self.rospy.logwarn(
+                "PX4 AUTO.LAND is already active after mission failure."
+            )
+            return
+        autonomous_modes = ("AUTO.TAKEOFF", "AUTO.LOITER", "OFFBOARD")
+        if state.mode not in autonomous_modes:
+            self.rospy.logwarn(
+                "Mission recovery did not override pilot mode %s.",
+                state.mode or "unknown",
+            )
+            return
+
+        target = flight_director_recovery_mode(reason)
+        targets = (target,) if target == "AUTO.LAND" else (target, "AUTO.LAND")
+        for target_mode in targets:
+            self.rospy.logerr(
+                "Mission director failure: %s. Requesting and confirming %s.",
+                reason,
+                target_mode,
+            )
+            deadline = time.monotonic() + self.args.command_timeout
+            while time.monotonic() < deadline:
+                state, _ = self._state_snapshot()
+                if (
+                    state is None
+                    or not self._state_is_fresh()
+                    or not state.connected
+                    or not state.armed
+                ):
+                    break
+                if state.mode == target_mode:
+                    self.rospy.logwarn(
+                        "PX4 %s is active after mission failure.", target_mode
+                    )
+                    return
+                if target_mode == "AUTO.LOITER" and state.mode == "AUTO.LAND":
+                    self.rospy.logwarn(
+                        "PX4 AUTO.LAND is already active after mission failure."
+                    )
+                    return
+                if state.mode not in autonomous_modes:
+                    self.rospy.logwarn(
+                        "Mission recovery stopped after mode changed to %s; "
+                        "not overriding the pilot.",
+                        state.mode or "unknown",
+                    )
+                    return
+                try:
+                    response = self.set_mode(
+                        base_mode=0, custom_mode=target_mode
+                    )
+                    if not response.mode_sent:
+                        self.rospy.logerr_throttle(
+                            1.0,
+                            "PX4 rejected %s during mission recovery.",
+                            target_mode,
+                        )
+                except Exception as exc:
+                    self.rospy.logerr_throttle(
+                        1.0,
+                        "Unable to request %s during mission recovery (%s).",
+                        target_mode,
+                        exc,
+                    )
+                with self.condition:
+                    self.condition.wait(0.1)
+            if target_mode == "AUTO.LOITER":
+                self.rospy.logerr(
+                    "AUTO.LOITER could not be confirmed; falling back to "
+                    "AUTO.LAND."
+                )
+        self.rospy.logerr(
+            "No safe PX4 recovery mode could be confirmed; take over "
+            "immediately with the RC."
         )
 
     def run(self):
@@ -771,8 +1055,14 @@ class SharedMissionExecutor:
                 )
             else:
                 self.rospy.logerr("Mission flight director failed: %s", exc)
-                self.runner._request_recovery(str(exc))
+                self._request_safe_recovery(str(exc))
             return exc.code
+        except Exception as exc:
+            self.rospy.logerr("Unexpected mission executor failure: %s", exc)
+            self._request_safe_recovery(
+                "unexpected mission executor error: {}".format(exc)
+            )
+            return EXIT_MISSION_FAILED
         finally:
             self._restore_altitude_acceptance_radius()
 
@@ -784,6 +1074,24 @@ def _build_parser():
     parser.add_argument("mission_file")
     parser.add_argument("--drone-id", type=int, default=0)
     parser.add_argument("--default-takeoff-height", type=float, default=1.0)
+    parser.add_argument(
+        "--px4-hover-thrust",
+        type=float,
+        default=None,
+        help=(
+            "Optional MPC_THR_HOVER calibration used by PX4 native takeoff. "
+            "Omit on real flight to retain the autopilot's stored value."
+        ),
+    )
+    parser.add_argument(
+        "--disarmed-prearm-mode",
+        choices=("STABILIZED", "AUTO.LOITER"),
+        default="STABILIZED",
+        help=(
+            "Safe mode selected before arming. Simulation without RC should "
+            "use AUTO.LOITER; real flight defaults to STABILIZED."
+        ),
+    )
     parser.add_argument("--preflight-timeout", type=float, default=5.0)
     parser.add_argument("--command-timeout", type=float, default=15.0)
     parser.add_argument("--takeoff-timeout", type=float, default=30.0)
@@ -793,7 +1101,19 @@ def _build_parser():
     parser.add_argument(
         "--takeoff-max-vertical-speed", type=float, default=0.2
     )
-    parser.add_argument("--odom-timeout", type=float, default=0.5)
+    parser.add_argument(
+        "--odom-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Optional override for the mission JSON odom_timeout; the same "
+            "value is used by preflight and the waypoint runner."
+        ),
+    )
+    parser.add_argument("--altitude-timeout", type=float, default=0.5)
+    parser.add_argument("--state-topic", default="/mavros/state")
+    parser.add_argument("--altitude-topic", default="/mavros/altitude")
+    parser.add_argument("--odometry-topic", default="/localization/odom")
     return parser
 
 
@@ -808,12 +1128,27 @@ def main(argv=None):
         "takeoff_tolerance",
         "takeoff_stable_time",
         "takeoff_max_vertical_speed",
-        "odom_timeout",
+        "altitude_timeout",
     ):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0.0:
             print("[ERROR] {} must be finite and positive".format(name), file=sys.stderr)
             return EXIT_MISSION_FAILED
+    if args.odom_timeout is not None and (
+        not math.isfinite(args.odom_timeout) or args.odom_timeout <= 0.0
+    ):
+        print("[ERROR] odom_timeout must be finite and positive", file=sys.stderr)
+        return EXIT_MISSION_FAILED
+    if args.px4_hover_thrust is not None and (
+        not math.isfinite(args.px4_hover_thrust)
+        or args.px4_hover_thrust <= 0.0
+        or args.px4_hover_thrust > 1.0
+    ):
+        print(
+            "[ERROR] px4_hover_thrust must be within (0, 1]",
+            file=sys.stderr,
+        )
+        return EXIT_MISSION_FAILED
 
     try:
         import rospy
@@ -833,12 +1168,22 @@ def main(argv=None):
                 )
             )
         )
+        inflation = float(
+            rospy.get_param(
+                "/drone_{}_diff_planner_node/grid_map/obstacles_inflation".format(
+                    args.drone_id
+                )
+            )
+        )
         config = load_mission_config(
             args.mission_file,
             default_takeoff_height=args.default_takeoff_height,
             virtual_ground=ground,
             virtual_ceil=ceil,
+            obstacles_inflation=inflation,
         )
+        if args.odom_timeout is not None:
+            config["odom_timeout"] = args.odom_timeout
     except (ImportError, KeyError, ValueError, MissionConfigError) as exc:
         print("[ERROR] Cannot initialize mission: {}".format(exc), file=sys.stderr)
         return EXIT_MISSION_FAILED
@@ -850,7 +1195,14 @@ def main(argv=None):
         )
         return EXIT_MISSION_FAILED
 
-    executor = SharedMissionExecutor(rospy, config, args)
+    try:
+        executor = SharedMissionExecutor(rospy, config, args)
+    except Exception as exc:
+        print(
+            "[ERROR] Cannot construct mission executor: {}".format(exc),
+            file=sys.stderr,
+        )
+        return EXIT_MISSION_FAILED
     previous_sigint = signal.getsignal(signal.SIGINT)
     previous_sigterm = signal.getsignal(signal.SIGTERM)
 

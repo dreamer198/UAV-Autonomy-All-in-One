@@ -1,124 +1,100 @@
-# 室外 bag 全场景 Gazebo 重建
+# 室外重建场景
 
-该环境使用修复后的
-`se3_test_20260723_151241_0.bag` 中全部 2298 帧
-`/localization/cloud_registered`。重建器先保留重复观测，再把三维体素投影为
-水平密度图；平滑后的局部密度峰值视为树木，生成圆柱树干和低多边形树冠。
-稀疏离群回波不会再变成悬浮小方块。实测覆盖之外使用确定性最远点采样补齐
-起点到目标点围成的矩形树林，补齐树与实测树使用不同的可复现尺寸变化。
-网格同时用于 Gazebo 碰撞和模拟 MID360 射线返回。
+`outdoor_rectangular_forest` 是由室外飞行 bag 的注册点云生成并提交到仓库的 Gazebo
+树林场景。它复现环境几何和无人机起点，不回放原测试中的目标、模式切换、控制指令或
+碰撞事件。
 
-它只复现环境和无人机起点，不回放原测试中的目标、模式切换、控制指令或碰撞事件。
-启动后可以自由更改 Planner 参数并重新发送目标。
+场景的精确来源、生成参数和统计信息记录在
+[`metadata.json`](../simulation/config/scenes/outdoor_rectangular_forest/metadata.json)，
+无需在本文重复维护。
 
-## 直接使用
+## 直接启动
 
-场景首次生成或修改重建参数后：
-
-```bash
-./launch/outdoor_bag_sim.sh generate
-```
-
-生成操作会把轻量场景发布到仓库内的版本化目录。原始 bag 仍留在
-`runtime/`，不会进入 Git。启动、解锁、目标和降落全部使用统一的 `sim.sh`，
-场景配置只改变 world 和无人机出生位姿：
+已提交的场景可以直接使用，不需要先运行生成器：
 
 ```bash
 ./launch/sim.sh --scene outdoor_rectangular_forest restart
 ```
 
-无人机默认保持未解锁。开始一次新测试：
+先用附近目标确认定位、点云和控制链路：
 
 ```bash
-./launch/sim.sh arm
-./launch/sim.sh goal 61.65 -19.03 1.0
-```
-
-目标可以替换为任意需要测试的 `world` 坐标。停止环境：
-
-```bash
-./launch/sim.sh stop
-```
-
-其他入口：
-
-```bash
-./launch/sim.sh status
-./launch/sim.sh attach
-./launch/sim.sh shell
+SIM_TAKEOFF_HEIGHT=1.0 ./launch/sim.sh arm
+./launch/sim.sh goal 2.0 0.0 1.0
 ./launch/sim.sh land
 ```
 
-`outdoor_bag_sim.sh` 的非生成操作仅保留为旧命令兼容入口，内部同样转发到
-`sim.sh`，不包含另一套飞行流程。
+场地航点回归可使用：
 
-## 场景与起点
+```bash
+./launch/sim.sh mission mission_outdoor_park.json
+```
 
-- 矩形范围：`x=-0.121～61.65 m`、`y=-19.03～-0.036 m`；
-- 左上角是 bag 起点 `(-0.121, -0.036)`，右下角是默认目标
-  `(61.65, -19.03)`，二者互为矩形对角点；
-- 默认生成约 190 棵树，其中约 91 棵来自实测密度峰值，其余用于补齐矩形空白；
-- 树高约 `2.9～4.0 m`、树干半径约 `0.13～0.27 m`、树冠半径约
-  `0.47～1.01 m`，具体数值由固定随机种子和局部密度决定；
-- bag 初始位置：`(-0.121, -0.036, 0.008) m`；
-- Gazebo 生成位置：`x=-0.121, y=-0.036, z=0`，yaw 约 `0°`；
-- 默认无风，避免把 bag 中没有测量的外部扰动编造成已知量；
-- 控制器、Planner、MID360、点云处理和解锁流程均沿用默认仿真配置。
+Mission 文件是当前场景的测试路线，不代表 Planner 已验证整条路线全局可达。Planner
+使用滚动局部地图；较远目标或被障碍阻断的航段仍可能重规划失败并紧急停止。
 
-可直接提交的生成文件位于：
+场景入口只改变 world 和出生位姿。Planner、控制器、MID-360、录包和飞行命令仍使用
+公共仿真配置。
+
+## 重新生成
+
+只有更换源 bag 或调整重建参数时才需要生成。源 bag 不进入 Git，应先放入：
+
+```text
+runtime/simulation/flight_bags/
+```
+
+然后执行：
+
+```bash
+OUTDOOR_SIM_BAG_NAME=source.bag \
+./launch/outdoor_bag_sim.sh generate
+```
+
+生成器读取 `/localization/odom` 和 `/localization/cloud_registered`，在
+`runtime/simulation/reconstructed/` 生成中间结果，再把可提交的轻量场景发布到：
 
 ```text
 simulation/config/scenes/outdoor_rectangular_forest/
 ├── se3_outdoor_reconstruction.world
-├── meshes/scene.obj
-├── meshes/scene.mtl
+├── meshes/
 ├── metadata.json
 ├── trees.json
 └── recorded_trajectory.csv
 ```
 
-对应的场景配置是
-`simulation/config/scenes/outdoor_rectangular_forest.env`。以后增加其他 world，
-只需复制一个场景配置并修改 `SCENE_WORLD` 和 `SCENE_SPAWN_*`，无需新建启动脚本。
+常用调整项：
 
-## 调整重建精度
+| 变量 | 作用 |
+|---|---|
+| `OUTDOOR_SIM_VOXEL_SIZE` | 点云体素尺寸 |
+| `OUTDOOR_SIM_CLOUD_STRIDE` | 处理帧间隔 |
+| `OUTDOOR_SIM_MIN_OBSERVATIONS` | 体素最少重复观测次数 |
+| `OUTDOOR_SIM_CORRIDOR_RADIUS` | 保留原轨迹周围的点云范围 |
+| `OUTDOOR_SIM_TREE_MIN_SPACING` | 检测树木的最小间距 |
+| `OUTDOOR_SIM_TREE_DENSITY_QUANTILE` | 树木密度峰值阈值 |
+| `OUTDOOR_SIM_FOREST_FILL_SPACING` | 未观测区域的补树间距 |
+| `OUTDOOR_SIM_FOREST_PATH_CLEARANCE` | 原轨迹附近的树干净空 |
+| `OUTDOOR_SIM_FOREST_CORNER_CLEARANCE` | 起点和目标角点净空 |
+| `OUTDOOR_SIM_WIND_SPEED`、`OUTDOOR_SIM_WIND_DIRECTION_*` | 可选风场 |
 
-默认使用 `0.14 m` 体素、每两帧处理一帧，只保留至少重复观测两次的体素，
-并截取原轨迹周围 `7 m`。密度图网格为 `0.28 m`，平滑半径 `0.40 m`，
-树木最小间距 `1.20 m`，只保留密度最高的局部峰值。矩形空白区域继续补树，
-直到任一点到最近树木不超过约 `2.0 m`；轨迹附近保留 `0.65 m` 树干通道，
-起点和目标角点保留 `1.5 m` 净空：
+完整参数和当前默认值以
+[`launch/outdoor_bag_sim.sh`](../launch/outdoor_bag_sim.sh) 为准。
+`OUTDOOR_SIM_GEOMETRY_MODE=voxels` 可用于检查原始点云，但零散体素场景不适合作为常规
+飞行测试环境。
 
-```bash
-OUTDOOR_SIM_VOXEL_SIZE=0.11 \
-OUTDOOR_SIM_CLOUD_STRIDE=1 \
-OUTDOOR_SIM_MIN_OBSERVATIONS=2 \
-OUTDOOR_SIM_CORRIDOR_RADIUS=7.0 \
-OUTDOOR_SIM_TREE_MIN_SPACING=1.20 \
-OUTDOOR_SIM_TREE_DENSITY_QUANTILE=0.80 \
-OUTDOOR_SIM_TREE_MAX_HEIGHT=4.20 \
-OUTDOOR_SIM_FOREST_FILL_SPACING=2.0 \
-OUTDOOR_SIM_FOREST_PATH_CLEARANCE=0.65 \
-./launch/outdoor_bag_sim.sh generate
-```
+## 场景配置
 
-减小 `FOREST_FILL_SPACING` 会提高补齐密度；修改 `FOREST_SEED` 可得到另一组
-可复现的补树位置和尺寸。提高密度分位数会减少实测树木，增大最小间距会合并
-相邻峰值。诊断原始点云时可临时设
-`OUTDOOR_SIM_GEOMETRY_MODE=voxels`，但不建议把该模式生成的零散体素场景用于飞行
-测试。若需要做横风敏感性测试，
-可显式生成有风版本：
-
-```bash
-OUTDOOR_SIM_WIND_SPEED=1.5 \
-OUTDOOR_SIM_WIND_DIRECTION_X=-1 \
-OUTDOOR_SIM_WIND_DIRECTION_Y=0 \
-./launch/outdoor_bag_sim.sh generate
-```
+入口配置位于
+[`outdoor_rectangular_forest.env`](../simulation/config/scenes/outdoor_rectangular_forest.env)。
+其中 `SCENE_WORLD` 是容器内路径。新增场景时，应把 world 和依赖资源放在
+`simulation/config/scenes/` 下，并使用
+`/etc/sim2real/simulation/scenes/...` 路径引用；宿主机绝对路径在仿真容器中不可见。
 
 ## 能力边界
 
-实测树的位置来自 MID360 密度峰值；矩形补齐树只是满足场景边界和树林连续性的
-程序生成估计，不代表传感器实际观测。被遮挡区域、材质、风速和真实机体质量/电机
-参数也无法从 bag 唯一恢复。当前动力学仍是 PX4 SITL Iris。因此该环境适合复测地图
-构建、路径选择和碰撞趋势，但不能把某次仿真轨迹与实飞轨迹的厘米级差异视为等价。
+- 实测树木来自点云密度峰值，不是逐棵测量的真实模型；
+- 未观测区域的补树是确定性生成结果，不代表传感器实际观测；
+- 材质、遮挡区域、风和真实机体动力学不能从 bag 唯一恢复；
+- 当前飞行器仍是 PX4 SITL Iris，仿真轨迹不能与实飞轨迹做厘米级等价比较；
+- 该场景适合复测建图、局部路径选择和碰撞趋势，不提供全局路线安全保证。

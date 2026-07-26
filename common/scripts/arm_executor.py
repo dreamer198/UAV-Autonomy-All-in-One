@@ -82,6 +82,13 @@ def localization_fault_reason(value):
     return ""
 
 
+def arm_failure_recovery_modes(reason):
+    reason = str(reason).lower()
+    if any(token in reason for token in ("localization", "odometry", "odom")):
+        return ("AUTO.LAND",)
+    return ("AUTO.LOITER", "AUTO.LAND")
+
+
 def native_takeoff_handoff_ready(
     mode,
     altitude,
@@ -139,7 +146,9 @@ class SharedArmExecutor:
         self.condition = threading.Condition()
         self.abort_requested = False
         self.state = None
+        self.state_received_at = 0.0
         self.takeoff_altitude = None
+        self.altitude_received_at = 0.0
         self.takeoff_altitude_source = args.takeoff_altitude_field
         self.vertical_velocity = None
         self.odom_received_at = 0.0
@@ -192,6 +201,7 @@ class SharedArmExecutor:
     def _state_callback(self, message):
         with self.condition:
             self.state = message
+            self.state_received_at = time.monotonic()
             self.condition.notify_all()
 
     def _altitude_callback(self, message):
@@ -205,6 +215,7 @@ class SharedArmExecutor:
                 message.relative,
                 self.args.takeoff_height,
             )
+            self.altitude_received_at = time.monotonic()
             self.condition.notify_all()
 
     def _odom_callback(self, message):
@@ -237,9 +248,15 @@ class SharedArmExecutor:
             raise ArmExecutorError("arm executor was interrupted")
 
     def _check_localization_interlock(self):
-        reason = localization_fault_reason(
-            self.rospy.get_param(LOCALIZATION_FAULT_PARAM, "")
-        )
+        try:
+            value = self.rospy.get_param(LOCALIZATION_FAULT_PARAM, "")
+        except Exception as exc:
+            raise ArmExecutorError(
+                "localization safety interlock could not be read: {}".format(
+                    exc
+                )
+            )
+        reason = localization_fault_reason(value)
         if reason:
             raise ArmExecutorError(
                 "localization safety interlock is latched: {}. Restart the "
@@ -248,9 +265,43 @@ class SharedArmExecutor:
                 )
             )
 
+    def _check_localization_health(self):
+        """Fail closed when the interlock or live odometry is unavailable."""
+        self._check_localization_interlock()
+        now = time.monotonic()
+        with self.condition:
+            odom_received_at = self.odom_received_at
+        age = now - odom_received_at
+        if odom_received_at <= 0.0 or age > self.args.odom_timeout:
+            raise ArmExecutorError(
+                "localization odometry is unavailable or stale "
+                "(age {:.2f}s, limit {:.2f}s)".format(
+                    age, self.args.odom_timeout
+                )
+            )
+
     def _state_snapshot(self):
         with self.condition:
             return self.state, self.takeoff_altitude
+
+    def _state_is_fresh(self, now=None):
+        if now is None:
+            now = time.monotonic()
+        with self.condition:
+            return (
+                self.state is not None
+                and now - self.state_received_at <= self.args.state_timeout
+            )
+
+    def _altitude_is_fresh(self, now=None):
+        if now is None:
+            now = time.monotonic()
+        with self.condition:
+            return (
+                self.takeoff_altitude is not None
+                and now - self.altitude_received_at
+                <= self.args.altitude_timeout
+            )
 
     def _wait_for_services(self):
         deadline = time.monotonic() + self.args.preflight_timeout
@@ -284,49 +335,77 @@ class SharedArmExecutor:
             )
 
         deadline = time.monotonic() + self.args.preflight_timeout
-        with self.condition:
-            while True:
-                self._check_abort()
-                self._check_localization_interlock()
-                now = time.monotonic()
-                position_stream_ready = (
-                    self.position_setpoint_count
-                    >= self.args.position_setpoint_samples
-                    and now - self.position_setpoint_received_at
-                    <= self.args.odom_timeout
+        while True:
+            self._check_abort()
+            self._check_localization_interlock()
+            now = time.monotonic()
+            with self.condition:
+                state = self.state
+                state_received_at = self.state_received_at
+                takeoff_altitude = self.takeoff_altitude
+                altitude_received_at = self.altitude_received_at
+                odom_received_at = self.odom_received_at
+                position_setpoint_count = self.position_setpoint_count
+                position_setpoint_received_at = (
+                    self.position_setpoint_received_at
                 )
-                ready = (
-                    self.state is not None
-                    and self.takeoff_altitude is not None
-                    and math.isfinite(float(self.takeoff_altitude))
-                    and now - self.odom_received_at <= self.args.odom_timeout
-                    # Once armed, manual takeover and already-OFFBOARD handling
-                    # must not depend on the pre-OFFBOARD position stream.  The
-                    # latter is replaced by attitude/thrust output in OFFBOARD.
-                    and (self.state.armed or position_stream_ready)
+            position_stream_ready = (
+                position_setpoint_count
+                >= self.args.position_setpoint_samples
+                and now - position_setpoint_received_at
+                <= self.args.odom_timeout
+            )
+            state_is_fresh = (
+                state is not None
+                and now - state_received_at <= self.args.state_timeout
+            )
+            altitude_is_fresh = (
+                takeoff_altitude is not None
+                and now - altitude_received_at <= self.args.altitude_timeout
+            )
+            odom_is_fresh = (
+                odom_received_at > 0.0
+                and now - odom_received_at <= self.args.odom_timeout
+            )
+            if state_is_fresh and state.armed and not odom_is_fresh:
+                raise ArmExecutorError(
+                    "localization odometry is unavailable or stale while "
+                    "the vehicle is armed"
                 )
-                if ready:
+            ready = (
+                state_is_fresh
+                and altitude_is_fresh
+                and math.isfinite(float(takeoff_altitude))
+                and odom_is_fresh
+                # Once armed, manual takeover and already-OFFBOARD handling
+                # must not depend on the pre-OFFBOARD position stream. The
+                # latter is replaced by attitude/thrust output in OFFBOARD.
+                and (state.armed or position_stream_ready)
+            )
+            if ready:
+                with self.condition:
                     self.preflight_position_setpoint_count = (
                         self.position_setpoint_count
                     )
-                    break
-                remaining = deadline - now
-                if remaining <= 0.0:
-                    raise ArmExecutorError(
-                        "fresh MAVROS state, altitude, localization and {} "
-                        "continuous hold setpoints were not ready within "
-                        "{:.1f}s".format(
-                            self.args.position_setpoint_samples,
-                            self.args.preflight_timeout,
-                        )
+                break
+            remaining = deadline - now
+            if remaining <= 0.0:
+                raise ArmExecutorError(
+                    "fresh MAVROS state, altitude, localization and {} "
+                    "continuous hold setpoints were not ready within "
+                    "{:.1f}s".format(
+                        self.args.position_setpoint_samples,
+                        self.args.preflight_timeout,
                     )
+                )
+            with self.condition:
                 self.condition.wait(min(remaining, 0.1))
 
-        if not self.state.connected:
+        if not state.connected:
             raise ArmExecutorError("MAVROS is not connected to PX4")
         if (
-            not self.state.armed
-            and px4_flight_termination_active(self.state.system_status)
+            not state.armed
+            and px4_flight_termination_active(state.system_status)
         ):
             raise ArmExecutorError(
                 "PX4 reports FLIGHT_TERMINATION (system_status=8); release "
@@ -348,8 +427,13 @@ class SharedArmExecutor:
         deadline = time.monotonic() + self.args.command_timeout
         while time.monotonic() < deadline:
             self._check_abort()
+            self._check_localization_health()
             state, _ = self._state_snapshot()
-            if state is None or not state.connected:
+            if (
+                state is None
+                or not self._state_is_fresh()
+                or not state.connected
+            ):
                 raise ArmExecutorError("PX4 state became unavailable")
             if state.armed:
                 raise ArmExecutorError(
@@ -492,7 +576,7 @@ class SharedArmExecutor:
                 param_id="NAV_MC_ALT_RAD",
                 value=self.ParamValue(integer=0, real=original),
             )
-        except self.rospy.ServiceException as exc:
+        except Exception as exc:
             self.rospy.logerr(
                 "Unable to restore NAV_MC_ALT_RAD=%.2f: %s", original, exc
             )
@@ -515,6 +599,7 @@ class SharedArmExecutor:
         arm_accepted = False
         while time.monotonic() < deadline:
             self._check_abort()
+            self._check_localization_health()
             try:
                 response = self.arm_vehicle(value=True)
             except self.rospy.ServiceException:
@@ -534,8 +619,13 @@ class SharedArmExecutor:
         deadline = time.monotonic() + self.args.command_timeout
         while time.monotonic() < deadline:
             self._check_abort()
+            self._check_localization_health()
             state, _ = self._state_snapshot()
-            if state is None or not state.connected:
+            if (
+                state is None
+                or not self._state_is_fresh()
+                or not state.connected
+            ):
                 raise ArmExecutorError("PX4 disconnected before AUTO.TAKEOFF")
             if state.armed and state.mode == "AUTO.TAKEOFF":
                 self.rospy.loginfo(
@@ -561,10 +651,17 @@ class SharedArmExecutor:
         stable_since = None
         while time.monotonic() < deadline:
             self._check_abort()
+            self._check_localization_health()
             state, altitude = self._state_snapshot()
-            if state is None or not state.connected or not state.armed:
+            if (
+                state is None
+                or not self._state_is_fresh()
+                or not state.connected
+                or not state.armed
+            ):
                 raise ArmExecutorError(
-                    "PX4 disconnected or disarmed during AUTO.TAKEOFF"
+                    "PX4 state became stale, disconnected or disarmed during "
+                    "AUTO.TAKEOFF"
                 )
             if state.mode not in AUTOMATIC_TAKEOFF_MODES:
                 raise ArmExecutorError(
@@ -596,8 +693,14 @@ class SharedArmExecutor:
                 odom_is_fresh = (
                     now - self.odom_received_at <= self.args.odom_timeout
                 )
+                altitude_is_fresh = (
+                    self.takeoff_altitude is not None
+                    and now - self.altitude_received_at
+                    <= self.args.altitude_timeout
+                )
             ready = (
                 odom_is_fresh
+                and altitude_is_fresh
                 and native_takeoff_handoff_ready(
                     state.mode,
                     altitude,
@@ -639,22 +742,13 @@ class SharedArmExecutor:
 
     def _wait_for_fresh_hold_setpoints(self):
         deadline = time.monotonic() + self.args.preflight_timeout
-        with self.condition:
-            while True:
-                self._check_abort()
+        while True:
+            self._check_abort()
+            self._check_localization_health()
+            now = time.monotonic()
+            with self.condition:
                 state = self.state
-                if (
-                    state is None
-                    or not state.connected
-                    or not state.armed
-                    or state.mode not in AUTOMATIC_TAKEOFF_MODES
-                ):
-                    mode = state.mode if state is not None else "unknown"
-                    raise ArmExecutorError(
-                        "flight mode changed to {} before OFFBOARD".format(mode),
-                        EXIT_MANUAL_TAKEOVER,
-                    )
-                now = time.monotonic()
+                state_received_at = self.state_received_at
                 enough_during_takeoff = (
                     self.position_setpoint_count
                     - self.preflight_position_setpoint_count
@@ -664,19 +758,33 @@ class SharedArmExecutor:
                     now - self.position_setpoint_received_at
                     <= self.args.odom_timeout
                 )
-                if enough_during_takeoff and stream_is_fresh:
-                    return
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    raise ArmExecutorError(
-                        "{} sustained hold setpoints were not observed during "
-                        "takeoff before OFFBOARD".format(
-                            self.args.position_setpoint_samples
-                        )
+            if (
+                state is None
+                or now - state_received_at > self.args.state_timeout
+                or not state.connected
+                or not state.armed
+                or state.mode not in AUTOMATIC_TAKEOFF_MODES
+            ):
+                mode = state.mode if state is not None else "unknown"
+                raise ArmExecutorError(
+                    "flight mode changed to {} before OFFBOARD".format(mode),
+                    EXIT_MANUAL_TAKEOVER,
+                )
+            if enough_during_takeoff and stream_is_fresh:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise ArmExecutorError(
+                    "{} sustained hold setpoints were not observed during "
+                    "takeoff before OFFBOARD".format(
+                        self.args.position_setpoint_samples
                     )
+                )
+            with self.condition:
                 self.condition.wait(min(remaining, 0.1))
 
     def _enter_and_verify_offboard(self, takeoff_settled_at=None):
+        self._check_localization_health()
         state, _ = self._state_snapshot()
         already_offboard = state is not None and state.mode == "OFFBOARD"
         with self.condition:
@@ -687,8 +795,14 @@ class SharedArmExecutor:
             deadline = time.monotonic() + self.args.command_timeout
             while time.monotonic() < deadline:
                 self._check_abort()
+                self._check_localization_health()
                 state, _ = self._state_snapshot()
-                if state is None or not state.connected or not state.armed:
+                if (
+                    state is None
+                    or not self._state_is_fresh()
+                    or not state.connected
+                    or not state.armed
+                ):
                     raise ArmExecutorError(
                         "PX4 state is not connected and armed before OFFBOARD"
                     )
@@ -715,31 +829,39 @@ class SharedArmExecutor:
                 )
 
         attitude_deadline = time.monotonic() + self.args.preflight_timeout
-        with self.condition:
-            while (
-                self.attitude_setpoint_count - attitude_baseline
-                < self.args.attitude_setpoint_samples
-            ):
-                self._check_abort()
+        while True:
+            self._check_abort()
+            self._check_localization_health()
+            now = time.monotonic()
+            with self.condition:
+                enough_attitude_setpoints = (
+                    self.attitude_setpoint_count - attitude_baseline
+                    >= self.args.attitude_setpoint_samples
+                )
                 state = self.state
-                if (
-                    state is None
-                    or not state.connected
-                    or not state.armed
-                    or state.mode != "OFFBOARD"
-                ):
-                    raise ArmExecutorError(
-                        "PX4 left armed OFFBOARD before SE3 output was verified",
-                        EXIT_MANUAL_TAKEOVER,
+                state_received_at = self.state_received_at
+            if (
+                state is None
+                or now - state_received_at > self.args.state_timeout
+                or not state.connected
+                or not state.armed
+                or state.mode != "OFFBOARD"
+            ):
+                raise ArmExecutorError(
+                    "PX4 left armed OFFBOARD before SE3 output was verified",
+                    EXIT_MANUAL_TAKEOVER,
+                )
+            if enough_attitude_setpoints:
+                break
+            remaining = attitude_deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise ArmExecutorError(
+                    "{} fresh SE3 attitude/thrust setpoints were not observed "
+                    "after OFFBOARD".format(
+                        self.args.attitude_setpoint_samples
                     )
-                remaining = attitude_deadline - time.monotonic()
-                if remaining <= 0.0:
-                    raise ArmExecutorError(
-                        "{} fresh SE3 attitude/thrust setpoints were not observed "
-                        "after OFFBOARD".format(
-                            self.args.attitude_setpoint_samples
-                        )
-                    )
+                )
+            with self.condition:
                 self.condition.wait(min(remaining, 0.1))
 
         now = time.monotonic()
@@ -759,27 +881,81 @@ class SharedArmExecutor:
 
     def _request_hold_once(self, reason):
         state, _ = self._state_snapshot()
-        if state is None or not state.connected or not state.armed:
+        if (
+            state is None
+            or not self._state_is_fresh()
+            or not state.connected
+            or not state.armed
+        ):
             return
-        if state.mode == "AUTO.LOITER":
+        recovery_modes = arm_failure_recovery_modes(reason)
+        localization_unsafe = recovery_modes == ("AUTO.LAND",)
+        if state.mode == "AUTO.LOITER" and not localization_unsafe:
             self.rospy.logwarn("PX4 is already holding in AUTO.LOITER.")
             return
-        if state.mode not in ("AUTO.TAKEOFF", "OFFBOARD"):
+        if state.mode not in ("AUTO.TAKEOFF", "AUTO.LOITER", "OFFBOARD"):
             self.rospy.logwarn(
                 "Not overriding current mode %s after failure: %s",
                 state.mode or "unknown",
                 reason,
             )
             return
-        try:
-            response = self.set_mode(base_mode=0, custom_mode="AUTO.LOITER")
-        except self.rospy.ServiceException as exc:
-            self.rospy.logerr("Failed to request AUTO.LOITER: %s", exc)
-            return
-        if response.mode_sent:
-            self.rospy.logwarn("Requested AUTO.LOITER after arm failure.")
-        else:
-            self.rospy.logerr("PX4 rejected AUTO.LOITER after arm failure.")
+        for target_mode in recovery_modes:
+            deadline = time.monotonic() + self.args.command_timeout
+            while time.monotonic() < deadline:
+                state, _ = self._state_snapshot()
+                if (
+                    state is None
+                    or not self._state_is_fresh()
+                    or not state.connected
+                    or not state.armed
+                ):
+                    return
+                if state.mode == target_mode:
+                    self.rospy.logwarn(
+                        "PX4 %s is confirmed after arm failure.", target_mode
+                    )
+                    return
+                if target_mode == "AUTO.LOITER" and state.mode == "AUTO.LAND":
+                    self.rospy.logwarn(
+                        "PX4 AUTO.LAND is already active after arm failure."
+                    )
+                    return
+                if state.mode not in ("AUTO.TAKEOFF", "AUTO.LOITER", "OFFBOARD"):
+                    self.rospy.logwarn(
+                        "Not overriding current mode %s after failure: %s",
+                        state.mode or "unknown",
+                        reason,
+                    )
+                    return
+                try:
+                    response = self.set_mode(
+                        base_mode=0, custom_mode=target_mode
+                    )
+                    if not response.mode_sent:
+                        self.rospy.logerr_throttle(
+                            1.0,
+                            "PX4 rejected %s after arm failure.",
+                            target_mode,
+                        )
+                except Exception as exc:
+                    self.rospy.logerr_throttle(
+                        1.0,
+                        "Failed to request %s after arm failure: %s",
+                        target_mode,
+                        exc,
+                    )
+                with self.condition:
+                    self.condition.wait(0.1)
+            if target_mode == "AUTO.LOITER":
+                self.rospy.logerr(
+                    "AUTO.LOITER was not confirmed after arm failure; "
+                    "falling back to AUTO.LAND."
+                )
+        self.rospy.logerr(
+            "No safe PX4 recovery mode was confirmed after arm failure; "
+            "take over immediately with the RC."
+        )
 
     def run(self):
         try:
@@ -827,6 +1003,12 @@ class SharedArmExecutor:
                 self.rospy.logerr("Shared arm executor failed: %s", exc)
                 self._request_hold_once(str(exc))
             return exc.code
+        except Exception as exc:
+            self.rospy.logerr("Unexpected shared arm executor failure: %s", exc)
+            self._request_hold_once(
+                "unexpected arm executor error: {}".format(exc)
+            )
+            return EXIT_FAILED
         finally:
             self._restore_altitude_acceptance_radius()
 
@@ -873,6 +1055,8 @@ def _build_parser():
         "--takeoff-max-vertical-speed", type=float, default=0.2
     )
     parser.add_argument("--odom-timeout", type=float, default=0.5)
+    parser.add_argument("--state-timeout", type=float, default=3.0)
+    parser.add_argument("--altitude-timeout", type=float, default=0.5)
     parser.add_argument("--state-topic", default="/mavros/state")
     parser.add_argument("--altitude-topic", default="/mavros/altitude")
     parser.add_argument("--odometry-topic", default="/localization/odom")
@@ -900,6 +1084,8 @@ def _validate_args(parser, args):
         "takeoff_stable_time",
         "takeoff_max_vertical_speed",
         "odom_timeout",
+        "state_timeout",
+        "altitude_timeout",
     ):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0.0:
@@ -928,7 +1114,7 @@ def main(argv=None):
 
         rospy.init_node("shared_arm_executor", disable_signals=True)
         executor = SharedArmExecutor(rospy, args)
-    except ImportError as exc:
+    except Exception as exc:
         print("[ERROR] Cannot initialize shared arm executor: {}".format(exc), file=sys.stderr)
         return EXIT_FAILED
 

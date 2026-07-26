@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import inspect
 import json
 import math
 import os
@@ -28,6 +29,19 @@ class WaypointMissionConfigTest(unittest.TestCase):
         with handle:
             json.dump(payload, handle)
         return handle.name
+
+    def test_runtime_waits_do_not_depend_on_ros_sim_time(self):
+        with open(SCRIPT_PATH, "r", encoding="utf-8") as stream:
+            source = stream.read()
+        self.assertNotIn("rospy.Rate", source)
+        self.assertNotIn("rospy.sleep", source)
+        self.assertIn("time.sleep(duration)", source)
+
+    def test_state_topic_is_configurable_for_remapped_mavros(self):
+        args = MISSION._build_parser().parse_args(["mission.json"])
+        self.assertEqual(args.state_topic, "/mavros/state")
+        signature = inspect.signature(MISSION.WaypointMission.__init__)
+        self.assertIn("state_topic", signature.parameters)
 
     def test_normalizes_ordered_waypoints_and_automatic_yaw(self):
         path = self.write_config(
@@ -204,6 +218,56 @@ class WaypointMissionConfigTest(unittest.TestCase):
                 path, virtual_ground=0.1, virtual_ceil=3.0
             )
 
+    def test_rejects_waypoint_without_obstacle_inflation_clearance(self):
+        path = self.write_config(
+            {"takeoff_height": 0.5, "waypoints": [{"x": 0, "y": 0, "z": 0.4}]}
+        )
+        with self.assertRaisesRegex(
+            MISSION.MissionConfigError, "ground clearance"
+        ):
+            MISSION.load_mission_config(
+                path,
+                virtual_ground=0.1,
+                virtual_ceil=3.0,
+                obstacles_inflation=0.33,
+            )
+
+    def test_rejects_nonfinite_planner_vertical_fence(self):
+        path = self.write_config(
+            {"takeoff_height": 1.0, "waypoints": [{"x": 0, "y": 0, "z": 1.0}]}
+        )
+        for field, value in (
+            ("virtual_ground", float("nan")),
+            ("virtual_ground", float("inf")),
+            ("virtual_ground", float("-inf")),
+            ("virtual_ceil", float("nan")),
+            ("virtual_ceil", float("inf")),
+            ("virtual_ceil", float("-inf")),
+        ):
+            bounds = {"virtual_ground": 0.1, "virtual_ceil": 3.0}
+            bounds[field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(
+                    MISSION.MissionConfigError, "{} must be finite".format(field)
+                ):
+                    MISSION.load_mission_config(
+                        path,
+                        obstacles_inflation=0.33,
+                        **bounds
+                    )
+
+    def test_accepts_height_inside_inflated_vertical_clearance(self):
+        path = self.write_config(
+            {"takeoff_height": 0.5, "waypoints": [{"x": 0, "y": 0, "z": 0.5}]}
+        )
+        config = MISSION.load_mission_config(
+            path,
+            virtual_ground=0.1,
+            virtual_ceil=3.0,
+            obstacles_inflation=0.33,
+        )
+        self.assertEqual(config["waypoints"][0]["z"], 0.5)
+
     def test_rejects_nonfinite_coordinate(self):
         path = self.write_config(
             {
@@ -261,6 +325,46 @@ class WaypointMissionConfigTest(unittest.TestCase):
             "FAST-LIO diverged",
         )
 
+    def test_existing_localization_fault_reason_is_not_overwritten(self):
+        stored = {"active": True, "reason": "FAST-LIO timestamp moved backwards"}
+        writes = []
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.lock = threading.Lock()
+        runner.abort_requested = False
+        runner.localization_fault_latched = False
+        runner.rospy = SimpleNamespace(
+            get_param=lambda *_args: stored,
+            set_param=lambda *args: writes.append(args),
+        )
+
+        code, reason = runner._flight_gate()
+
+        self.assertEqual(code, MISSION.EXIT_MISSION_FAILED)
+        self.assertEqual(reason, MISSION.LOCALIZATION_STALE_REASON)
+        self.assertTrue(runner.localization_fault_latched)
+        self.assertEqual(writes, [])
+        self.assertEqual(
+            stored["reason"], "FAST-LIO timestamp moved backwards"
+        )
+
+    def test_initial_wait_preserves_latched_localization_failure(self):
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.config = {"planner_accept_timeout": 1.0}
+        runner.rospy = SimpleNamespace(is_shutdown=lambda: False)
+        runner.goal_pub = SimpleNamespace(get_num_connections=lambda: 0)
+        runner._flight_gate = lambda: (
+            MISSION.EXIT_MISSION_FAILED,
+            MISSION.LOCALIZATION_STALE_REASON,
+        )
+        runner._wall_wait = lambda: self.fail(
+            "latched localization failure must not wait for topic timeout"
+        )
+
+        code, reason = runner._wait_for_initial_state()
+
+        self.assertEqual(code, MISSION.EXIT_MISSION_FAILED)
+        self.assertEqual(reason, MISSION.LOCALIZATION_STALE_REASON)
+
     def test_temporary_emergency_stop_is_cleared_by_recovery_trajectory(self):
         runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
         runner.lock = threading.Lock()
@@ -288,6 +392,26 @@ class WaypointMissionConfigTest(unittest.TestCase):
         runner._trajectory_callback(recovered)
         self.assertTrue(runner.current_plan_accepted)
         self.assertIsNone(runner.current_planner_stopped_at)
+
+    def test_initial_emergency_stop_starts_bounded_retry_window(self):
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.lock = threading.Lock()
+        runner.current_goal_stamp = 123
+        runner.current_requested_goal_position = (1.0, 2.0, 3.0)
+        runner.current_goal_position = (1.0, 2.0, 3.0)
+        runner.current_plan_accepted = False
+        runner.current_planner_stopped_at = None
+
+        stop = SimpleNamespace(
+            goal_stamp=123,
+            goal_position=(1.0, 2.0, 3.0),
+            armable=False,
+            traj_id=1,
+        )
+        runner._trajectory_callback(stop)
+
+        self.assertFalse(runner.current_plan_accepted)
+        self.assertIsNotNone(runner.current_planner_stopped_at)
 
     def test_repeated_stop_messages_do_not_restart_recovery_window(self):
         runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)

@@ -32,6 +32,7 @@ class SharedMissionEntrypointTest(unittest.TestCase):
                 source = self.read_project_file(launcher)
                 self.assertIn("MISSION_EXECUTOR_HOST=", source)
                 self.assertIn("python3 -u '$container_executor'", source)
+                self.assertIn("--disarmed-prearm-mode", source)
                 self.assertNotIn("arm_vehicle mission", source)
 
     def test_shared_director_has_no_platform_branch(self):

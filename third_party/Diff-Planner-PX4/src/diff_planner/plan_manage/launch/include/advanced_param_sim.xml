@@ -35,7 +35,7 @@
     <arg name="use_multitopology_trajs"/>
     <arg name="drone_id"/>
     <arg name="goal_yaw_tolerance_deg" default="5.0"/>
-    <arg name="goal_position_tolerance" default="0.2"/>
+    <arg name="goal_position_tolerance" default="0.35"/>
     <arg name="use_drone_topic_prefix" default="true"/>
     <arg name="resolved_odometry_topic" default="$(eval '/drone_%s_%s' % (arg('drone_id'), arg('odometry_topic').lstrip('/')) if arg('use_drone_topic_prefix') == 'true' else arg('odometry_topic'))"/>
     <arg name="resolved_cloud_topic" default="$(eval '/drone_%s_%s' % (arg('drone_id'), arg('cloud_topic').lstrip('/')) if arg('use_drone_topic_prefix') == 'true' else arg('cloud_topic'))"/>
@@ -98,7 +98,6 @@
         <param name="grid_map/enable_virtual_wall" value="false"/>
         <param name="grid_map/virtual_ceil" value="3.0"/>
         <param name="grid_map/virtual_ground" value="-0.1"/>
-        <param name="grid_map/ground_height" value="-0.01"/>
         <!-- camera parameter -->
         <param name="grid_map/cx" value="$(arg cx)"/>
         <param name="grid_map/cy" value="$(arg cy)"/>
@@ -107,7 +106,6 @@
         <!-- depth filter -->
         <param name="grid_map/use_depth_filter" value="true"/>
         <param name="grid_map/depth_filter_tolerance" value="0.15"/>
-        <param name="grid_map/depth_filter_maxdist" value="5.0"/>
         <param name="grid_map/depth_filter_mindist" value="0.2"/>
         <param name="grid_map/depth_filter_margin" value="2"/>
         <param name="grid_map/k_depth_scaling_factor" value="1000.0"/>
@@ -120,8 +118,6 @@
         <param name="grid_map/p_occ" value="0.80"/>
         <param name="grid_map/fading_time" value="1000.0"/>
         <param name="grid_map/min_ray_length" value="0.1"/>
-        <param name="grid_map/max_ray_length" value="4.5"/>
-        <param name="grid_map/visualization_truncate_height" value="1.9"/>
         <param name="grid_map/show_occ_time" value="false"/>
         <param name="grid_map/pose_type" value="$(arg pose_type)"/>
         <param name="grid_map/frame_id" value="world"/>
@@ -149,6 +145,5 @@
         <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>
         <param name="optimization/acc_tolerance" value="1.0" type="double"/>
         <param name="optimization/max_jer" value="$(arg max_jer)" type="double"/>
-        <param name="optimization/record_opt" value="true"/>
     </node>
 </launch>

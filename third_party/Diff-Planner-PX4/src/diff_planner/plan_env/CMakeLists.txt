@@ -48,3 +48,14 @@ target_link_libraries( plan_env
     ${catkin_LIBRARIES} 
     ${PCL_LIBRARIES}
     )  
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_raycast_filter_utils
+    test/test_raycast_filter_utils.cpp
+  )
+  if(TARGET test_raycast_filter_utils)
+    target_link_libraries(test_raycast_filter_utils
+      ${catkin_LIBRARIES}
+    )
+  endif()
+endif()

@@ -13,7 +13,7 @@
 
 支持本仓库使用的 Ubuntu 20.04 / ROS Noetic。仿真与真机镜像会按各自 Dockerfile 安装依赖并构建该目录；推荐使用仓库根目录 `launch/` 入口，而不是把本目录单独复制到另一套 PX4 环境。
 
-## 在 Sim-to-Real 架构中的位置
+## 在本项目中的位置
 
 环境适配层必须先提供：
 
@@ -111,7 +111,7 @@ SE3 节点内部的自动 OFFBOARD/解锁受 `enable_sim`、`auto_request_offboa
 
 - [../../docs/diff_planner_principles.md](../../docs/diff_planner_principles.md)
 - [../../docs/se3_controller.md](../../docs/se3_controller.md)
-- [../../docs/trajectory_tracking_altitude.md](../../docs/trajectory_tracking_altitude.md)
+- [../../docs/controller_tuning.md](../../docs/controller_tuning.md)
 
 ## 参考
 
