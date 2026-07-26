@@ -36,6 +36,21 @@ def validate_goal_coordinates(x, y, z):
         raise GoalExecutorError("goal coordinates must be finite")
 
 
+def vertical_clearance_bounds(ground, ceil, inflation):
+    values = (ground, ceil, inflation)
+    if not all(math.isfinite(value) for value in values):
+        raise GoalExecutorError("Planner vertical clearance values must be finite")
+    if inflation < 0.0:
+        raise GoalExecutorError("Planner obstacle inflation cannot be negative")
+    minimum_z = ground + inflation
+    maximum_z = ceil - inflation
+    if minimum_z >= maximum_z:
+        raise GoalExecutorError(
+            "Planner vertical fence has no space after obstacle inflation"
+        )
+    return minimum_z, maximum_z
+
+
 def localization_fault_reason(value):
     """Return the persistent interlock reason, or empty when it is clear."""
     if isinstance(value, dict):
@@ -63,6 +78,7 @@ class SharedGoalExecutor:
         self.condition = threading.Condition()
         self.abort_requested = False
         self.state = None
+        self.state_received_at = 0.0
         self.odom_received_at = 0.0
         self.attitude_setpoint_count = 0
         self.attitude_setpoint_received_at = 0.0
@@ -93,6 +109,7 @@ class SharedGoalExecutor:
     def _state_callback(self, message):
         with self.condition:
             self.state = message
+            self.state_received_at = time.monotonic()
             self.condition.notify_all()
 
     def _odom_callback(self, _message):
@@ -168,22 +185,32 @@ class SharedGoalExecutor:
             ceil = float(
                 self.rospy.get_param("{}/virtual_ceil".format(prefix))
             )
+            inflation = float(
+                self.rospy.get_param(
+                    "{}/obstacles_inflation".format(prefix)
+                )
+            )
         except (KeyError, TypeError, ValueError) as exc:
             raise GoalExecutorError(
                 "cannot read Planner vertical fence: {}".format(exc)
             )
-        if not math.isfinite(ground) or not math.isfinite(ceil) or ground >= ceil:
-            raise GoalExecutorError("Planner vertical fence is invalid")
-        if not ground < self.args.z < ceil:
+        minimum_z, maximum_z = vertical_clearance_bounds(
+            ground, ceil, inflation
+        )
+        if not minimum_z < self.args.z < maximum_z:
             raise GoalExecutorError(
-                "goal Z={:.3f} must be strictly inside Planner fence "
-                "({:.3f}, {:.3f})".format(self.args.z, ground, ceil)
+                "goal Z={:.3f} must leave full obstacle-inflation clearance "
+                "inside the Planner fence ({:.3f}, {:.3f})".format(
+                    self.args.z, minimum_z, maximum_z
+                )
             )
 
     def _readiness_reason(self, now):
         self._check_localization_interlock()
         if self.state is None:
             return "waiting for MAVROS state"
+        if now - self.state_received_at > self.args.state_timeout:
+            return "waiting for fresh MAVROS state"
         if not self.state.connected:
             raise GoalExecutorError("MAVROS is not connected to PX4")
         if not self.args.allow_disarmed:
@@ -279,6 +306,13 @@ class SharedGoalExecutor:
         except GoalExecutorError as exc:
             self.rospy.logerr("Shared goal executor refused the goal: %s", exc)
             return EXIT_FAILED
+        except Exception as exc:
+            self.rospy.logerr(
+                "Shared goal executor refused the goal after an unexpected "
+                "runtime error: %s",
+                exc,
+            )
+            return EXIT_FAILED
 
 
 def _build_parser():
@@ -300,6 +334,7 @@ def _build_parser():
     )
     parser.add_argument("--controller-node", default="/se3_controller_node")
     parser.add_argument("--preflight-timeout", type=float, default=5.0)
+    parser.add_argument("--state-timeout", type=float, default=3.0)
     parser.add_argument("--odom-timeout", type=float, default=0.5)
     parser.add_argument("--stream-gap-timeout", type=float, default=0.5)
     parser.add_argument("--attitude-setpoint-samples", type=int, default=10)
@@ -321,6 +356,7 @@ def _validate_args(parser, args):
         parser.error(str(exc))
     for name in (
         "preflight_timeout",
+        "state_timeout",
         "odom_timeout",
         "stream_gap_timeout",
         "delivery_wait",

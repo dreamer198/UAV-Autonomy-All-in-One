@@ -1,6 +1,8 @@
 #ifndef SE3_CONTROLLER_HPP
 #define SE3_CONTROLLER_HPP
 
+#include <algorithm>
+#include <cmath>
 #include <queue>
 #include <Eigen/Dense>
 #include <sensor_msgs/Imu.h>
@@ -9,6 +11,49 @@
 
 #define VEL_IN_BODY /* cancel the comment if the velocity in odom topic is relative to current body frame, not to world frame.*/
 // #define AIRSIM
+
+namespace se3_safety
+{
+inline bool isQuaternionValid(const Eigen::Quaterniond &q)
+{
+	return q.coeffs().allFinite() && q.squaredNorm() > 1e-12;
+}
+
+inline bool isFreshAt(const ros::Time &receive_stamp,
+					  const ros::Time &message_stamp,
+					  const ros::Time &now,
+					  const double timeout_sec)
+{
+	if (receive_stamp.isZero() || now.isZero() ||
+		!std::isfinite(timeout_sec) || timeout_sec <= 0.0)
+	{
+		return false;
+	}
+
+	const double receive_age = (now - receive_stamp).toSec();
+	if (!std::isfinite(receive_age) || receive_age < 0.0 ||
+		receive_age > timeout_sec)
+	{
+		return false;
+	}
+
+	// Some MAVROS messages legitimately have a zero header stamp. When a
+	// source stamp exists, check it as well so repeatedly replaying an old
+	// measurement cannot make it fresh merely by invoking the callback.
+	if (!message_stamp.isZero())
+	{
+		const double message_age = (now - message_stamp).toSec();
+		constexpr double kAllowedFutureSkew = 0.05;
+		if (!std::isfinite(message_age) ||
+			message_age < -kAllowedFutureSkew ||
+			message_age > timeout_sec)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+} // namespace se3_safety
 
 struct Odom_Data_t{
 	EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -21,52 +66,77 @@ struct Odom_Data_t{
 	ros::Time rcv_stamp;
 	bool recv_new_msg;
 
-	Odom_Data_t(){
-		recv_new_msg = false;
-	}
+	Odom_Data_t()
+		: p(Eigen::Vector3d::Zero()),
+		  v(Eigen::Vector3d::Zero()),
+		  q(Eigen::Quaterniond::Identity()),
+		  w(Eigen::Vector3d::Zero()),
+		  recv_new_msg(false) {}
 	bool isFresh(double timeout_sec = 0.2) const {
-		if (!recv_new_msg || rcv_stamp.isZero()) {
+		return isFreshAt(ros::Time::now(), timeout_sec);
+	}
+	bool isFreshAt(const ros::Time &now, double timeout_sec = 0.2) const {
+		return recv_new_msg &&
+			se3_safety::isFreshAt(
+				rcv_stamp, msg.header.stamp, now, timeout_sec) &&
+			isValid();
+	}
+	bool isValid() const {
+		return p.allFinite() && v.allFinite() && w.allFinite() &&
+			se3_safety::isQuaternionValid(q);
+	}
+	bool feed(nav_msgs::OdometryConstPtr pMsg, bool enu_frame, bool vel_in_body){
+		if (!pMsg)
+			return false;
+
+		Eigen::Vector3d next_p(
+			pMsg->pose.pose.position.x,
+			pMsg->pose.pose.position.y,
+			pMsg->pose.pose.position.z);
+		Eigen::Vector3d next_v(
+			pMsg->twist.twist.linear.x,
+			pMsg->twist.twist.linear.y,
+			pMsg->twist.twist.linear.z);
+		Eigen::Quaterniond next_q(
+			pMsg->pose.pose.orientation.w,
+			pMsg->pose.pose.orientation.x,
+			pMsg->pose.pose.orientation.y,
+			pMsg->pose.pose.orientation.z);
+		Eigen::Vector3d next_w(
+			pMsg->twist.twist.angular.x,
+			pMsg->twist.twist.angular.y,
+			pMsg->twist.twist.angular.z);
+		if (!next_p.allFinite() || !next_v.allFinite() ||
+			!next_w.allFinite() ||
+			!se3_safety::isQuaternionValid(next_q))
+		{
 			return false;
 		}
-		const double age = (ros::Time::now() - rcv_stamp).toSec();
-		return age >= 0.0 && age <= timeout_sec;
-	}
-	void feed(nav_msgs::OdometryConstPtr pMsg, bool enu_frame, bool vel_in_body){
-		msg = *pMsg;
-		rcv_stamp = ros::Time::now();
-		recv_new_msg = true;
-
-		p(0) = msg.pose.pose.position.x;
-		p(1) = msg.pose.pose.position.y;
-		p(2) = msg.pose.pose.position.z;
-
-		v(0) = msg.twist.twist.linear.x;
-		v(1) = msg.twist.twist.linear.y;
-		v(2) = msg.twist.twist.linear.z;
-
-		q.w() = msg.pose.pose.orientation.w;
-		q.x() = msg.pose.pose.orientation.x;
-		q.y() = msg.pose.pose.orientation.y;
-		q.z() = msg.pose.pose.orientation.z;
-
-		w(0) = msg.twist.twist.angular.x;
-		w(1) = msg.twist.twist.angular.y;
-		w(2) = msg.twist.twist.angular.z;
+		next_q.normalize();
 
 		if(!enu_frame){
 			Eigen::Matrix3d R_mid;
 			R_mid << 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0;
 			Eigen::Quaterniond q_mid(R_mid);
 
-			p = q_mid.toRotationMatrix() * p;
-			v = q_mid.toRotationMatrix() * v;
-			q = q_mid * q * q_mid;
-			q.normalize();
-			w = q_mid.toRotationMatrix() * w;
+			next_p = q_mid.toRotationMatrix() * next_p;
+			next_v = q_mid.toRotationMatrix() * next_v;
+			next_q = q_mid * next_q * q_mid;
+			next_q.normalize();
+			next_w = q_mid.toRotationMatrix() * next_w;
 		}
 
 		if(vel_in_body)
-			v = q.toRotationMatrix() * v;
+			next_v = next_q.toRotationMatrix() * next_v;
+
+		p = next_p;
+		v = next_v;
+		q = next_q;
+		w = next_w;
+		msg = *pMsg;
+		rcv_stamp = ros::Time::now();
+		recv_new_msg = true;
+		return isValid();
 	}
 };
 
@@ -102,6 +172,12 @@ struct Desired_State_t
 		yaw = utils::fromQuaternion2yaw(q);
 		yaw_rate = 0;
 	}
+
+	bool isValid() const {
+		return p.allFinite() && v.allFinite() && a.allFinite() &&
+			j.allFinite() && se3_safety::isQuaternionValid(q) &&
+			std::isfinite(yaw) && std::isfinite(yaw_rate);
+	}
 };
 
 struct Controller_Output_t
@@ -127,65 +203,99 @@ struct Imu_Data_t{
 	ros::Time rcv_stamp;
 	bool recv_new_msg;
 
-	Imu_Data_t(){
-		recv_new_msg = false;
+	Imu_Data_t()
+		: q(Eigen::Quaterniond::Identity()),
+		  w(Eigen::Vector3d::Zero()),
+		  a(Eigen::Vector3d::Zero()),
+		  recv_new_msg(false) {}
+	bool isFresh(double timeout_sec = 0.2) const {
+		return isFreshAt(ros::Time::now(), timeout_sec);
 	}
-	void feed(sensor_msgs::ImuConstPtr pMsg, bool enu_frame){
-		msg = *pMsg;
-		rcv_stamp = ros::Time::now();
-		recv_new_msg = true;
+	bool isFreshAt(const ros::Time &now, double timeout_sec = 0.2) const {
+		return recv_new_msg &&
+			se3_safety::isFreshAt(
+				rcv_stamp, msg.header.stamp, now, timeout_sec) &&
+			isValid();
+	}
+	bool isValid() const {
+		return a.allFinite() && w.allFinite() &&
+			se3_safety::isQuaternionValid(q);
+	}
+	bool feed(sensor_msgs::ImuConstPtr pMsg, bool enu_frame){
+		if (!pMsg)
+			return false;
 
-		a(0) = msg.linear_acceleration.x;
-		a(1) = msg.linear_acceleration.y;
-		a(2) = msg.linear_acceleration.z;
-
-		q.x() = msg.orientation.x;
-		q.y() = msg.orientation.y;
-		q.z() = msg.orientation.z;
-		q.w() = msg.orientation.w;
-
-		w(0) = msg.angular_velocity.x;
-		w(1) = msg.angular_velocity.y;
-		w(2) = msg.angular_velocity.z;
+		Eigen::Vector3d next_a(
+			pMsg->linear_acceleration.x,
+			pMsg->linear_acceleration.y,
+			pMsg->linear_acceleration.z);
+		Eigen::Quaterniond next_q(
+			pMsg->orientation.w,
+			pMsg->orientation.x,
+			pMsg->orientation.y,
+			pMsg->orientation.z);
+		Eigen::Vector3d next_w(
+			pMsg->angular_velocity.x,
+			pMsg->angular_velocity.y,
+			pMsg->angular_velocity.z);
+		if (!next_a.allFinite() || !next_w.allFinite() ||
+			!se3_safety::isQuaternionValid(next_q))
+		{
+			return false;
+		}
+		next_q.normalize();
 
 		if(!enu_frame){
 			Eigen::Matrix3d R_mid;
 			R_mid << 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0;
 			Eigen::Quaterniond q_mid(R_mid);
 
-			a = q_mid.toRotationMatrix() * a;
-			q = q_mid * q * q_mid;
-			q.normalize();
-			w = q_mid.toRotationMatrix() * w;
+			next_a = q_mid.toRotationMatrix() * next_a;
+			next_q = q_mid * next_q * q_mid;
+			next_q.normalize();
+			next_w = q_mid.toRotationMatrix() * next_w;
 		}
 
-		// check the frequency
-		// static int one_min_count = 9999;
-		// static ros::Time last_clear_count_time = ros::Time(0.0);
-		// if ( (now - last_clear_count_time).toSec() > 1.0 ){
-		// 	if ( one_min_count < 100 )
-		// 		ROS_WARN("IMU frequency seems lower than 100Hz, which is too low!");
-		// 	one_min_count = 0;
-		// 	last_clear_count_time = now;
-		// }
-		// one_min_count ++;
+		a = next_a;
+		q = next_q;
+		w = next_w;
+		msg = *pMsg;
+		rcv_stamp = ros::Time::now();
+		recv_new_msg = true;
+		return isValid();
 	}
 };
 
 class SE3_CONTROLLER
 {
 private:
-	Eigen::Vector3d Kp_p_, Kp_v_, Kp_a_, Kp_q_, Kp_w_, Kd_p_, Kd_v_, Kd_a_, Kd_q_, Kd_w_;
-	double limit_err_p_, limit_err_v_, limit_err_a_, limit_d_err_p_, limit_d_err_v_, limit_d_err_a_;
-	bool have_last_err_, enu_frame_, vel_in_body_;
+	Eigen::Vector3d Kp_p_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d Kp_v_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d Kp_a_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d Kp_q_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d Kp_w_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d Kd_p_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d Kd_v_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d Kd_a_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d Kd_q_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d Kd_w_{Eigen::Vector3d::Zero()};
+	double limit_err_p_{1.0}, limit_err_v_{1.0}, limit_err_a_{1.0};
+	double limit_d_err_p_{1.0}, limit_d_err_v_{1.0}, limit_d_err_a_{1.0};
+	bool have_last_err_{false}, enu_frame_{true}, vel_in_body_{true};
 
-	double hover_percent_, max_hover_percent_, min_output_thrust_, max_output_thrust_;
-	double T_a_; // normalization constant
+	double hover_percent_{0.45}, max_hover_percent_{0.75};
+	double min_output_thrust_{0.20}, max_output_thrust_{0.85};
+	double T_a_{9.81 / 0.45}; // normalization constant
 	double P_ = 1e6;
 	const double rho_ = 0.998; // confidence
 	const double gravity_ = 9.81;
 	static constexpr double kAlmostZeroValueThreshold_ = 0.001;
-	Eigen::Vector3d grav_vec_, last_err_p_, last_err_v_, last_err_a_, last_err_q_, last_err_w_;
+	Eigen::Vector3d grav_vec_{Eigen::Vector3d(0.0, 0.0, 9.81)};
+	Eigen::Vector3d last_err_p_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d last_err_v_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d last_err_a_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d last_err_q_{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d last_err_w_{Eigen::Vector3d::Zero()};
 	std::queue<std::pair<ros::Time, double>> timed_thrust_;
 
 	// 竖直(z)位置积分项：补偿随机重/电压变化的悬停推力，消除稳态高度误差
@@ -193,43 +303,22 @@ private:
 	Eigen::Vector3d int_err_p_ = Eigen::Vector3d::Zero(); // 位置误差积分累加器 [m·s]
 	double int_limit_ = 0.0;                              // 抗饱和逐轴钳位 [m·s]
 	bool out_saturated_ = false;                          // 上一拍推力是否饱和
-	static constexpr double kCtrlDt_ = 0.01;              // 100Hz 固定步长 [s]
+	static constexpr double kCtrlDt_ = 0.01;              // 100Hz 默认步长 [s]
 
-	void computeFlatInput(Desired_State_t desired_state, Odom_Data_t &desired_odom){
-		
-		desired_odom.p = desired_state.p;
-		desired_odom.v = desired_state.v;
+	bool computeFlatInput_Hopf_Fibration(Desired_State_t desired_state, Odom_Data_t &desired_odom){
+		const double acceleration_norm = desired_state.a.norm();
+		if (!desired_state.isValid() || !std::isfinite(acceleration_norm) ||
+			acceleration_norm <= kAlmostZeroValueThreshold_)
+		{
+			return false;
+		}
 
-		// TODO check
-		Eigen::Vector3d xc(cos(desired_state.yaw), sin(desired_state.yaw), 0);
-		Eigen::Vector3d yc(-sin(desired_state.yaw), cos(desired_state.yaw), 0);
-
-		Eigen::Vector3d zb = desired_state.a.normalized();
-		Eigen::Vector3d xb = yc.cross(zb);
-		xb.normalize();
-		Eigen::Vector3d yb = zb.cross(xb);
-		yb.normalize();
-		
-		// Eigen::Vector3d xb = yc.cross(desired_state.a);
-		// xb.normalize();
-		// Eigen::Vector3d yb = desired_state.a.cross(xb);
-		// yb.normalize();
-		// Eigen::Vector3d zb = xb.cross(yb);
-		Eigen::Matrix3d rotM;
-		rotM << xb, yb, zb;
-		desired_odom.q = Eigen::Quaterniond(rotM);
-
-		double a_zb = zb.dot(desired_state.a);
-		desired_odom.w(0) = -yb.dot(desired_state.j) / a_zb;
-		desired_odom.w(1) = xb.dot(desired_state.j) / a_zb;
-		desired_odom.w(2) = desired_state.yaw_rate * xc.dot(xb) + yc.dot(zb) * desired_odom.w(1);
-		desired_odom.w(2) /= (yc.cross(zb)).norm();
-	}
-
-	void computeFlatInput_Hopf_Fibration(Desired_State_t desired_state, Odom_Data_t &desired_odom){
-		Eigen::Vector3d abc = desired_state.a.normalized();
+		Eigen::Vector3d abc = desired_state.a / acceleration_norm;
 		double a = abc(0), b = abc(1), c = abc(2);
-		Eigen::Vector3d abc_dot = (desired_state.a.dot(desired_state.a) * Eigen::MatrixXd::Identity(3, 3) - desired_state.a * desired_state.a.transpose()) / desired_state.a.norm() / desired_state.a.squaredNorm() * desired_state.j;
+		c = std::max(-1.0, std::min(1.0, c));
+		Eigen::Vector3d abc_dot =
+			(Eigen::Matrix3d::Identity() - abc * abc.transpose()) *
+			desired_state.j / acceleration_norm;
 		double a_dot = abc_dot(0), b_dot = abc_dot(1), c_dot = abc_dot(2);
 		double yaw = desired_state.yaw;
 		double yaw_dot = desired_state.yaw_rate;
@@ -251,12 +340,17 @@ private:
 			desired_odom.q = q * q_yaw;
 			syaw = sin(yaw);
 			cyaw = cos(yaw);
-			yaw_dot = yaw_dot;// + atan2_dot(a, b, a_dot, b_dot);
-			
 			desired_odom.w(0) = syaw * a_dot + cyaw * b_dot - (a * syaw + b * cyaw) * c_dot / (c - 1);
 			desired_odom.w(1) = cyaw * a_dot - syaw * b_dot - (a * cyaw - b * syaw) * c_dot / (c - 1);
 			desired_odom.w(2) = (b * a_dot - a * b_dot) / (c - 1) + yaw_dot;
 		}
+		if (!se3_safety::isQuaternionValid(desired_odom.q) ||
+			!desired_odom.w.allFinite())
+		{
+			return false;
+		}
+		desired_odom.q.normalize();
+		return true;
 	}
 
 	void limitErr(Eigen::Vector3d &err, double low, double upper){
@@ -283,16 +377,37 @@ public:
 
 	// 设置/清零竖直积分项（由 se3_ctrl 在构造与 dynamic_reconfigure 回调中调用）
 	void setIntegral(const Eigen::Vector3d &ki, double int_limit){
-		Ki_p_ = ki;
-		int_limit_ = int_limit;
+		Ki_p_ = ki.allFinite() ? ki : Eigen::Vector3d::Zero();
+		int_limit_ =
+			std::isfinite(int_limit) && int_limit >= 0.0 ? int_limit : 0.0;
 	}
 	void resetIntegral(){
 		int_err_p_.setZero();
 		out_saturated_ = false;
+		have_last_err_ = false;
+		last_err_p_.setZero();
+		last_err_v_.setZero();
+		last_err_a_.setZero();
+		last_err_q_.setZero();
+		last_err_w_.setZero();
 	}
 
 	void init(double hover_percent, double max_hover_percent, double min_output_thrust, double max_output_thrust, bool enu_frame, bool vel_in_body){
-		
+		if (!std::isfinite(hover_percent) || hover_percent <= 0.0 ||
+			hover_percent > 1.0)
+			hover_percent = 0.45;
+		if (!std::isfinite(max_hover_percent) ||
+			max_hover_percent < hover_percent || max_hover_percent > 1.0)
+			max_hover_percent = std::max(hover_percent, 0.75);
+		if (!std::isfinite(min_output_thrust) ||
+			min_output_thrust < 0.0 || min_output_thrust >= 1.0)
+			min_output_thrust = 0.20;
+		if (!std::isfinite(max_output_thrust) ||
+			max_output_thrust <= min_output_thrust ||
+			max_output_thrust > 1.0)
+			max_output_thrust =
+				std::max(0.85, 0.5 * (1.0 + min_output_thrust));
+
 		hover_percent_ = hover_percent;
 		max_hover_percent_ = max_hover_percent;
 		min_output_thrust_ = min_output_thrust;
@@ -311,12 +426,28 @@ public:
 		have_last_err_ = false;
 		int_err_p_.setZero();
 		out_saturated_ = false;
+		P_ = 1e6;
+		while (!timed_thrust_.empty())
+			timed_thrust_.pop();
 	}
 
-	void setup(Eigen::Vector3d kp_p, Eigen::Vector3d kp_v, Eigen::Vector3d kp_a, Eigen::Vector3d kp_q, Eigen::Vector3d kp_w, 
+	bool setup(Eigen::Vector3d kp_p, Eigen::Vector3d kp_v, Eigen::Vector3d kp_a, Eigen::Vector3d kp_q, Eigen::Vector3d kp_w,
 				Eigen::Vector3d kd_p, Eigen::Vector3d kd_v, Eigen::Vector3d kd_a, Eigen::Vector3d kd_q, Eigen::Vector3d kd_w,
 				double limit_err_p, double limit_err_v, double limit_err_a, 
 				double limit_d_err_p, double limit_d_err_v, double limit_d_err_a){
+		if (!kp_p.allFinite() || !kp_v.allFinite() || !kp_a.allFinite() ||
+			!kp_q.allFinite() || !kp_w.allFinite() ||
+			!kd_p.allFinite() || !kd_v.allFinite() || !kd_a.allFinite() ||
+			!kd_q.allFinite() || !kd_w.allFinite() ||
+			!std::isfinite(limit_err_p) || limit_err_p <= 0.0 ||
+			!std::isfinite(limit_err_v) || limit_err_v <= 0.0 ||
+			!std::isfinite(limit_err_a) || limit_err_a <= 0.0 ||
+			!std::isfinite(limit_d_err_p) || limit_d_err_p <= 0.0 ||
+			!std::isfinite(limit_d_err_v) || limit_d_err_v <= 0.0 ||
+			!std::isfinite(limit_d_err_a) || limit_d_err_a <= 0.0)
+		{
+			return false;
+		}
 		Kp_p_ = kp_p;
 		Kp_v_ = kp_v;
 		Kp_a_ = kp_a;
@@ -333,12 +464,21 @@ public:
 		limit_d_err_p_ = limit_d_err_p;
 		limit_d_err_v_ = limit_d_err_v;
 		limit_d_err_a_ = limit_d_err_a;
+		return true;
 	}
 
 	bool calControl(Odom_Data_t odom_data, Imu_Data_t imu_data, Desired_State_t desired_state,
-					Controller_Output_t &output, double odom_timeout_sec = 0.2){
-		if(!odom_data.isFresh(odom_timeout_sec)){
-			// std::cout << "odom not rcv" << std::endl;
+					Controller_Output_t &output,
+					double odom_timeout_sec = 0.2,
+					double imu_timeout_sec = 0.2,
+					double control_dt_sec = kCtrlDt_){
+		if(!odom_data.isFresh(odom_timeout_sec) ||
+		   !imu_data.isFresh(imu_timeout_sec) ||
+		   !desired_state.isValid() ||
+		   !std::isfinite(control_dt_sec) ||
+		   control_dt_sec <= 0.0 || control_dt_sec > 0.2 ||
+		   !std::isfinite(T_a_) ||
+		   T_a_ <= kAlmostZeroValueThreshold_){
 			return false;
 		}
 		// desired_state.yaw = limitYaw(fromQuaternion2yaw(odom_data.q), desired_state.yaw, M_PI_2 / 3);
@@ -346,20 +486,20 @@ public:
 		limitErr(err_p, -limit_err_p_, limit_err_p_);
 		// 竖直积分项累加（抗饱和：上一拍推力饱和则冻结累加，逐轴钳位）
 		if(!out_saturated_){
-			int_err_p_ += err_p * kCtrlDt_;
+			int_err_p_ += err_p * control_dt_sec;
 			for(int i = 0; i < 3; ++i)
 				int_err_p_(i) = std::max(std::min(int_err_p_(i), int_limit_), -int_limit_);
 		}
-		if(have_last_err_ == false)
-			last_err_p_ = err_p;
-		Eigen::Vector3d d_err_p = err_p - last_err_p_;
+		Eigen::Vector3d d_err_p = Eigen::Vector3d::Zero();
+		if (have_last_err_)
+			d_err_p = (err_p - last_err_p_) / control_dt_sec;
 		limitErr(d_err_p, -limit_d_err_p_, limit_d_err_p_);
 		desired_state.v = desired_state.v - Kp_p_.asDiagonal() * err_p - Kd_p_.asDiagonal() * d_err_p;
 		Eigen::Vector3d err_v = odom_data.v - desired_state.v;
 		limitErr(err_v, -limit_err_v_, limit_err_v_);
-		if(have_last_err_ == false)
-			last_err_v_ = err_v;
-		Eigen::Vector3d d_err_v = err_v - last_err_v_;
+		Eigen::Vector3d d_err_v = Eigen::Vector3d::Zero();
+		if (have_last_err_)
+			d_err_v = (err_v - last_err_v_) / control_dt_sec;
 		limitErr(d_err_v, -limit_d_err_v_, limit_d_err_v_);
 		desired_state.a = desired_state.a - Kp_v_.asDiagonal() * err_v - Kd_v_.asDiagonal() * d_err_v + grav_vec_;
 		// 积分配平：err_p(2)<0(低于目标)→ 减去 Ki*负 → a 增大 → 推力上升 → 消除稳态下垂
@@ -371,27 +511,42 @@ public:
 		Eigen::Vector3d a_world = odom_data.q.toRotationMatrix() * imu_data.a;
 		Eigen::Vector3d err_a = a_world - desired_state.a;
 		limitErr(err_a, -limit_err_a_, limit_err_a_);
-		if(have_last_err_ == false)
-			last_err_a_ = err_a;
-		Eigen::Vector3d d_err_a = err_a - last_err_a_;
+		Eigen::Vector3d d_err_a = Eigen::Vector3d::Zero();
+		if (have_last_err_)
+			d_err_a = (err_a - last_err_a_) / control_dt_sec;
 		limitErr(d_err_a, -limit_d_err_a_, limit_d_err_a_);
 		desired_state.j = desired_state.j - Kp_a_.asDiagonal() * err_a - Kd_a_.asDiagonal() * d_err_a;
 
 		last_err_p_ = err_p;
 		last_err_v_ = err_v;
 		last_err_a_ = err_a;
+		have_last_err_ = true;
 		
 		double thr = desired_state.a.transpose() * (odom_data.q * Eigen::Vector3d::UnitZ());
 		double raw_thrust = thr / T_a_;
+		if (!std::isfinite(raw_thrust))
+		{
+			resetIntegral();
+			return false;
+		}
 		out_saturated_ = (raw_thrust > max_output_thrust_) || (raw_thrust < min_output_thrust_);
 		output.thrust = std::max(std::min(raw_thrust, max_output_thrust_), min_output_thrust_);
 		// std::cout << std::endl << "desired_state.a: " << desired_state.a.transpose() << std::endl;
 		// std::cout << "odom_v: " << odom_data.v.transpose() << std::endl;
 		
 		Odom_Data_t desired_odom;
-		// computeFlatInput(desired_state, desired_odom);
-		computeFlatInput_Hopf_Fibration(desired_state, desired_odom);
+		if (!computeFlatInput_Hopf_Fibration(desired_state, desired_odom))
+		{
+			resetIntegral();
+			return false;
+		}
 		output.q = imu_data.q * odom_data.q.inverse() * desired_odom.q; // Align with FCU frame, from odom to imu frame
+		if (!se3_safety::isQuaternionValid(output.q))
+		{
+			resetIntegral();
+			return false;
+		}
+		output.q.normalize();
 		
 		// printf("desired q: (%lf,%lf,%lf,%lf)\n", desired_odom.q.w(), desired_odom.q.x(), desired_odom.q.y(), desired_odom.q.z());
 		// std::cout << "desired q: " << desired_state.a.transpose() << std::endl;
@@ -418,6 +573,14 @@ public:
 			output.q = q_mid * output.q * q_mid;
 			output.bodyrates = q_mid * output.bodyrates;
 		}
+		if (!se3_safety::isQuaternionValid(output.q) ||
+			!output.bodyrates.allFinite() ||
+			!std::isfinite(output.thrust))
+		{
+			resetIntegral();
+			return false;
+		}
+		output.q.normalize();
 	
 		// Eigen::Quaterniond err_q = odom_data.q * (desired_odom.q.inverse());
 		// // limitErr(err_q, -1.0, 1.0);
@@ -457,6 +620,11 @@ public:
 	}
 
 	bool estimateTa(const Eigen::Vector3d &est_a){
+		if (!est_a.allFinite() || !std::isfinite(T_a_) ||
+			T_a_ <= kAlmostZeroValueThreshold_)
+		{
+			return false;
+		}
 		ros::Time t_now = ros::Time::now();
 		while (timed_thrust_.size() >= 1)
 		{
@@ -466,6 +634,11 @@ public:
 			if (time_passed > 0.045){ // 45ms
 				timed_thrust_.pop();
 				continue;
+			}
+			if (time_passed < 0.0){ // ROS clock rewound
+				while (!timed_thrust_.empty())
+					timed_thrust_.pop();
+				return false;
 			}
 			if (time_passed < 0.035){ // 35ms
 				return false;
@@ -480,11 +653,24 @@ public:
 			/***********************************/
 			/* Model: est_a(2) = thr1acc_ * thr */
 			/***********************************/
-			double gamma = 1 / (rho_ + thr * P_ * thr);
+			const double denominator = rho_ + thr * P_ * thr;
+			if (!std::isfinite(thr) || !std::isfinite(P_) ||
+				!std::isfinite(denominator) ||
+				denominator <= kAlmostZeroValueThreshold_)
+			{
+				return false;
+			}
+			double gamma = 1 / denominator;
 			double K = gamma * P_ * thr;
-			T_a_ = T_a_ + K * (est_a(2) - thr * T_a_);
-			P_ = (1 - K * thr) * P_ / rho_;
-			T_a_ = std::max(T_a_, gravity_ / max_hover_percent_);
+			double next_T_a = T_a_ + K * (est_a(2) - thr * T_a_);
+			double next_P = (1 - K * thr) * P_ / rho_;
+			if (!std::isfinite(next_T_a) || !std::isfinite(next_P) ||
+				next_T_a <= kAlmostZeroValueThreshold_ || next_P <= 0.0)
+			{
+				return false;
+			}
+			T_a_ = std::max(next_T_a, gravity_ / max_hover_percent_);
+			P_ = next_P;
 			// printf("%6.3f,%6.3f,%6.3f,%6.3f\n", T_a_, gamma, K, P_);
 			//fflush(stdout);
 

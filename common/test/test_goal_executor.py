@@ -3,7 +3,9 @@
 import importlib.util
 import math
 import os
+import time
 import unittest
+from types import SimpleNamespace
 
 
 SCRIPT_PATH = os.path.join(
@@ -29,6 +31,15 @@ class GoalExecutorTest(unittest.TestCase):
         with self.assertRaises(EXECUTOR.GoalExecutorError):
             EXECUTOR.goal_orientation(float("inf"))
 
+    def test_vertical_bounds_include_obstacle_inflation(self):
+        minimum_z, maximum_z = EXECUTOR.vertical_clearance_bounds(
+            0.1, 3.0, 0.33
+        )
+        self.assertAlmostEqual(minimum_z, 0.43)
+        self.assertAlmostEqual(maximum_z, 2.67)
+        with self.assertRaises(EXECUTOR.GoalExecutorError):
+            EXECUTOR.vertical_clearance_bounds(0.1, 0.5, 0.3)
+
     def test_parser_defaults_require_live_flight_and_both_goal_consumers(self):
         parser = EXECUTOR._build_parser()
         args = parser.parse_args(["1", "2", "1"])
@@ -36,11 +47,28 @@ class GoalExecutorTest(unittest.TestCase):
         self.assertFalse(args.allow_disarmed)
         self.assertEqual(args.attitude_setpoint_samples, 10)
         self.assertEqual(args.goal_subscribers, 2)
+        self.assertEqual(args.state_timeout, 3.0)
 
     def test_localization_fault_latch_is_understood(self):
         reason = EXECUTOR.localization_fault_reason
         self.assertEqual(reason(False), "")
         self.assertEqual(reason("odometry stopped"), "odometry stopped")
+
+    def test_stale_mavros_state_never_authorizes_a_goal(self):
+        executor = EXECUTOR.SharedGoalExecutor.__new__(
+            EXECUTOR.SharedGoalExecutor
+        )
+        executor.rospy = SimpleNamespace(get_param=lambda *_args: "")
+        executor.state = SimpleNamespace(
+            connected=True, armed=True, mode="OFFBOARD"
+        )
+        executor.state_received_at = time.monotonic() - 4.0
+        executor.args = SimpleNamespace(state_timeout=3.0)
+
+        self.assertEqual(
+            executor._readiness_reason(time.monotonic()),
+            "waiting for fresh MAVROS state",
+        )
 
 
 if __name__ == "__main__":

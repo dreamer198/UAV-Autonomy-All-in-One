@@ -63,7 +63,7 @@ struct MappingParameters
   /* raycasting */
   double p_hit_, p_miss_, p_min_, p_max_, p_occ_;                                           // occupancy probability
   double prob_hit_log_, prob_miss_log_, clamp_min_log_, clamp_max_log_, min_occupancy_log_; // logit of occupancy probability
-  double min_ray_length_;                                                                   // range of doing raycasting
+  double min_ray_length_; // ignore endpoints/rays closer than this to the sensor
   double fading_time_;
 
   /* visualization and computation time display */
@@ -145,7 +145,13 @@ public:
   void initMap(ros::NodeHandle &nh);
   inline int getOccupancy(Eigen::Vector3d pos);
   inline int getInflateOccupancy(Eigen::Vector3d pos);
+  inline bool areInSameVoxel(const Eigen::Vector3d &first,
+                             const Eigen::Vector3d &second);
   inline double getResolution();
+  inline double getObstaclesInflation();
+  inline bool virtualWallEnabled();
+  inline double getVirtualCeil();
+  inline double getVirtualGround();
   bool getOdomDepthTimeout() { return md_.flag_depth_odom_timeout_; }
 
   typedef std::shared_ptr<GridMap> Ptr;
@@ -413,6 +419,14 @@ inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos)
   return int(md_.occupancy_buffer_inflate_[globalIdx2InfBufIdx(pos2GlobalIdx(pos))]);
 }
 
+inline bool GridMap::areInSameVoxel(const Eigen::Vector3d &first,
+                                    const Eigen::Vector3d &second)
+{
+  if (!first.allFinite() || !second.allFinite())
+    return false;
+  return (pos2GlobalIdx(first) - pos2GlobalIdx(second)).squaredNorm() == 0;
+}
+
 inline bool GridMap::isInBuf(const Eigen::Vector3d &pos)
 {
   if (pos(0) < md_.ringbuffer_lowbound3d_(0) || pos(1) < md_.ringbuffer_lowbound3d_(1) || pos(2) < md_.ringbuffer_lowbound3d_(2))
@@ -476,5 +490,9 @@ inline Eigen::Vector3i GridMap::pos2GlobalIdx(const Eigen::Vector3d &pos)
 }
 
 inline double GridMap::getResolution() { return mp_.resolution_; }
+inline double GridMap::getObstaclesInflation() { return mp_.obstacles_inflation_; }
+inline bool GridMap::virtualWallEnabled() { return mp_.enable_virtual_wall_; }
+inline double GridMap::getVirtualCeil() { return mp_.virtual_ceil_; }
+inline double GridMap::getVirtualGround() { return mp_.virtual_ground_; }
 
 #endif

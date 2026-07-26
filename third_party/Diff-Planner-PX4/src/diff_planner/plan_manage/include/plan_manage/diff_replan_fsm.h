@@ -21,6 +21,7 @@
 #include <traj_utils/planning_visualization.h>
 #include <traj_utils/PolyTraj.h>
 #include <traj_utils/MINCOTraj.h>
+#include <plan_manage/planning_recovery_utils.h>
 
 using std::vector;
 
@@ -56,12 +57,12 @@ namespace diff_planner
       REFENCE_PATH = 3
     };
     /* Anomaly Detection Parameters */
-    Eigen::Vector3d last_local_target_pos_;
-    double last_target_change_time_;
-    int replan_fail_count_;
-    static constexpr double TARGET_STUCK_THRESH = 0.3;  // Threshold for target movement below which it's considered "stuck"
-    double TARGET_STUCK_TIME;                           // Default time threshold (seconds) for being considered stuck before reinitialization
-    static constexpr int MAX_REPLAN_FAIL_COUNT = 10;    // Threshold for maximum optimization failure count
+    planning_recovery_utils::ReplanFailureWindow replan_failure_window_;
+    planning_recovery_utils::StuckProgressMonitor stuck_progress_monitor_;
+    double replan_retry_interval_;
+    double replan_failure_timeout_;
+    double stuck_progress_threshold_;
+    double stuck_timeout_;
     /* planning utils */
     DiffPlannerManager::Ptr planner_manager_;
     PlanningVisualization::Ptr visualization_;
@@ -74,7 +75,7 @@ namespace diff_planner
     int waypoint_num_, wpt_id_;
     double planning_horizen_;
     double emergency_time_;
-    double goal_yaw_tolerance_, goal_position_tolerance_, max_goal_distance_;
+    double goal_yaw_tolerance_, goal_position_tolerance_;
     bool flag_realworld_experiment_;
     bool enable_fail_safe_;
     bool enable_ground_height_measurement_;

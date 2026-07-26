@@ -17,6 +17,11 @@
     <param name="output_topic" value="$(arg odom_topic)"/>
     <param name="frame_id" value="$(arg world_frame)"/>
     <param name="child_frame_id" value="$(arg base_frame)"/>
+    <param name="expected_input_frame_id" value="map"/>
+    <param name="expected_input_child_frame_id" value="$(arg base_frame)"/>
+    <!-- MAVROS local map and Gazebo world are configured with the same ENU
+         origin. This flag documents that numerical identity explicitly. -->
+    <param name="allow_identity_frame_alias" value="true"/>
     <param name="publish_tf" value="true"/>
   </node>
 
@@ -31,7 +36,7 @@
     <param name="source_frame" value="$(arg lidar_frame)"/>
     <param name="target_frame" value="$(arg world_frame)"/>
     <param name="lookup_timeout" value="0.1"/>
-    <param name="use_latest_on_extrapolation" value="true"/>
+    <param name="use_latest_on_extrapolation" value="false"/>
     <param name="cloud_timeout" value="1.0"/>
     <param name="filter_enable" value="$(arg cloud_filter_enable)"/>
     <param name="voxel_leaf_size" value="$(arg cloud_voxel_leaf_size)"/>

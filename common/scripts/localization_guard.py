@@ -12,6 +12,7 @@ PROTECTED_AUTONOMOUS_MODES = (
     "AUTO.TAKEOFF",
     "OFFBOARD",
 )
+TIMESTAMP_NOT_ADVANCING = "localization odometry timestamp did not advance"
 
 
 def localization_fault_reason(value):
@@ -69,6 +70,45 @@ def odometry_sanity_reason(message, previous_position, max_speed, max_jump):
     return ""
 
 
+def odometry_timestamp_reason(
+    stamp,
+    ros_now,
+    previous_stamp,
+    max_age,
+    future_tolerance,
+):
+    """Validate an odometry timestamp in the active ROS time domain."""
+    values = (stamp, ros_now, max_age, future_tolerance)
+    if not all(math.isfinite(float(value)) for value in values):
+        return "localization odometry contains an invalid timestamp"
+    stamp = float(stamp)
+    ros_now = float(ros_now)
+    if stamp <= 0.0 and ros_now <= 0.0:
+        return TIMESTAMP_NOT_ADVANCING
+    if stamp <= 0.0:
+        return "localization odometry has a zero or negative timestamp"
+    if previous_stamp is not None:
+        if stamp < previous_stamp:
+            return "localization odometry timestamp moved backwards"
+        if stamp == previous_stamp:
+            return TIMESTAMP_NOT_ADVANCING
+    # ROS time is zero until Gazebo publishes /clock. Delay age checks until
+    # that clock is initialized, while the wall-clock watchdog remains active.
+    if ros_now > 0.0:
+        age = ros_now - stamp
+        if age > max_age:
+            return (
+                "localization odometry timestamp is {:.2f} s old "
+                "(limit {:.2f} s)"
+            ).format(age, max_age)
+        if age < -future_tolerance:
+            return (
+                "localization odometry timestamp is {:.2f} s in the future "
+                "(limit {:.2f} s)"
+            ).format(-age, future_tolerance)
+    return ""
+
+
 class LocalizationGuard:
     """A stack-lifetime guard shared unchanged by simulation and real flight."""
 
@@ -80,6 +120,14 @@ class LocalizationGuard:
         self.rospy = rospy
         self.lock = threading.Lock()
         self.odom_timeout = float(rospy.get_param("~odom_timeout", 0.5))
+        self.startup_timeout = float(rospy.get_param("~startup_timeout", 5.0))
+        self.state_timeout = float(rospy.get_param("~state_timeout", 3.0))
+        self.timestamp_max_age = float(
+            rospy.get_param("~timestamp_max_age", self.odom_timeout)
+        )
+        self.timestamp_future_tolerance = float(
+            rospy.get_param("~timestamp_future_tolerance", 0.1)
+        )
         self.max_speed = float(rospy.get_param("~max_speed", 3.0))
         self.max_jump = float(rospy.get_param("~max_jump", 2.0))
         self.odometry_topic = rospy.get_param(
@@ -88,6 +136,10 @@ class LocalizationGuard:
         self.state_topic = rospy.get_param("~state_topic", "/mavros/state")
         for name, value in (
             ("odom_timeout", self.odom_timeout),
+            ("startup_timeout", self.startup_timeout),
+            ("state_timeout", self.state_timeout),
+            ("timestamp_max_age", self.timestamp_max_age),
+            ("timestamp_future_tolerance", self.timestamp_future_tolerance),
             ("max_speed", self.max_speed),
             ("max_jump", self.max_jump),
         ):
@@ -95,7 +147,10 @@ class LocalizationGuard:
                 raise ValueError("~{} must be finite and positive".format(name))
 
         self.state = None
+        self.state_received_at = 0.0
+        self.started_at = time.monotonic()
         self.last_healthy_odom_at = None
+        self.last_healthy_odom_stamp = None
         self.previous_position = None
         self.fault_reason = localization_fault_reason(
             rospy.get_param(LOCALIZATION_FAULT_PARAM, "")
@@ -113,7 +168,14 @@ class LocalizationGuard:
         rospy.Subscriber(
             self.state_topic, State, self._state_callback, queue_size=1
         )
-        rospy.Timer(rospy.Duration.from_sec(0.05), self._timer_callback)
+        self.shutdown_event = threading.Event()
+        rospy.on_shutdown(self.shutdown_event.set)
+        self.watchdog_thread = threading.Thread(
+            target=self._watchdog_loop,
+            name="localization_guard_watchdog",
+            daemon=True,
+        )
+        self.watchdog_thread.start()
 
         if self.fault_reason:
             rospy.logerr(
@@ -124,8 +186,9 @@ class LocalizationGuard:
         else:
             rospy.loginfo(
                 "Localization guard active: odom timeout=%.2f s, "
-                "max speed=%.2f m/s, max jump=%.2f m.",
+                "startup timeout=%.2f s, max speed=%.2f m/s, max jump=%.2f m.",
                 self.odom_timeout,
+                self.startup_timeout,
                 self.max_speed,
                 self.max_jump,
             )
@@ -133,8 +196,37 @@ class LocalizationGuard:
     def _state_callback(self, message):
         with self.lock:
             self.state = message
+            self.state_received_at = time.monotonic()
 
     def _odom_callback(self, message):
+        try:
+            stamp = float(message.header.stamp.to_sec())
+            ros_now = float(self.rospy.Time.now().to_sec())
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            self._latch_fault(
+                "localization odometry timestamp cannot be read: {}".format(exc)
+            )
+            return
+        with self.lock:
+            previous_stamp = self.last_healthy_odom_stamp
+        timestamp_reason = odometry_timestamp_reason(
+            stamp,
+            ros_now,
+            previous_stamp,
+            self.timestamp_max_age,
+            self.timestamp_future_tolerance,
+        )
+        if timestamp_reason == TIMESTAMP_NOT_ADVANCING:
+            self.rospy.logwarn_throttle(
+                1.0,
+                "%s; replayed messages do not refresh the safety watchdog.",
+                timestamp_reason,
+            )
+            return
+        if timestamp_reason:
+            self._latch_fault(timestamp_reason)
+            return
+
         position = (
             message.pose.pose.position.x,
             message.pose.pose.position.y,
@@ -150,6 +242,7 @@ class LocalizationGuard:
             return
         with self.lock:
             self.previous_position = position
+            self.last_healthy_odom_stamp = stamp
             self.last_healthy_odom_at = time.monotonic()
 
     def _latch_fault(self, reason):
@@ -175,11 +268,13 @@ class LocalizationGuard:
     def _request_land_if_needed(self, now):
         with self.lock:
             state = self.state
+            state_received_at = self.state_received_at
             fault_reason = self.fault_reason
             last_request = self.last_land_request_at
         if (
             not fault_reason
             or state is None
+            or now - state_received_at > self.state_timeout
             or not state.connected
             or not state.armed
             or state.mode not in PROTECTED_AUTONOMOUS_MODES
@@ -205,22 +300,36 @@ class LocalizationGuard:
                 1.0, "PX4 rejected localization-guard AUTO.LAND."
             )
 
+    def _watchdog_loop(self):
+        period = min(0.05, self.odom_timeout / 4.0)
+        while not self.shutdown_event.wait(period):
+            try:
+                self._timer_callback(None)
+            except Exception as exc:
+                self.rospy.logerr_throttle(
+                    1.0, "Localization watchdog callback failed: %s", exc
+                )
+
     def _timer_callback(self, _event):
         now = time.monotonic()
         with self.lock:
             last_healthy_odom_at = self.last_healthy_odom_at
             fault_reason = self.fault_reason
-        if (
-            not fault_reason
-            and last_healthy_odom_at is not None
-            and now - last_healthy_odom_at > self.odom_timeout
-        ):
-            self._latch_fault(
-                "localization odometry stream stopped for {:.2f} s "
-                "(limit {:.2f} s)".format(
-                    now - last_healthy_odom_at, self.odom_timeout
+        if not fault_reason:
+            if last_healthy_odom_at is None:
+                elapsed = now - self.started_at
+                if elapsed > self.startup_timeout:
+                    self._latch_fault(
+                        "no valid localization odometry was received within "
+                        "{:.2f} s of guard startup".format(self.startup_timeout)
+                    )
+            elif now - last_healthy_odom_at > self.odom_timeout:
+                self._latch_fault(
+                    "localization odometry stream stopped or stopped advancing "
+                    "for {:.2f} s (limit {:.2f} s)".format(
+                        now - last_healthy_odom_at, self.odom_timeout
+                    )
                 )
-            )
         self._request_land_if_needed(now)
 
 

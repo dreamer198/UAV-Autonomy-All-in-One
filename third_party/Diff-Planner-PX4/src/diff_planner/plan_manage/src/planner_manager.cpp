@@ -351,29 +351,21 @@ namespace diff_planner
     const double previous_target_time = std::fmax(
         global_start_time,
         std::fmin(traj_.global_traj.glb_t_of_lc_tgt, global_end_time));
-    const double target_search_step = planning_horizen / 20.0 / pp_.max_vel_;
-    double candidate_time = global_end_time;
-    bool candidate_is_goal = true;
-
-    for (double sample_time = previous_target_time;
-         sample_time < global_end_time;
-         sample_time += target_search_step)
-    {
-      const Eigen::Vector3d pos_t =
-          traj_.global_traj.traj.getPos(sample_time - global_start_time);
-      const double dist = (pos_t - start_pt).norm();
-
-      if (dist >= planning_horizen)
-      {
-        candidate_time = sample_time;
-        candidate_is_goal = false;
-        break;
-      }
-    }
-
     const auto position_at_time = [&](const double world_time) {
       return traj_.global_traj.traj.getPos(world_time - global_start_time);
     };
+    double candidate_time = global_end_time;
+    bool candidate_is_goal = true;
+    double horizon_crossing_time = global_end_time;
+    if (planning_recovery_utils::findMonotonicHorizonCrossingTime(
+            previous_target_time, global_end_time, planning_horizen, start_pt,
+            position_at_time, horizon_crossing_time))
+    {
+      candidate_time = horizon_crossing_time;
+      candidate_is_goal =
+          std::abs(candidate_time - global_end_time) <= 1e-9;
+    }
+
     Eigen::Vector3d candidate_pos =
         candidate_is_goal ? global_end_pt : position_at_time(candidate_time);
     const Eigen::Vector3d original_candidate_pos = candidate_pos;
@@ -382,40 +374,82 @@ namespace diff_planner
 
     if (grid_map_->getInflateOccupancy(candidate_pos) != 0)
     {
-      const double collision_check_step = map_resolution / pp_.max_vel_;
-      const bool found_free_target =
-          planning_recovery_utils::findFreeTimeByBacktracking(
-              previous_target_time, candidate_time, collision_check_step,
-              [&](const double world_time) {
-                const Eigen::Vector3d pos = position_at_time(world_time);
-                return grid_map_->getInflateOccupancy(pos) != 0;
+      Eigen::Vector3d spatial_fallback;
+      const double spatial_search_radius = planning_horizen / 2.0;
+      const bool found_spatial_fallback =
+          planning_recovery_utils::findNearbyFreePosition(
+              candidate_pos, start_pt, global_end_pt - start_pt,
+              map_resolution, spatial_search_radius, planning_horizen,
+              [&](const Eigen::Vector3d &position) {
+                return grid_map_->getInflateOccupancy(position) != 0;
               },
-              selected_time);
+              [&](const Eigen::Vector3d &position) {
+                return grid_map_->areInSameVoxel(start_pt, position);
+              },
+              spatial_fallback);
 
-      if (!found_free_target)
+      if (found_spatial_fallback)
       {
+        candidate_pos = spatial_fallback;
+        backed_away_from_obstacle = true;
         ROS_WARN_THROTTLE(
             1.0,
-            "Local target is occupied and no free fallback exists on the current global-trajectory segment.");
-        return false;
+            "Local target (%.2f, %.2f, %.2f) is occupied; using nearby free fallback (%.2f, %.2f, %.2f).",
+            original_candidate_pos(0), original_candidate_pos(1), original_candidate_pos(2),
+            candidate_pos(0), candidate_pos(1), candidate_pos(2));
       }
-
-      candidate_pos = position_at_time(selected_time);
-      const double minimum_progress = map_resolution;
-      if ((candidate_pos - start_pt).norm() < minimum_progress)
+      else
       {
+        const double collision_check_step = map_resolution / pp_.max_vel_;
+        constexpr std::size_t max_backtracking_evaluations = 512;
+        const bool found_free_target =
+            planning_recovery_utils::findFreeTimeByBacktracking(
+                previous_target_time, candidate_time, collision_check_step,
+                [&](const double world_time) {
+                  const Eigen::Vector3d pos = position_at_time(world_time);
+                  return grid_map_->getInflateOccupancy(pos) != 0;
+                },
+                selected_time, max_backtracking_evaluations);
+
+        if (!found_free_target)
+        {
+          ROS_WARN_THROTTLE(
+              1.0,
+              "Local target is occupied and no free fallback exists on the current global-trajectory segment.");
+          return false;
+        }
+
+        candidate_pos = position_at_time(selected_time);
+        const double minimum_progress = map_resolution;
+        if ((candidate_pos - start_pt).norm() < minimum_progress)
+        {
+          ROS_WARN_THROTTLE(
+              1.0,
+              "Local target is occupied and the nearest free fallback does not provide forward progress.");
+          return false;
+        }
+        if (!planning_recovery_utils::isStraightLineFree(
+                start_pt, candidate_pos, 0.5 * map_resolution,
+                [&](const Eigen::Vector3d &position) {
+                  return grid_map_->getInflateOccupancy(position) != 0;
+                },
+                [&](const Eigen::Vector3d &position) {
+                  return grid_map_->areInSameVoxel(start_pt, position);
+                }))
+        {
+          ROS_WARN_THROTTLE(
+              1.0,
+              "Local target fallback is free but has no collision-free connection from the current vehicle position.");
+          return false;
+        }
+
+        backed_away_from_obstacle = true;
         ROS_WARN_THROTTLE(
             1.0,
-            "Local target is occupied and the nearest free fallback does not provide forward progress.");
-        return false;
+            "Local target (%.2f, %.2f, %.2f) is occupied; using free fallback (%.2f, %.2f, %.2f).",
+            original_candidate_pos(0), original_candidate_pos(1), original_candidate_pos(2),
+            candidate_pos(0), candidate_pos(1), candidate_pos(2));
       }
-
-      backed_away_from_obstacle = true;
-      ROS_WARN_THROTTLE(
-          1.0,
-          "Local target (%.2f, %.2f, %.2f) is occupied; using free fallback (%.2f, %.2f, %.2f).",
-          original_candidate_pos(0), original_candidate_pos(1), original_candidate_pos(2),
-          candidate_pos(0), candidate_pos(1), candidate_pos(2));
     }
 
     local_target_pos = candidate_pos;
@@ -500,6 +534,22 @@ namespace diff_planner
       const Eigen::Vector3d &start_acc, const std::vector<Eigen::Vector3d> &waypoints,
       const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc)
   {
+    if (waypoints.empty() || !start_pos.allFinite() ||
+        !start_vel.allFinite() || !start_acc.allFinite() ||
+        !end_vel.allFinite() || !end_acc.allFinite() ||
+        !std::isfinite(pp_.max_vel_) || pp_.max_vel_ <= 0.0)
+    {
+      ROS_ERROR("Cannot generate a global trajectory from invalid state, waypoints, or maximum velocity.");
+      return false;
+    }
+    for (const auto &waypoint : waypoints)
+    {
+      if (!waypoint.allFinite())
+      {
+        ROS_ERROR("Cannot generate a global trajectory containing a non-finite waypoint.");
+        return false;
+      }
+    }
 
     poly_traj::MinJerkOpt globalMJO;
     Eigen::Matrix<double, 3, 3> headState, tailState;
@@ -527,19 +577,55 @@ namespace diff_planner
     globalMJO.reset(headState, tailState, waypoints.size());
 
     double des_vel = pp_.max_vel_ / 1.5;
+    if (!std::isfinite(des_vel) || des_vel <= 0.0)
+    {
+      ROS_ERROR("Cannot generate a global trajectory with an invalid desired velocity.");
+      return false;
+    }
     Eigen::VectorXd time_vec(waypoints.size());
 
     for (int j = 0; j < 2; ++j)
     {
       for (size_t i = 0; i < waypoints.size(); ++i)
       {
-        time_vec(i) = (i == 0) ? (waypoints[0] - start_pos).norm() / des_vel
-                               : (waypoints[i] - waypoints[i - 1]).norm() / des_vel;
+        const Eigen::Vector3d segment =
+            (i == 0) ? (waypoints[0] - start_pos)
+                     : (waypoints[i] - waypoints[i - 1]);
+        const double segment_distance = segment.norm();
+        if (!std::isfinite(segment_distance))
+        {
+          ROS_ERROR("Rejecting a waypoint whose distance is outside the numeric range of the planner.");
+          return false;
+        }
+        time_vec(i) = std::max(0.1, segment_distance / des_vel);
+        if (!planning_recovery_utils::isNumericallySafeQuinticDuration(
+                time_vec(i)))
+        {
+          ROS_ERROR("Rejecting a waypoint that would require a numerically unsafe global-trajectory duration.");
+          return false;
+        }
       }
 
       globalMJO.generate(innerPts, time_vec);
+      const auto generated_traj = globalMJO.getTraj();
+      const double generated_duration = generated_traj.getTotalDuration();
+      if (!planning_recovery_utils::isNumericallySafeQuinticDuration(
+              generated_duration) ||
+          !generated_traj.getPos(0.0).allFinite() ||
+          !generated_traj.getPos(0.5 * generated_duration).allFinite() ||
+          !generated_traj.getPos(generated_duration).allFinite())
+      {
+        ROS_ERROR("Generated global trajectory is not numerically valid.");
+        return false;
+      }
 
-      if (globalMJO.getTraj().getMaxVelRate() < pp_.max_vel_ ||
+      const double maximum_velocity = generated_traj.getMaxVelRate();
+      if (!std::isfinite(maximum_velocity))
+      {
+        ROS_ERROR("Generated global trajectory has a non-finite velocity.");
+        return false;
+      }
+      if (maximum_velocity < pp_.max_vel_ ||
           start_vel.norm() > pp_.max_vel_ ||
           end_vel.norm() > pp_.max_vel_)
       {

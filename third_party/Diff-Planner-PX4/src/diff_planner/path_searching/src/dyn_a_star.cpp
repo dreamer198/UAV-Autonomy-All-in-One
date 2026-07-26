@@ -1,4 +1,5 @@
 #include "path_searching/dyn_a_star.h"
+#include "path_searching/endpoint_adjustment_utils.h"
 
 using namespace std;
 using namespace Eigen;
@@ -93,47 +94,50 @@ bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector3d start_pt, Vector3d en
     if (!Coord2Index(start_pt, start_idx) || !Coord2Index(end_pt, end_idx))
         return false;
 
-    int occ;
-    if (checkOccupancy(Index2Coord(start_idx)))
+    const auto occupancy_at_grid_point = [&](const Vector3d &point)
     {
-        // ROS_WARN("Start point is insdide an obstacle.");
-        do
+        Vector3i index;
+        if (!Coord2Index(point, index))
         {
-            start_pt = (start_pt - end_pt).normalized() * step_size_ + start_pt;
-            // cout << "start_pt=" << start_pt.transpose() << endl;
-            if (!Coord2Index(start_pt, start_idx))
-            {
-                return false;
-            }
+            return -1;
+        }
+        return checkOccupancy(Index2Coord(index));
+    };
+    const double endpoint_search_distance =
+        std::max(4.0 * step_size_,
+                 2.0 * grid_map_->getObstaclesInflation() +
+                     2.0 * step_size_);
 
-            occ = checkOccupancy(Index2Coord(start_idx));
-            if (occ == -1)
-            {
-                ROS_WARN("[Astar] Start point outside the map region.");
-                return false;
-            }
-        } while (occ);
+    if (checkOccupancy(Index2Coord(start_idx)) != 0)
+    {
+        Vector3d adjusted_start;
+        if (!path_searching::endpoint_adjustment::moveAwayFromOccupiedSegment(
+                start_pt, end_pt, step_size_, endpoint_search_distance,
+                occupancy_at_grid_point, adjusted_start) ||
+            !Coord2Index(adjusted_start, start_idx))
+        {
+            ROS_WARN("[Astar] Cannot move occupied start (%.2f, %.2f, %.2f) "
+                     "outward from the collision segment within %.2f m.",
+                     start_pt.x(), start_pt.y(), start_pt.z(),
+                     endpoint_search_distance);
+            return false;
+        }
     }
 
-    if (checkOccupancy(Index2Coord(end_idx)))
+    if (checkOccupancy(Index2Coord(end_idx)) != 0)
     {
-        // ROS_WARN("End point is insdide an obstacle.");
-        do
+        Vector3d adjusted_end;
+        if (!path_searching::endpoint_adjustment::moveAwayFromOccupiedSegment(
+                end_pt, start_pt, step_size_, endpoint_search_distance,
+                occupancy_at_grid_point, adjusted_end) ||
+            !Coord2Index(adjusted_end, end_idx))
         {
-            end_pt = (end_pt - start_pt).normalized() * step_size_ + end_pt;
-            // cout << "end_pt=" << end_pt.transpose() << endl;
-            if (!Coord2Index(end_pt, end_idx))
-            {
-                return false;
-            }
-
-            occ = checkOccupancy(Index2Coord(end_idx));
-            if (occ == -1)
-            {
-                ROS_WARN("[Astar] End point outside the map region.");
-                return false;
-            }
-        } while (checkOccupancy(Index2Coord(end_idx)));
+            ROS_WARN("[Astar] Cannot move occupied end (%.2f, %.2f, %.2f) "
+                     "outward from the collision segment within %.2f m.",
+                     end_pt.x(), end_pt.y(), end_pt.z(),
+                     endpoint_search_distance);
+            return false;
+        }
     }
 
     return true;

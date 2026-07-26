@@ -1,5 +1,7 @@
 FROM ros:noetic-ros-base-focal
 
+LABEL org.opencontainers.image.title="UAV Autonomy All-in-One real-flight runtime"
+
 ENV DEBIAN_FRONTEND=noninteractive \
     ROS_DISTRO=noetic \
     ROS_EDITION=ROS1

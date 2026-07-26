@@ -1,5 +1,7 @@
-# Real vehicle calibration and safety limits. Planner parameters are shared
-# from sim2real_common/config/planner.yaml and must not be duplicated here.
+# Real-vehicle-specific SE3 control and safety parameters. This file includes
+# a measured hover-thrust calibration, but it does not define mass, inertia,
+# motor models, sensor calibration, or PX4 inner-loop gains. Planner parameters
+# are shared from sim2real_common/config/planner.yaml and must not be duplicated.
 enable_sim: false
 hover_percent: 0.50
 max_hover_percent: 0.95

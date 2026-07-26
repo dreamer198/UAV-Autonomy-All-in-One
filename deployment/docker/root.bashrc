@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC1090
 # ROS Noetic
 [ -f /opt/ros/noetic/setup.bash ] && source /opt/ros/noetic/setup.bash
 
@@ -9,5 +11,7 @@
 
 # Real-flight defaults
 export FCU_URL="${FCU_URL:-/dev/ttyACM0:921600}"
-export DRONE_ID="${DRONE_ID:-0}"
-export GCS_URL="${GCS_URL:-udp://:14555@10.0.30.196:14550}"
+export DRONE_ID=0
+# Network topology is site-specific; pass GCS_URL explicitly when telemetry
+# forwarding is required instead of inheriting an obsolete workstation IP.
+export GCS_URL="${GCS_URL:-}"

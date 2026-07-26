@@ -40,3 +40,11 @@ add_library( path_searching
 target_link_libraries( path_searching
     ${catkin_LIBRARIES} 
     )  
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(endpoint_adjustment_utils_test
+    test/test_endpoint_adjustment_utils.cpp)
+  if(TARGET endpoint_adjustment_utils_test)
+    target_link_libraries(endpoint_adjustment_utils_test ${catkin_LIBRARIES})
+  endif()
+endif()

@@ -59,9 +59,9 @@ DEFAULTS = {
     "yaw_tolerance_deg": 5.0,
     "velocity_tolerance": 0.15,
     "hold_time": 1.0,
-    # A 200 m goal can legitimately take many minutes at the current 0.5 m/s
-    # speed limit, so timeout is deliberately independent of the short-range
-    # local planning horizon.
+    # Keep mission timing independent of the short-range local planning
+    # horizon: obstacle avoidance and settling can make even a valid leg take
+    # much longer than its straight-line distance suggests.
     "waypoint_timeout": 1200.0,
     "planner_accept_timeout": 15.0,
     # A collision check can publish a short emergency-stop trajectory and
@@ -172,7 +172,12 @@ def fill_unresolved_waypoint_yaws(waypoints, current_yaw_degrees):
 
 
 def load_mission_config(
-    path, *, default_takeoff_height=None, virtual_ground=None, virtual_ceil=None
+    path,
+    *,
+    default_takeoff_height=None,
+    virtual_ground=None,
+    virtual_ceil=None,
+    obstacles_inflation=None
 ):
     if not os.path.isfile(path):
         raise MissionConfigError("mission file does not exist: {}".format(path))
@@ -204,6 +209,43 @@ def load_mission_config(
     config["takeoff_height"] = _finite_number(
         takeoff_height, "takeoff_height", positive=True
     )
+    safe_ground = (
+        _finite_number(virtual_ground, "virtual_ground")
+        if virtual_ground is not None
+        else None
+    )
+    safe_ceil = (
+        _finite_number(virtual_ceil, "virtual_ceil")
+        if virtual_ceil is not None
+        else None
+    )
+    if obstacles_inflation is not None:
+        obstacles_inflation = _finite_number(
+            obstacles_inflation, "obstacles_inflation", nonnegative=True
+        )
+        if safe_ground is not None:
+            safe_ground += obstacles_inflation
+        if safe_ceil is not None:
+            safe_ceil -= obstacles_inflation
+    if (
+        safe_ground is not None
+        and safe_ceil is not None
+        and safe_ground >= safe_ceil
+    ):
+        raise MissionConfigError(
+            "Planner vertical fence has no usable clearance after obstacle "
+            "inflation"
+        )
+    if safe_ground is not None and config["takeoff_height"] <= safe_ground:
+        raise MissionConfigError(
+            "takeoff_height={} must be above the Planner ground clearance "
+            "limit {}".format(config["takeoff_height"], safe_ground)
+        )
+    if safe_ceil is not None and config["takeoff_height"] >= safe_ceil:
+        raise MissionConfigError(
+            "takeoff_height={} must be below the Planner ceiling clearance "
+            "limit {}".format(config["takeoff_height"], safe_ceil)
+        )
     config["takeoff_settle_time"] = _finite_number(
         config["takeoff_settle_time"], "takeoff_settle_time", nonnegative=True
     )
@@ -306,16 +348,18 @@ def load_mission_config(
                 waypoint["yaw"], "{}.yaw".format(prefix)
             )
 
-        if virtual_ground is not None and normalized["z"] <= virtual_ground:
+        if safe_ground is not None and normalized["z"] <= safe_ground:
             raise MissionConfigError(
-                "{}.z={} must be above Planner virtual_ground={}".format(
-                    prefix, normalized["z"], virtual_ground
+                "{}.z={} must be above the Planner ground clearance limit "
+                "{}".format(
+                    prefix, normalized["z"], safe_ground
                 )
             )
-        if virtual_ceil is not None and normalized["z"] >= virtual_ceil:
+        if safe_ceil is not None and normalized["z"] >= safe_ceil:
             raise MissionConfigError(
-                "{}.z={} must be below Planner virtual_ceil={}".format(
-                    prefix, normalized["z"], virtual_ceil
+                "{}.z={} must be below the Planner ceiling clearance limit "
+                "{}".format(
+                    prefix, normalized["z"], safe_ceil
                 )
             )
         normalized_waypoints.append(normalized)
@@ -374,7 +418,13 @@ def localization_fault_reason(value):
 
 
 class WaypointMission:
-    def __init__(self, config, drone_id):
+    def __init__(
+        self,
+        config,
+        drone_id,
+        odometry_topic="/localization/odom",
+        state_topic="/mavros/state",
+    ):
         # ROS imports stay inside runtime construction so configuration
         # validation also works on a host that does not source ROS.
         import rospy
@@ -389,6 +439,8 @@ class WaypointMission:
         self.SetMode = SetMode
         self.config = config
         self.drone_id = drone_id
+        self.state_topic = state_topic
+        self.odometry_topic = odometry_topic
         self.lock = threading.Lock()
 
         self.state = None
@@ -409,10 +461,10 @@ class WaypointMission:
             "/goal", PoseStamped, queue_size=1, latch=False
         )
         rospy.Subscriber(
-            "/mavros/state", State, self._state_callback, queue_size=1
+            self.state_topic, State, self._state_callback, queue_size=1
         )
         rospy.Subscriber(
-            "/localization/odom",
+            self.odometry_topic,
             Odometry,
             self._odom_callback,
             queue_size=1,
@@ -464,7 +516,12 @@ class WaypointMission:
                     self.current_goal_position = goal
                 self.current_plan_accepted = True
                 self.current_planner_stopped_at = None
-            elif self.current_plan_accepted:
+            elif message.traj_id > 0:
+                # An initial plan can fail and publish an emergency-stop
+                # trajectory before any armable trajectory is accepted.  That
+                # is still a planner stop for this stamped goal and must enter
+                # the bounded retry path instead of waiting out the full
+                # acceptance timeout.
                 if self.current_planner_stopped_at is None:
                     self.current_planner_stopped_at = time.monotonic()
         if fallback_update is not None:
@@ -554,6 +611,10 @@ class WaypointMission:
         with self.lock:
             self.abort_requested = True
 
+    def _wall_wait(self, duration=0.05):
+        """Wait using wall time so a paused Gazebo /clock cannot deadlock."""
+        time.sleep(duration)
+
     def _latch_localization_fault(self):
         with self.lock:
             if self.localization_fault_latched:
@@ -578,6 +639,19 @@ class WaypointMission:
             abort_requested = self.abort_requested
         if abort_requested:
             return EXIT_MISSION_FAILED, "mission runner was interrupted"
+        try:
+            fault_reason = localization_fault_reason(
+                self.rospy.get_param(LOCALIZATION_FAULT_PARAM, "")
+            )
+        except Exception as exc:
+            return (
+                EXIT_MISSION_FAILED,
+                "cannot read localization safety interlock: {}".format(exc),
+            )
+        if fault_reason:
+            with self.lock:
+                self.localization_fault_latched = True
+            return EXIT_MISSION_FAILED, LOCALIZATION_STALE_REASON
         state, state_time, odom, odom_time, _, _, _ = self._snapshot()
         now = time.monotonic()
         if state is None or now - state_time > self.config["state_timeout"]:
@@ -597,10 +671,16 @@ class WaypointMission:
         return EXIT_SUCCESS, ""
 
     def _request_recovery(self, reason):
-        state, _, _, _, _, _, _ = self._snapshot()
+        state, state_time, _, _, _, _, _ = self._snapshot()
         if state is None or not state.connected or not state.armed:
             return
-        if state.mode != "OFFBOARD":
+        if time.monotonic() - state_time > self.config["state_timeout"]:
+            self.rospy.logerr(
+                "Cannot confirm a recovery mode because MAVROS state is stale; "
+                "take over immediately with the RC."
+            )
+            return
+        if state.mode not in ("OFFBOARD", "AUTO.TAKEOFF", "AUTO.LOITER"):
             self.rospy.logwarn(
                 "Mission stopped after mode changed to %s; not overriding the pilot.",
                 state.mode,
@@ -621,17 +701,18 @@ class WaypointMission:
             )
 
         deadline = time.monotonic() + self.config["state_timeout"]
-        rate = self.rospy.Rate(20)
         while not self.rospy.is_shutdown() and time.monotonic() < deadline:
-            state, _, _, _, _, _, _ = self._snapshot()
+            state, state_time, _, _, _, _, _ = self._snapshot()
             if state is None or not state.connected or not state.armed:
                 return
+            if time.monotonic() - state_time > self.config["state_timeout"]:
+                break
             if state.mode == recovery_mode:
                 self.rospy.logwarn(
                     "PX4 %s is active after mission failure.", recovery_mode
                 )
                 return
-            if state.mode != "OFFBOARD":
+            if state.mode not in ("OFFBOARD", "AUTO.TAKEOFF", "AUTO.LOITER"):
                 self.rospy.logwarn(
                     "Mission recovery stopped after mode changed to %s; not "
                     "overriding the pilot.",
@@ -653,9 +734,9 @@ class WaypointMission:
                     recovery_mode,
                     exc,
                 )
-            rate.sleep()
+            self._wall_wait()
         self.rospy.logerr(
-            "PX4 did not leave OFFBOARD for %s within %.1f s; take over "
+            "PX4 did not enter %s within %.1f s; take over "
             "immediately with the RC.",
             recovery_mode,
             self.config["state_timeout"],
@@ -663,7 +744,6 @@ class WaypointMission:
 
     def _wait_for_initial_state(self):
         deadline = time.monotonic() + self.config["planner_accept_timeout"]
-        rate = self.rospy.Rate(20)
         while not self.rospy.is_shutdown() and time.monotonic() < deadline:
             code, reason = self._flight_gate()
             # Both Diff-Planner and trajectory_msg_converter must see the same
@@ -673,7 +753,15 @@ class WaypointMission:
                 return EXIT_SUCCESS, ""
             if code == EXIT_MANUAL_TAKEOVER:
                 return code, reason
-            rate.sleep()
+            if (
+                code == EXIT_MISSION_FAILED
+                and reason == LOCALIZATION_STALE_REASON
+            ):
+                # The localization interlock is irreversible for this stack
+                # lifetime. Preserve that reason so recovery requests
+                # AUTO.LAND instead of misclassifying it as a topic timeout.
+                return code, reason
+            self._wall_wait()
         return EXIT_MISSION_FAILED, "mission topics or fresh flight state are not ready"
 
     def _resolve_runtime_yaws(self):
@@ -753,7 +841,6 @@ class WaypointMission:
 
     def _wait_for_plan(self):
         deadline = time.monotonic() + self.config["planner_accept_timeout"]
-        rate = self.rospy.Rate(20)
         while not self.rospy.is_shutdown() and time.monotonic() < deadline:
             code, reason = self._flight_gate()
             if code != EXIT_SUCCESS:
@@ -766,14 +853,14 @@ class WaypointMission:
                 deadline = (
                     time.monotonic() + self.config["planner_accept_timeout"]
                 )
-                rate.sleep()
+                self._wall_wait()
                 continue
             if stopped_at is not None:
-                rate.sleep()
+                self._wall_wait()
                 continue
             if accepted:
                 return EXIT_SUCCESS, ""
-            rate.sleep()
+            self._wall_wait()
         return EXIT_MISSION_FAILED, "Planner did not accept the waypoint in time"
 
     def _wait_for_arrival(self, waypoint, *, fly_through=False):
@@ -781,8 +868,6 @@ class WaypointMission:
         stable_since = None
         last_log = 0.0
         planner_accept_deadline = None
-        rate = self.rospy.Rate(20)
-
         while not self.rospy.is_shutdown() and time.monotonic() < deadline:
             code, reason = self._flight_gate()
             if code != EXIT_SUCCESS:
@@ -796,11 +881,11 @@ class WaypointMission:
                 planner_accept_deadline = (
                     time.monotonic() + self.config["planner_accept_timeout"]
                 )
-                rate.sleep()
+                self._wall_wait()
                 continue
             if stopped_at is not None:
                 stable_since = None
-                rate.sleep()
+                self._wall_wait()
                 continue
             if not accepted:
                 stable_since = None
@@ -812,7 +897,7 @@ class WaypointMission:
                         EXIT_MISSION_FAILED,
                         "Planner did not accept the retried waypoint in time",
                     )
-                rate.sleep()
+                self._wall_wait()
                 continue
             planner_accept_deadline = None
 
@@ -902,7 +987,7 @@ class WaypointMission:
                         yaw_error_deg,
                     )
                 last_log = now
-            rate.sleep()
+            self._wall_wait()
 
         return EXIT_MISSION_FAILED, "waypoint arrival timed out"
 
@@ -919,31 +1004,8 @@ class WaypointMission:
             return EXIT_MISSION_FAILED
 
         count = len(self.config["waypoints"])
-        max_goal_distance = float(
-            self.rospy.get_param(
-                "/drone_{}_diff_planner_node/fsm/max_goal_distance".format(
-                    self.drone_id
-                ),
-                200.0,
-            )
-        )
         for index, waypoint in enumerate(self.config["waypoints"], start=1):
             fly_through = waypoint_is_fly_through(waypoint, index, count)
-            _, _, odom, _, _, _, _ = self._snapshot()
-            position = odom.pose.pose.position
-            goal_distance = math.sqrt(
-                (waypoint["x"] - position.x) ** 2
-                + (waypoint["y"] - position.y) ** 2
-                + (waypoint["z"] - position.z) ** 2
-            )
-            if goal_distance > max_goal_distance:
-                reason = (
-                    "waypoint {} is {:.1f} m from the vehicle, exceeding "
-                    "Planner max_goal_distance={:.1f} m"
-                ).format(index, goal_distance, max_goal_distance)
-                self._request_recovery(reason)
-                return EXIT_MISSION_FAILED
-
             self._publish_waypoint(waypoint, index, count)
             code, reason = self._wait_for_plan()
             if code != EXIT_SUCCESS:
@@ -1005,6 +1067,8 @@ def _build_parser():
     )
     parser.add_argument("mission_file")
     parser.add_argument("--drone-id", type=int, default=0)
+    parser.add_argument("--state-topic", default="/mavros/state")
+    parser.add_argument("--odometry-topic", default="/localization/odom")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--shell-summary", action="store_true")
     parser.add_argument("--default-takeoff-height", type=float)
@@ -1063,7 +1127,12 @@ def main(argv=None):
         import rospy
 
         rospy.init_node("waypoint_mission", disable_signals=True)
-        runner = WaypointMission(config, args.drone_id)
+        runner = WaypointMission(
+            config,
+            args.drone_id,
+            state_topic=args.state_topic,
+            odometry_topic=args.odometry_topic,
+        )
         previous_sigint = signal.getsignal(signal.SIGINT)
         previous_sigterm = signal.getsignal(signal.SIGTERM)
 
@@ -1073,7 +1142,14 @@ def main(argv=None):
         signal.signal(signal.SIGINT, request_abort)
         signal.signal(signal.SIGTERM, request_abort)
         try:
-            result = runner.run()
+            try:
+                result = runner.run()
+            except Exception as exc:
+                rospy.logerr("Waypoint mission crashed: %s", exc)
+                runner._request_recovery(
+                    "unexpected waypoint mission error: {}".format(exc)
+                )
+                result = EXIT_MISSION_FAILED
         finally:
             signal.signal(signal.SIGINT, previous_sigint)
             signal.signal(signal.SIGTERM, previous_sigterm)

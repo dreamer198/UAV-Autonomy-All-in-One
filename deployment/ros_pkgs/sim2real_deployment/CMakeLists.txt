@@ -8,6 +8,7 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
   sensor_msgs
   tf2_ros
+  tf2_sensor_msgs
 )
 
 catkin_package()
@@ -23,3 +24,7 @@ catkin_install_python(PROGRAMS
   scripts/odom_to_pose.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test/test_odom_to_pose.py)
+endif()

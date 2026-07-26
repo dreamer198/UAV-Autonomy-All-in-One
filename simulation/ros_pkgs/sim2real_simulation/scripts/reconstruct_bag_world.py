@@ -30,17 +30,34 @@ FACE_DEFINITIONS = (
     ((0, 0, -1), ((0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0))),
     ((0, 0, 1), ((0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1))),
 )
+POINT_FIELD_DTYPES = {
+    1: "i1",  # INT8
+    2: "u1",  # UINT8
+    3: "i2",  # INT16
+    4: "u2",  # UINT16
+    5: "i4",  # INT32
+    6: "u4",  # UINT32
+    7: "f4",  # FLOAT32
+    8: "f8",  # FLOAT64
+}
+
+
+def finite_float(value):
+    value = float(value)
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError("must be finite")
+    return value
 
 
 def positive_float(value):
-    value = float(value)
+    value = finite_float(value)
     if value <= 0.0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return value
 
 
 def nonnegative_float(value):
-    value = float(value)
+    value = finite_float(value)
     if value < 0.0:
         raise argparse.ArgumentTypeError("must be non-negative")
     return value
@@ -54,7 +71,7 @@ def positive_int(value):
 
 
 def unit_interval(value):
-    value = float(value)
+    value = finite_float(value)
     if not 0.0 <= value <= 1.0:
         raise argparse.ArgumentTypeError("must be between zero and one")
     return value
@@ -84,12 +101,12 @@ def parse_args():
     )
     parser.add_argument(
         "--obstacle-min-z",
-        type=float,
+        type=finite_float,
         default=0.18,
         help="Points at or below this height are represented by the ground plane.",
     )
-    parser.add_argument("--obstacle-max-z", type=float, default=3.2)
-    parser.add_argument("--ground-z", type=float, default=0.0)
+    parser.add_argument("--obstacle-max-z", type=finite_float, default=3.2)
+    parser.add_argument("--ground-z", type=finite_float, default=0.0)
     parser.add_argument(
         "--geometry-mode",
         choices=("forest", "voxels"),
@@ -110,10 +127,10 @@ def parse_args():
     parser.add_argument("--tree-crown-radius", type=positive_float, default=0.78)
     parser.add_argument("--tree-min-height", type=positive_float, default=2.50)
     parser.add_argument("--tree-max-height", type=positive_float, default=4.20)
-    parser.add_argument("--forest-min-x", type=float)
-    parser.add_argument("--forest-max-x", type=float)
-    parser.add_argument("--forest-min-y", type=float)
-    parser.add_argument("--forest-max-y", type=float)
+    parser.add_argument("--forest-min-x", type=finite_float)
+    parser.add_argument("--forest-max-x", type=finite_float)
+    parser.add_argument("--forest-min-y", type=finite_float)
+    parser.add_argument("--forest-max-y", type=finite_float)
     parser.add_argument(
         "--forest-fill-spacing",
         type=positive_float,
@@ -136,7 +153,7 @@ def parse_args():
     parser.add_argument(
         "--wind-direction",
         nargs=3,
-        type=float,
+        type=finite_float,
         metavar=("X", "Y", "Z"),
         default=(1.0, 0.0, 0.0),
     )
@@ -147,14 +164,51 @@ def point_field_array(msg, name):
     field = next((item for item in msg.fields if item.name == name), None)
     if field is None:
         raise ValueError("PointCloud2 is missing required field: {}".format(name))
+    datatype = POINT_FIELD_DTYPES.get(int(field.datatype))
+    if datatype is None:
+        raise ValueError(
+            "PointCloud2 field '{}' has unsupported datatype {}".format(
+                name, field.datatype
+            )
+        )
+    if int(field.count) < 1:
+        raise ValueError(
+            "PointCloud2 field '{}' has invalid count {}".format(
+                name, field.count
+            )
+        )
+    width = int(msg.width)
+    height = int(msg.height)
+    point_step = int(msg.point_step)
+    row_step = int(msg.row_step)
+    if width < 0 or height <= 0 or point_step <= 0:
+        raise ValueError("PointCloud2 dimensions or point_step are invalid")
+    if row_step < width * point_step:
+        raise ValueError("PointCloud2 row_step is shorter than one point row")
     byte_order = ">" if msg.is_bigendian else "<"
-    return np.ndarray(
-        msg.width * msg.height,
-        dtype=byte_order + "f4",
+    dtype = np.dtype(byte_order + datatype)
+    if width == 0:
+        return np.empty(0, dtype=dtype)
+    if int(field.offset) < 0 or int(field.offset) + dtype.itemsize > point_step:
+        raise ValueError(
+            "PointCloud2 field '{}' does not fit inside point_step".format(name)
+        )
+    required_bytes = (
+        (height - 1) * row_step
+        + max(0, width - 1) * point_step
+        + int(field.offset)
+        + dtype.itemsize
+    )
+    if required_bytes > len(msg.data):
+        raise ValueError("PointCloud2 data is shorter than its declared layout")
+    array = np.ndarray(
+        (height, width),
+        dtype=dtype,
         buffer=msg.data,
         offset=field.offset,
-        strides=(msg.point_step,),
+        strides=(row_step, point_step),
     )
+    return np.asarray(array).reshape(-1)
 
 
 def xyz_array(msg):
@@ -186,6 +240,26 @@ def yaw_from_quaternion(quaternion):
 def pose_record(msg, relative_time):
     position = msg.pose.pose.position
     orientation = msg.pose.pose.orientation
+    values = (
+        relative_time,
+        position.x,
+        position.y,
+        position.z,
+        orientation.x,
+        orientation.y,
+        orientation.z,
+        orientation.w,
+    )
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("Odometry contains a non-finite pose or timestamp")
+    quaternion_norm = math.sqrt(
+        orientation.x * orientation.x
+        + orientation.y * orientation.y
+        + orientation.z * orientation.z
+        + orientation.w * orientation.w
+    )
+    if quaternion_norm <= 1e-9:
+        raise ValueError("Odometry contains an invalid zero-norm orientation")
     return {
         "time": relative_time,
         "x": position.x,

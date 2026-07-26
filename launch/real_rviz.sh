@@ -3,25 +3,44 @@ set -euo pipefail
 
 CONTAINER_NAME="${CONTAINER_NAME:-ros_noetic}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-JETSON_IP="${JETSON_IP:-10.0.30.108}"
+JETSON_IP="${JETSON_IP:-}"
 JETSON_HOSTNAME="${JETSON_HOSTNAME:-jetson2-desktop}"
 RVIZ_CONFIG_HOST="${RVIZ_CONFIG_HOST:-$PROJECT_ROOT/deployment/config/rviz/jetson_real_stack.rviz}"
 RVIZ_CONFIG_CONTAINER="${RVIZ_CONFIG_CONTAINER:-/root/jetson_real_stack.rviz}"
 GOAL_BRIDGE_HOST="${GOAL_BRIDGE_HOST:-$PROJECT_ROOT/common/scripts/rviz_goal_to_diff_planner.py}"
 GOAL_BRIDGE_CONTAINER="${GOAL_BRIDGE_CONTAINER:-/root/rviz_goal_to_diff_planner.py}"
 START_GOAL_BRIDGE="${START_GOAL_BRIDGE:-true}"
-RVIZ_GOAL_Z="${RVIZ_GOAL_Z:-0.3}"
+RVIZ_GOAL_Z="${RVIZ_GOAL_Z:-1.0}"
 RVIZ_GOAL_FRAME="${RVIZ_GOAL_FRAME:-}"
 DISPLAY_VALUE="${DISPLAY:-:0}"
+XHOST_GRANTED=false
+
+for command_name in docker ip python3; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "[ERROR] $command_name command not found."
+    exit 1
+  fi
+done
 
 detect_local_ip() {
-  ip -4 addr show | awk '/inet 10\.0\.30\./ {print $2; exit}' | cut -d/ -f1
+  local detected=""
+  detected="$(ip -4 route get "$JETSON_IP" 2>/dev/null |
+    awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')" || true
+  if [ -z "$detected" ]; then
+    detected="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
+  fi
+  printf '%s\n' "$detected"
 }
+
+if [ -z "$JETSON_IP" ]; then
+  echo "[ERROR] Set JETSON_IP to the real-flight computer's reachable address."
+  echo "Example: JETSON_IP=172.20.10.5 $0"
+  exit 1
+fi
 
 LOCAL_IP="${LOCAL_IP:-$(detect_local_ip)}"
 if [ -z "$LOCAL_IP" ]; then
-  echo "[ERROR] Could not detect local 10.0.30.x IP. Set LOCAL_IP manually."
-  echo "Example: LOCAL_IP=10.0.30.196 $0"
+  echo "[ERROR] Could not detect the workstation address on the route to $JETSON_IP. Set LOCAL_IP manually."
   exit 1
 fi
 
@@ -30,11 +49,6 @@ ROS_DOCKER_ENV=(
   -e "JETSON_ROS_MASTER_URI=$REMOTE_ROS_MASTER_URI"
   -e "JETSON_ROS_IP=$LOCAL_IP"
 )
-
-if ! command -v docker >/dev/null 2>&1; then
-  echo "[ERROR] docker command not found."
-  exit 1
-fi
 
 if ! docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
   echo "[ERROR] Docker container '$CONTAINER_NAME' does not exist."
@@ -61,9 +75,38 @@ if [ "$START_GOAL_BRIDGE" = "true" ] && [ ! -f "$GOAL_BRIDGE_HOST" ]; then
   exit 1
 fi
 
+if ! python3 -c \
+  'import math,sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value > 0.0 else 1)' \
+  "$RVIZ_GOAL_Z" 2>/dev/null; then
+  echo "[ERROR] RVIZ_GOAL_Z must be a finite positive number."
+  exit 1
+fi
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [ "$START_GOAL_BRIDGE" = "true" ] &&
+    docker inspect "$CONTAINER_NAME" >/dev/null 2>&1 &&
+    [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)" = "true" ]; then
+    docker exec "${ROS_DOCKER_ENV[@]}" "$CONTAINER_NAME" bash -lc '
+      source /opt/ros/noetic/setup.bash
+      export ROS_MASTER_URI="$JETSON_ROS_MASTER_URI"
+      export ROS_IP="$JETSON_ROS_IP"
+      unset ROS_HOSTNAME JETSON_ROS_MASTER_URI JETSON_ROS_IP
+      rosnode kill /rviz_goal_to_diff_planner >/dev/null 2>&1 || true
+    ' >/dev/null 2>&1 || true
+  fi
+  if [ "$XHOST_GRANTED" = "true" ]; then
+    xhost -SI:localuser:root >/dev/null 2>&1 || true
+  fi
+  return "$status"
+}
+trap cleanup EXIT
+
 if command -v xhost >/dev/null 2>&1; then
-  xhost +local:docker >/dev/null 2>&1 || true
-  xhost +SI:localuser:root >/dev/null 2>&1 || true
+  if xhost +SI:localuser:root >/dev/null 2>&1; then
+    XHOST_GRANTED=true
+  fi
 fi
 
 docker cp "$RVIZ_CONFIG_HOST" "$CONTAINER_NAME:$RVIZ_CONFIG_CONTAINER"
@@ -171,6 +214,25 @@ if [ -n "$3" ]; then
 fi
 exec python3 "$1" "${bridge_args[@]}"
 ' bash "$GOAL_BRIDGE_CONTAINER" "$RVIZ_GOAL_Z" "$RVIZ_GOAL_FRAME"
+
+  bridge_ready=false
+  for _ in $(seq 1 30); do
+    if docker exec "${ROS_DOCKER_ENV[@]}" "$CONTAINER_NAME" bash -lc '
+      source /opt/ros/noetic/setup.bash
+      export ROS_MASTER_URI="$JETSON_ROS_MASTER_URI"
+      export ROS_IP="$JETSON_ROS_IP"
+      unset ROS_HOSTNAME JETSON_ROS_MASTER_URI JETSON_ROS_IP
+      rosnode list 2>/dev/null | grep -qx /rviz_goal_to_diff_planner
+    ' >/dev/null 2>&1; then
+      bridge_ready=true
+      break
+    fi
+    sleep 0.2
+  done
+  if [ "$bridge_ready" != "true" ]; then
+    echo "[ERROR] RViz goal bridge did not register with the Jetson ROS master." >&2
+    exit 1
+  fi
 fi
 
 echo "[INFO] Starting RViz in container '$CONTAINER_NAME'"
@@ -183,7 +245,7 @@ else
   echo "[INFO] RViz goal bridge disabled."
 fi
 
-exec docker exec -it \
+docker exec -it \
   "${ROS_DOCKER_ENV[@]}" \
   -e DISPLAY="$DISPLAY_VALUE" \
   -e QT_X11_NO_MITSHM=1 \

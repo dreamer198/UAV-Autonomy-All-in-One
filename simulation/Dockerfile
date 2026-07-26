@@ -8,7 +8,7 @@ ARG MID360_REPOSITORY=https://github.com/Tfly6/Mid360_px4_sim_plugin.git
 ARG MID360_COMMIT=44bcd80e0edf6e797edd004cd5bb2bb8fcfd9d18
 ARG BUILD_JOBS=4
 
-LABEL org.opencontainers.image.title="Diff-Planner PX4 simulation" \
+LABEL org.opencontainers.image.title="UAV Autonomy All-in-One simulation" \
       io.diff-planner.simulation.px4-commit="$PX4_COMMIT" \
       io.diff-planner.simulation.mid360-commit="$MID360_COMMIT"
 

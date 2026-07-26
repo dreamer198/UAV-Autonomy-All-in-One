@@ -28,8 +28,7 @@ namespace diff_planner
     double goal_yaw_tolerance_deg = 5.0;
     nh.param("fsm/goal_yaw_tolerance_deg", goal_yaw_tolerance_deg, 5.0);
     goal_yaw_tolerance_ = goal_yaw_tolerance_deg * M_PI / 180.0;
-    nh.param("fsm/goal_position_tolerance", goal_position_tolerance_, 0.2);
-    nh.param("fsm/max_goal_distance", max_goal_distance_, 200.0);
+    nh.param("fsm/goal_position_tolerance", goal_position_tolerance_, 0.35);
     nh.param("fsm/realworld_experiment", flag_realworld_experiment_, false);
     nh.param("fsm/fail_safe", enable_fail_safe_, true);
     nh.param("fsm/ground_height_measurement", enable_ground_height_measurement_, false);
@@ -44,15 +43,9 @@ namespace diff_planner
     }
     if (!std::isfinite(goal_position_tolerance_) || goal_position_tolerance_ <= 0.0)
     {
-      ROS_WARN("fsm/goal_position_tolerance must be positive; using 0.2 m.");
-      goal_position_tolerance_ = 0.2;
+      ROS_WARN("fsm/goal_position_tolerance must be positive; using 0.35 m.");
+      goal_position_tolerance_ = 0.35;
     }
-    if (!std::isfinite(max_goal_distance_) || max_goal_distance_ <= 0.0)
-    {
-      ROS_WARN("fsm/max_goal_distance must be positive; using 200.0 m.");
-      max_goal_distance_ = 200.0;
-    }
-
     goal_yaw_ = 0.0;
     odom_yaw_ = 0.0;
     goal_stamp_ = ros::Time(0);
@@ -75,10 +68,45 @@ namespace diff_planner
     no_replan_thresh_ = 0.5 * emergency_time_ * planner_manager_->pp_.max_vel_;
 
     /* initialize  Anomaly Detection Parameters */
-    last_local_target_pos_.setZero();
-    last_target_change_time_ = ros::Time::now().toSec();
-    replan_fail_count_ = 0;
-    TARGET_STUCK_TIME = 1.5 * planning_horizen_ / planner_manager_->pp_.max_vel_;
+    nh.param("fsm/replan_retry_interval", replan_retry_interval_, 0.1);
+    nh.param("fsm/replan_failure_timeout", replan_failure_timeout_, 1.0);
+    nh.param("fsm/stuck_progress_threshold", stuck_progress_threshold_, 0.1);
+    nh.param("fsm/stuck_timeout", stuck_timeout_, 5.0);
+    if (!std::isfinite(replan_retry_interval_) ||
+        replan_retry_interval_ <= 0.0)
+    {
+      ROS_WARN("fsm/replan_retry_interval must be positive; using 0.1 s.");
+      replan_retry_interval_ = 0.1;
+    }
+    if (!std::isfinite(replan_failure_timeout_) ||
+        replan_failure_timeout_ <= 0.0)
+    {
+      ROS_WARN("fsm/replan_failure_timeout must be positive; using 1.0 s.");
+      replan_failure_timeout_ = 1.0;
+    }
+    if (replan_retry_interval_ >= replan_failure_timeout_)
+    {
+      ROS_WARN("fsm/replan_retry_interval must be shorter than "
+               "fsm/replan_failure_timeout; using 0.1 s / 1.0 s.");
+      replan_retry_interval_ = 0.1;
+      replan_failure_timeout_ = 1.0;
+    }
+    if (!std::isfinite(stuck_progress_threshold_) ||
+        stuck_progress_threshold_ <= 0.0)
+    {
+      ROS_WARN("fsm/stuck_progress_threshold must be positive; using 0.1 m.");
+      stuck_progress_threshold_ = 0.1;
+    }
+    if (!std::isfinite(stuck_timeout_) || stuck_timeout_ <= 0.0)
+    {
+      ROS_WARN("fsm/stuck_timeout must be positive; using 5.0 s.");
+      stuck_timeout_ = 5.0;
+    }
+    replan_failure_window_.configure(
+        replan_retry_interval_, replan_failure_timeout_);
+    replan_failure_window_.reset(ros::Time::now().toSec());
+    stuck_progress_monitor_.configure(stuck_progress_threshold_, stuck_timeout_);
+    stuck_progress_monitor_.reset(ros::Time::now().toSec());
     need_hover_stop_ = false;
 
     /* callback */
@@ -163,6 +191,11 @@ namespace diff_planner
     {
       if (planner_manager_->pp_.drone_id <= 0 || (planner_manager_->pp_.drone_id >= 1 && have_recv_pre_agent_))
       {
+        const double now = ros::Time::now().toSec();
+        if (!replan_failure_window_.shouldAttempt(now))
+        {
+          break;
+        }
         if (!mondify_final_goal_ && planner_manager_->grid_map_->getInflateOccupancy(final_goal_))
         {
           ROS_WARN("Final goal in obstacle, unsafe. Emergency stop.");
@@ -175,13 +208,17 @@ namespace diff_planner
           bool success = planFromGlobalTraj(10); // zx-todo
           if (success)
           {
-            replan_fail_count_ = 0;
+            replan_failure_window_.reset(ros::Time::now().toSec());
             changeFSMExecState(EXEC_TRAJ, "FSM");
           }
           else
           {
-            ROS_WARN("Failed to generate the first trajectory, keep trying");
-            replan_fail_count_++;
+            ROS_WARN_THROTTLE(
+                1.0,
+                "Failed to generate the first trajectory; retrying for up to %.1f s.",
+                replan_failure_timeout_);
+            replan_failure_window_.recordFailure(
+                ros::Time::now().toSec());
             changeFSMExecState(SEQUENTIAL_START, "FSM"); // "changeFSMExecState" must be called each time planned
           }
         }
@@ -191,6 +228,11 @@ namespace diff_planner
 
     case GEN_NEW_TRAJ:
     {
+      const double now = ros::Time::now().toSec();
+      if (!replan_failure_window_.shouldAttempt(now))
+      {
+        break;
+      }
       if (!mondify_final_goal_ && planner_manager_->grid_map_->getInflateOccupancy(final_goal_))
       {
         ROS_WARN("Final goal in obstacle, unsafe. Emergency stop.");
@@ -203,13 +245,14 @@ namespace diff_planner
         bool success = planFromGlobalTraj(10); // zx-todo
         if (success)
         {
-          replan_fail_count_ = 0;
+          replan_failure_window_.reset(ros::Time::now().toSec());
           changeFSMExecState(EXEC_TRAJ, "FSM");
           flag_escape_emergency_ = true;
         }
         else
         {
-          replan_fail_count_++;
+          replan_failure_window_.recordFailure(
+              ros::Time::now().toSec());
           changeFSMExecState(GEN_NEW_TRAJ, "FSM"); // "changeFSMExecState" must be called each time planned
         }
       }
@@ -218,15 +261,21 @@ namespace diff_planner
 
     case REPLAN_TRAJ:
     {
+      const double now = ros::Time::now().toSec();
+      if (!replan_failure_window_.shouldAttempt(now))
+      {
+        break;
+      }
 
       if (planFromLocalTraj(1))
       {
-        replan_fail_count_ = 0;
+        replan_failure_window_.reset(ros::Time::now().toSec());
         changeFSMExecState(EXEC_TRAJ, "FSM");
       }
       else
       {
-        replan_fail_count_++;
+        replan_failure_window_.recordFailure(
+            ros::Time::now().toSec());
         changeFSMExecState(REPLAN_TRAJ, "FSM");
       }
 
@@ -323,66 +372,14 @@ namespace diff_planner
       // yaw is intentional and must not be treated as a stuck condition.
       if (enable_stuck_detect_ && !(final_trajectory_finished && goal_position_reached))
       {
-        /* Avoid getting stuck wandering around large obstacles */
-        static bool baseline_initialized = false;
-        if (touch_the_goal)
+        const double now = ros::Time::now().toSec();
+        if (stuck_progress_monitor_.updateVehicleMotion(now, odom_pos_))
         {
-          static double last_proj_len = 0.0;
-          static Eigen::Vector3d baseline_origin = odom_pos_;
-          static Eigen::Vector3d last_goal_when_baseline = final_goal_;
-          if (!baseline_initialized || (last_goal_when_baseline - final_goal_).norm() > 0.1)
-          {
-            baseline_origin = odom_pos_;
-            last_goal_when_baseline = final_goal_;
-            last_proj_len = 0.0;
-            baseline_initialized = true;
-          }
-          Eigen::Vector3d cur_pos = odom_pos_;
-          Eigen::Vector3d global2cur = cur_pos - baseline_origin;
-          Eigen::Vector3d proj_pos = projectPointToLineSegment(baseline_origin, final_goal_, cur_pos);
-          double proj_len = (proj_pos - baseline_origin).norm();
-          if (proj_len - last_proj_len < TARGET_STUCK_THRESH)
-          {
-            if (ros::Time::now().toSec() - last_target_change_time_ > TARGET_STUCK_TIME)
-            {
-              ROS_WARN("Drone stuck! Obstacle too large and near final goal. Emergency stop.");
-              need_hover_stop_ = true;
-              flag_escape_emergency_ = true;
-              changeFSMExecState(EMERGENCY_STOP, "STUCK_DETECT");
-            }
-          }
-          else
-          {
-            last_proj_len = proj_len;
-            last_target_change_time_ = ros::Time::now().toSec();
-          }
-
-          if (global2cur.norm() > planning_horizen_ * M_SQRT2)
-          {
-            ROS_WARN("Drone stuck! The drone flew too far out of its way . Emergency stop.");
-            need_hover_stop_ = true;
-            flag_escape_emergency_ = true;
-            changeFSMExecState(EMERGENCY_STOP, "STUCK_DETECT");
-          }
-        }
-        else
-        {
-          baseline_initialized = false;
-          if ((local_target_pt_ - last_local_target_pos_).norm() < TARGET_STUCK_THRESH)
-          {
-            if (ros::Time::now().toSec() - last_target_change_time_ > TARGET_STUCK_TIME)
-            {
-              ROS_WARN("Drone stuck! Obstacle too large. Emergency stop.");
-              need_hover_stop_ = true;
-              flag_escape_emergency_ = true;
-              changeFSMExecState(EMERGENCY_STOP, "STUCK_DETECT");
-            }
-          }
-          else
-          {
-            last_local_target_pos_ = local_target_pt_;
-            last_target_change_time_ = ros::Time::now().toSec();
-          }
+          ROS_WARN("Drone stuck! Vehicle moved less than %.2f m for %.1f s. Emergency stop.",
+                   stuck_progress_threshold_, stuck_timeout_);
+          need_hover_stop_ = true;
+          flag_escape_emergency_ = true;
+          changeFSMExecState(EMERGENCY_STOP, "STUCK_DETECT");
         }
       }
       break;
@@ -400,7 +397,7 @@ namespace diff_planner
       {
         if (enable_fail_safe_ && !need_hover_stop_ && odom_vel_.norm() < 0.1)
         {
-          last_target_change_time_ = ros::Time::now().toSec();
+          stuck_progress_monitor_.reset(ros::Time::now().toSec());
           changeFSMExecState(GEN_NEW_TRAJ, "FSM");
         }
         else if (enable_fail_safe_ && need_hover_stop_ && odom_vel_.norm() < 0.1)
@@ -415,7 +412,7 @@ namespace diff_planner
             // would silently discard a mission retry.
             ROS_INFO("Exiting EMERGENCY_STOP with a fresh queued target. Restarting from current odometry.");
             have_queued_emergency_target_ = false;
-            last_target_change_time_ = ros::Time::now().toSec();
+            stuck_progress_monitor_.reset(ros::Time::now().toSec());
             changeFSMExecState(GEN_NEW_TRAJ, "EMERGENCY_RETRY");
           }
           else
@@ -439,10 +436,11 @@ namespace diff_planner
   }
   void DiffReplanFSM::finishProcess()
   {
-    if (replan_fail_count_ > MAX_REPLAN_FAIL_COUNT)
+    if (replan_failure_window_.timedOut(ros::Time::now().toSec()))
     {
-      ROS_WARN("replan fail too much. Emergency stop.");
-      replan_fail_count_ = 0; 
+      ROS_WARN("Replanning remained unavailable for %.1f s. Emergency stop.",
+               replan_failure_timeout_);
+      replan_failure_window_.reset(ros::Time::now().toSec());
       need_hover_stop_ = true;
       flag_escape_emergency_ = true;
       changeFSMExecState(EMERGENCY_STOP, "finishProcess");
@@ -458,6 +456,12 @@ namespace diff_planner
       // normal WAIT_TARGET exit. An older have_new_target_ flag is not enough
       // evidence that the pilot or mission runner requested a retry.
       have_queued_emergency_target_ = false;
+    }
+    if (new_state == EXEC_TRAJ ||
+        new_state == EMERGENCY_STOP ||
+        new_state == WAIT_TARGET)
+    {
+      replan_failure_window_.reset(ros::Time::now().toSec());
     }
 
     if (new_state == exec_state_)
@@ -532,6 +536,7 @@ namespace diff_planner
       ROS_ERROR("Depth Lost! EMERGENCY_STOP");
       enable_fail_safe_ = false;
       changeFSMExecState(EMERGENCY_STOP, "SAFETY");
+      return;
     }
 
     /* ---------- check trajectory ---------- */
@@ -595,14 +600,23 @@ namespace diff_planner
         if (dangerous)
         {
           /* Handle the collided case immediately */
-          if (planFromLocalTraj()) // Make a chance
+          const double now = ros::Time::now().toSec();
+          const bool retry_due =
+              replan_failure_window_.shouldAttempt(now);
+          if (retry_due && planFromLocalTraj()) // Make a chance
           {
+            replan_failure_window_.reset(ros::Time::now().toSec());
             ROS_INFO("Plan success when detect collision. %f", t / info->duration);
             changeFSMExecState(EXEC_TRAJ, "SAFETY");
             return;
           }
           else
           {
+            if (retry_due)
+            {
+              replan_failure_window_.recordFailure(
+                  ros::Time::now().toSec());
+            }
             if (t - t_cur < emergency_time_) // 0.8s of emergency time
             {
               ROS_WARN("Emergency stop! time=%f", t - t_cur);
@@ -610,7 +624,7 @@ namespace diff_planner
             }
             else
             {
-              ROS_WARN("current traj in collision, replan.");
+              ROS_WARN_THROTTLE(0.5, "current traj in collision, replan.");
               changeFSMExecState(REPLAN_TRAJ, "SAFETY");
             }
             return;
@@ -743,20 +757,54 @@ namespace diff_planner
     bool success = false;
     std::vector<Eigen::Vector3d> one_pt_wps;
     one_pt_wps.push_back(next_wp);
+    // The global trajectory is a geometric reference corridor, not the
+    // command that provides instantaneous dynamic continuity.  Feeding a
+    // small measured velocity into a long-duration minimum-jerk reference can
+    // create a large off-axis overshoot (for example, a slight descent after
+    // takeoff can bend an otherwise level reference below the virtual ground).
+    // The local trajectory still starts from odom_vel_, so the commanded
+    // motion remains dynamically continuous while the global reference stays
+    // between the current position and the requested waypoint.
     success = planner_manager_->planGlobalTrajWaypoints(
-        odom_pos_, odom_vel_, Eigen::Vector3d::Zero(),
+        odom_pos_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
         one_pt_wps, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
     // visualization_->displayGoalPoint(next_wp, Eigen::Vector4d(0, 0.5, 0.5, 1), 0.3, 0);
     if (success)
     {
       final_goal_ = next_wp;
+      // Every accepted waypoint starts a new progress window. This must also
+      // happen for preset waypoints, collision-adjusted goals, and retries of
+      // exactly the same coordinates.
+      stuck_progress_monitor_.reset(ros::Time::now().toSec());
+      replan_failure_window_.reset(ros::Time::now().toSec());
       /*** display ***/
       constexpr double step_size_t = 0.1;
-      int i_end = floor(planner_manager_->traj_.global_traj.duration / step_size_t);
-      vector<Eigen::Vector3d> gloabl_traj(i_end);
-      for (int i = 0; i < i_end; i++)
+      constexpr std::size_t max_visualization_samples = 5000;
+      const double global_duration =
+          planner_manager_->traj_.global_traj.duration;
+      const std::size_t sample_count =
+          planning_recovery_utils::boundedTrajectorySampleCount(
+              global_duration, step_size_t, max_visualization_samples);
+      if (sample_count < 2)
       {
-        gloabl_traj[i] = planner_manager_->traj_.global_traj.traj.getPos(i * step_size_t);
+        ROS_ERROR("Generated global trajectory has an invalid duration.");
+        return false;
+      }
+      vector<Eigen::Vector3d> global_traj;
+      global_traj.reserve(sample_count);
+      for (std::size_t i = 0; i < sample_count; ++i)
+      {
+        const double sample_time =
+            global_duration * static_cast<double>(i) /
+            static_cast<double>(sample_count - 1);
+        const Eigen::Vector3d sample =
+            planner_manager_->traj_.global_traj.traj.getPos(sample_time);
+        if (!sample.allFinite())
+        {
+          ROS_ERROR("Generated global trajectory contains a non-finite sample.");
+          return false;
+        }
+        global_traj.push_back(sample);
       }
       have_target_ = true;
       have_new_target_ = true;
@@ -785,7 +833,7 @@ namespace diff_planner
         return true;
       }
       visualization_->displayGoalPoint(final_goal_, Eigen::Vector4d(1, 0, 0, 1), 0.3, 0);
-       visualization_->displayGlobalPathList(gloabl_traj, 0.1, 0);
+       visualization_->displayGlobalPathList(global_traj, 0.1, 0);
     }
     else
     {
@@ -849,19 +897,33 @@ namespace diff_planner
       ROS_WARN("Ignoring the goal because valid odometry is not available yet.");
       return;
     }
-    const double goal_distance = (end_wp - odom_pos_).norm();
-    if (goal_distance > max_goal_distance_)
+    const Eigen::Vector3d goal_delta = end_wp - odom_pos_;
+    if (!goal_delta.allFinite() || !std::isfinite(goal_delta.norm()))
     {
-      ROS_WARN("Ignoring goal %.1f m from the vehicle; fsm/max_goal_distance is %.1f m. "
-               "goal=(%.3f, %.3f, %.3f), odom=(%.3f, %.3f, %.3f)",
-               goal_distance, max_goal_distance_,
-               end_wp(0), end_wp(1), end_wp(2),
-               odom_pos_(0), odom_pos_(1), odom_pos_(2));
+      ROS_WARN("Ignoring a goal whose distance is outside the numeric range of the planner.");
       return;
     }
     if (planner_manager_->grid_map_->getInflateOccupancy(end_wp) == -1)
     {
       ROS_WARN("The goal is outside the safe fence, ignore this goal!");
+      return;
+    }
+    if (planner_manager_->grid_map_->virtualWallEnabled() &&
+        !planning_recovery_utils::isWithinVerticalClearance(
+            end_wp.z(),
+            planner_manager_->grid_map_->getVirtualGround(),
+            planner_manager_->grid_map_->getVirtualCeil(),
+            planner_manager_->grid_map_->getObstaclesInflation()))
+    {
+      const double minimum_z =
+          planner_manager_->grid_map_->getVirtualGround() +
+          planner_manager_->grid_map_->getObstaclesInflation();
+      const double maximum_z =
+          planner_manager_->grid_map_->getVirtualCeil() -
+          planner_manager_->grid_map_->getObstaclesInflation();
+      ROS_WARN("Ignoring goal Z=%.3f without full obstacle-inflation clearance; "
+               "require %.3f < Z < %.3f.",
+               end_wp.z(), minimum_z, maximum_z);
       return;
     }
 
@@ -886,7 +948,6 @@ namespace diff_planner
     ROS_INFO("Received goal: %f, %f, %f", end_wp(0), end_wp(1), end_wp(2));
     if (planNextWaypoint(end_wp, true))
     {
-      last_target_change_time_ = ros::Time::now().toSec();
       have_trigger_ = true;
       if (received_during_emergency)
       {

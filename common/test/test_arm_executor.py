@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import inspect
 import os
+import threading
+import time
 import unittest
+from types import SimpleNamespace
 
 
 SCRIPT_PATH = os.path.join(
@@ -46,6 +50,8 @@ class ArmExecutorTest(unittest.TestCase):
         self.assertEqual(args.takeoff_altitude_field, "relative")
         self.assertEqual(args.disarmed_prearm_mode, "STABILIZED")
         self.assertIsNone(args.px4_hover_thrust)
+        self.assertEqual(args.state_timeout, 3.0)
+        self.assertEqual(args.altitude_timeout, 0.5)
 
     def test_native_handoff_accepts_settled_takeoff_or_loiter(self):
         ready = EXECUTOR.native_takeoff_handoff_ready
@@ -96,6 +102,119 @@ class ArmExecutorTest(unittest.TestCase):
             "lidar link lost",
         )
         self.assertEqual(reason({"active": False, "reason": "old"}), "")
+
+    def test_localization_failure_skips_unsafe_loiter_recovery(self):
+        recovery = EXECUTOR.arm_failure_recovery_modes
+        self.assertEqual(
+            recovery("localization odometry is stale"), ("AUTO.LAND",)
+        )
+        self.assertEqual(
+            recovery("PX4 rejected OFFBOARD"),
+            ("AUTO.LOITER", "AUTO.LAND"),
+        )
+
+    def test_state_and_altitude_freshness_are_checked_independently(self):
+        executor = EXECUTOR.SharedArmExecutor.__new__(
+            EXECUTOR.SharedArmExecutor
+        )
+        executor.condition = threading.Condition()
+        executor.args = SimpleNamespace(
+            state_timeout=3.0, altitude_timeout=0.5
+        )
+        executor.state = object()
+        executor.takeoff_altitude = 1.0
+        now = time.monotonic()
+        executor.state_received_at = now - 4.0
+        executor.altitude_received_at = now
+
+        self.assertFalse(executor._state_is_fresh(now))
+        self.assertTrue(executor._altitude_is_fresh(now))
+
+    def test_localization_health_fails_closed_and_routes_to_land(self):
+        for get_param, odom_age in (
+            (lambda *_args: "", 1.0),
+            (
+                lambda *_args: (_ for _ in ()).throw(
+                    RuntimeError("parameter server unavailable")
+                ),
+                0.0,
+            ),
+        ):
+            with self.subTest(odom_age=odom_age):
+                executor = EXECUTOR.SharedArmExecutor.__new__(
+                    EXECUTOR.SharedArmExecutor
+                )
+                executor.condition = threading.Condition()
+                executor.args = SimpleNamespace(odom_timeout=0.5)
+                executor.odom_received_at = time.monotonic() - odom_age
+                executor.rospy = SimpleNamespace(get_param=get_param)
+
+                with self.assertRaises(EXECUTOR.ArmExecutorError) as context:
+                    executor._check_localization_health()
+
+                reason = str(context.exception)
+                self.assertIn("localization", reason)
+                self.assertEqual(
+                    EXECUTOR.arm_failure_recovery_modes(reason),
+                    ("AUTO.LAND",),
+                )
+
+    def test_all_flight_wait_loops_check_localization_health(self):
+        expected_calls = {
+            "_arm_and_start_takeoff": 2,
+            "_wait_for_native_takeoff_settle": 1,
+            "_wait_for_fresh_hold_setpoints": 1,
+            "_enter_and_verify_offboard": 3,
+        }
+        for method_name, minimum in expected_calls.items():
+            with self.subTest(method=method_name):
+                source = inspect.getsource(
+                    getattr(EXECUTOR.SharedArmExecutor, method_name)
+                )
+                self.assertGreaterEqual(
+                    source.count("self._check_localization_health()"),
+                    minimum,
+                )
+
+    def test_armed_preflight_fails_immediately_for_stale_localization(self):
+        executor = EXECUTOR.SharedArmExecutor.__new__(
+            EXECUTOR.SharedArmExecutor
+        )
+        executor.condition = threading.Condition()
+        executor.abort_requested = False
+        executor.rosnode = SimpleNamespace(
+            get_node_names=lambda: ["/se3_controller_node"]
+        )
+        executor.rospy = SimpleNamespace(
+            is_shutdown=lambda: False,
+            get_param=lambda *_args: "",
+        )
+        executor.args = SimpleNamespace(
+            controller_node="/se3_controller_node",
+            preflight_timeout=5.0,
+            position_setpoint_samples=10,
+            odom_timeout=0.5,
+            state_timeout=3.0,
+            altitude_timeout=0.5,
+        )
+        now = time.monotonic()
+        executor.state = SimpleNamespace(
+            connected=True,
+            armed=True,
+            mode="OFFBOARD",
+            system_status=3,
+        )
+        executor.state_received_at = now
+        executor.takeoff_altitude = 1.0
+        executor.altitude_received_at = now
+        executor.odom_received_at = now - 1.0
+        executor.position_setpoint_count = 0
+        executor.position_setpoint_received_at = 0.0
+
+        with self.assertRaisesRegex(
+            EXECUTOR.ArmExecutorError, "localization"
+        ):
+            executor._wait_for_preflight_data()
 
 
 if __name__ == "__main__":

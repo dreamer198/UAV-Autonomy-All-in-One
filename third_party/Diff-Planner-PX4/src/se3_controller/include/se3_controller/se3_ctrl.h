@@ -43,11 +43,17 @@ private:
     bool sim_enable_, auto_request_offboard_{false}, auto_request_arm_{false}, auto_land_on_geofence_{false};
     bool enable_thrust_estimation_{false};
     bool use_acceleration_feedforward_{true}, use_yaw_rate_feedforward_{true};
-    bool arm_triggered_{false}, offboard_triggered_{false};
-    bool has_odom_{false}, has_imu_{false}, has_trajectory_after_offboard_{false};
+    bool has_odom_{false}, has_imu_{false}, has_state_{false};
+    bool has_trajectory_after_offboard_{false};
+    bool land_mode_request_accepted_{false};
     double max_feedforward_acc_, odom_timeout_{0.2};
+    double imu_timeout_{0.2}, state_timeout_{2.0};
+    double land_retry_interval_{1.0}, safety_hold_retry_interval_{1.0};
     double ki_pz_{0.0}, int_limit_z_{5.0};
     Eigen::Vector3d geo_fence_;
+    ros::Time state_rcv_stamp_, state_msg_stamp_;
+    ros::Time last_land_mode_request_, last_safety_hold_request_;
+    ros::Time last_offboard_request_, last_arm_request_;
 
     Eigen::Vector3d kp_p_, kp_v_, kp_a_, kp_q_, kp_w_, kd_p_, kd_v_, kd_a_, kd_q_, kd_w_;
     double limit_err_p_, limit_err_v_, limit_err_a_, limit_d_err_p_, limit_d_err_v_, limit_d_err_a_;
@@ -61,10 +67,15 @@ private:
 
     void execFSMCallback(const ros::TimerEvent &e);
 
-    void send_cmd(const Controller_Output_t &output, bool angle);
+    bool send_cmd(const Controller_Output_t &output, bool angle);
     void pubLocalPose(const Eigen::Vector3d &pose); 
     bool hasFreshOdom() const;
+    bool hasFreshImu() const;
+    bool hasFreshState() const;
     void setDesiredStateToCurrentOdom();
+    void syncDesiredOdomMessage(const ros::Time &stamp);
+    void requestSafetyHold(const char *reason);
+    void resetForDisarmedState();
 
     bool landCallback(std_srvs::SetBool::Request &request, std_srvs::SetBool::Response &response);
     void OdomCallback(const nav_msgs::Odometry::ConstPtr &msg);
@@ -90,33 +101,51 @@ private:
         ROS_INFO("limit err   p v a: %f %f %f", config.limit_err_p, config.limit_err_v, config.limit_err_a);
         ROS_INFO("limit d err p v a: %f %f %f", config.limit_d_err_p, config.limit_d_err_v, config.limit_d_err_a);
 
-        kp_p_ << config.kp_px, config.kp_py, config.kp_pz;
-        kp_v_ << config.kp_vx, config.kp_vy, config.kp_vz;
-        kp_a_ << config.kp_ax, config.kp_ay, config.kp_az;
-        kp_q_ << config.kp_qx, config.kp_qy, config.kp_qz;
-        kp_w_ << config.kp_wx, config.kp_wy, config.kp_wz;
+        Eigen::Vector3d kp_p(config.kp_px, config.kp_py, config.kp_pz);
+        Eigen::Vector3d kp_v(config.kp_vx, config.kp_vy, config.kp_vz);
+        Eigen::Vector3d kp_a(config.kp_ax, config.kp_ay, config.kp_az);
+        Eigen::Vector3d kp_q(config.kp_qx, config.kp_qy, config.kp_qz);
+        Eigen::Vector3d kp_w(config.kp_wx, config.kp_wy, config.kp_wz);
+        Eigen::Vector3d kd_p(config.kd_px, config.kd_py, config.kd_pz);
+        Eigen::Vector3d kd_v(config.kd_vx, config.kd_vy, config.kd_vz);
+        Eigen::Vector3d kd_a(config.kd_ax, config.kd_ay, config.kd_az);
+        Eigen::Vector3d kd_q(config.kd_qx, config.kd_qy, config.kd_qz);
+        Eigen::Vector3d kd_w(config.kd_wx, config.kd_wy, config.kd_wz);
 
-        kd_p_ << config.kd_px, config.kd_py, config.kd_pz;
-        kd_v_ << config.kd_vx, config.kd_vy, config.kd_vz;
-        kd_a_ << config.kd_ax, config.kd_ay, config.kd_az;
-        kd_q_ << config.kd_qx, config.kd_qy, config.kd_qz;
-        kd_w_ << config.kd_wx, config.kd_wy, config.kd_wz;
+        if (!se3_controller_.setup(
+                kp_p, kp_v, kp_a, kp_q, kp_w,
+                kd_p, kd_v, kd_a, kd_q, kd_w,
+                config.limit_err_p, config.limit_err_v, config.limit_err_a,
+                config.limit_d_err_p, config.limit_d_err_v,
+                config.limit_d_err_a)) {
+            ROS_ERROR("[se3_controller] Ignoring non-finite or non-positive dynamic controller parameters.");
+            return;
+        }
 
+        kp_p_ = kp_p;
+        kp_v_ = kp_v;
+        kp_a_ = kp_a;
+        kp_q_ = kp_q;
+        kp_w_ = kp_w;
+        kd_p_ = kd_p;
+        kd_v_ = kd_v;
+        kd_a_ = kd_a;
+        kd_q_ = kd_q;
+        kd_w_ = kd_w;
         limit_err_p_ = config.limit_err_p;
-		limit_err_v_ = config.limit_err_v;
-		limit_err_a_ = config.limit_err_a;
-		limit_d_err_p_ = config.limit_d_err_p;
-		limit_d_err_v_ = config.limit_d_err_v;
-		limit_d_err_a_ = config.limit_d_err_a;
+        limit_err_v_ = config.limit_err_v;
+        limit_err_a_ = config.limit_err_a;
+        limit_d_err_p_ = config.limit_d_err_p;
+        limit_d_err_v_ = config.limit_d_err_v;
+        limit_d_err_a_ = config.limit_d_err_a;
         
-        se3_controller_.setup(kp_p_, kp_v_, kp_a_, kp_q_, kp_w_,
-                                kd_p_, kd_v_, kd_a_, kd_q_, kd_w_,
-                                limit_err_p_, limit_err_v_, limit_err_a_,
-                                limit_d_err_p_, limit_d_err_v_, limit_d_err_a_);
-
-        ki_pz_ = config.ki_pz;
-        int_limit_z_ = config.int_limit_z;
+        ki_pz_ = std::isfinite(config.ki_pz) ? config.ki_pz : 0.0;
+        int_limit_z_ =
+            std::isfinite(config.int_limit_z) && config.int_limit_z >= 0.0
+                ? config.int_limit_z
+                : 0.0;
         se3_controller_.setIntegral(Eigen::Vector3d(0.0, 0.0, ki_pz_), int_limit_z_);
+        se3_controller_.resetIntegral();
         ROS_INFO("integral: ki_pz=%f int_limit_z=%f", ki_pz_, int_limit_z_);
 
         printf("\n");
@@ -131,16 +160,18 @@ public:
 
     void trigger_offboard()
     {
-        if (!(sim_enable_ && auto_request_offboard_)) {
+        if (!(sim_enable_ && auto_request_offboard_) || !hasFreshState()) {
             return;
         }
 
         mavros_msgs::SetMode offb_set_mode;
         offb_set_mode.request.custom_mode = "OFFBOARD";
-        if (currState_.mode != "OFFBOARD" && !offboard_triggered_) {
-            cout <<"check1: " <<currState_.mode <<endl;
+        const ros::Time now = ros::Time::now();
+        if (currState_.mode != "OFFBOARD" &&
+            (last_offboard_request_.isZero() ||
+             (now - last_offboard_request_).toSec() >= 1.0)) {
+            last_offboard_request_ = now;
             if (set_mode_client_.call(offb_set_mode) && offb_set_mode.response.mode_sent) {
-                offboard_triggered_ = true;
                 ROS_INFO("Offboard enabled");
             }
         }
@@ -148,15 +179,18 @@ public:
 
     void trigger_arm()
     {
-        if (!(sim_enable_ && auto_request_arm_)) {
+        if (!(sim_enable_ && auto_request_arm_) || !hasFreshState()) {
             return;
         }
 
         arm_cmd.request.value = true;
         if( currState_.mode == "OFFBOARD"){
-            if( !currState_.armed && !arm_triggered_){
+            const ros::Time now = ros::Time::now();
+            if(!currState_.armed &&
+               (last_arm_request_.isZero() ||
+                (now - last_arm_request_).toSec() >= 1.0)){
+                last_arm_request_ = now;
                 if( arming_client_.call(arm_cmd) &&arm_cmd.response.success){
-                    arm_triggered_ = true;
                     ROS_INFO("Vehicle armed");
                 }
             }

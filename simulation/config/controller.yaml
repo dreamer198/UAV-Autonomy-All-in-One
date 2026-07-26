@@ -1,4 +1,5 @@
-# PX4 SITL iris_mid360 的机体标定。Planner 参数统一维护在
+# PX4 SITL iris_mid360 专用的 SE3 控制与安全参数。这里不定义质量、
+# 惯量、电机模型或 PX4 内环参数。Planner 参数统一维护在
 # sim2real_common/config/planner.yaml，不放在本文件中。
 
 # 启用仿真专用控制路径。公共 controller.yaml 仍禁止自动 OFFBOARD 和解锁，
@@ -6,7 +7,8 @@
 # ./launch/sim.sh arm；脚本完成 PX4 原生起飞后才自动交接到 OFFBOARD。
 enable_sim: true
 
-# 模拟 Iris 抵消重力、保持悬停所需的归一化总推力；这是最主要的机体标定值。
+# 模拟 Iris 抵消重力、保持悬停所需的归一化总推力；这是本文件中
+# 最主要、确实需要按载体调整的标定值。
 hover_percent: 0.755
 
 # 在线推力估计允许的最大悬停推力。公共配置关闭了推力估计，当前不会在线调整。
