@@ -1,0 +1,116 @@
+<launch>
+  <!--
+    Kinodynamic 模式的总入口。建议先从本文件理解节点连接关系，再进入各节点源码：
+      simulator.xml -> odom / depth / camera_pose
+      RViz 2D Nav Goal -> waypoint_generator -> fast_planner_node
+      fast_planner_node -> planning/bspline -> traj_server -> planning/pos_cmd -> SO3 controller
+
+    本文件只保存一次“场景级”配置，再通过 include/arg 把地图尺寸、odom 和动力学上限
+    传给算法与仿真两个子 launch，避免同一参数在两边出现不一致。
+  -->
+
+  <!-- 地图以 world 原点附近为中心；实际应用应按飞行空间修改三个方向的物理尺寸（单位 m）。 -->
+  <arg name="map_size_x" value="40.0"/>
+  <arg name="map_size_y" value="20.0"/>
+  <arg name="map_size_z" value=" 5.0"/>
+
+  <!-- 全系统共用的状态估计 topic。实机可替换为 VIO/LIO odom，仿真中由扰动节点发布。 -->
+  <arg name="odom_topic" value="/state_ukf/odom" />
+
+  <!-- 启动规划节点，并把本层参数显式传入无默认值的 kino_algorithm.xml 参数。 -->
+  <include file="$(find plan_manage)/launch/kino_algorithm.xml">
+
+    <!-- 子文件参数名末尾带下划线，仅用于和本文件同名参数区分，不代表单位或私有变量。 -->
+    <arg name="map_size_x_" value="$(arg map_size_x)"/>
+    <arg name="map_size_y_" value="$(arg map_size_y)"/>
+    <arg name="map_size_z_" value="$(arg map_size_z)"/>
+    <arg name="odometry_topic" value="$(arg odom_topic)"/>
+
+    <!--
+      深度输入路径：camera_pose 是相机坐标系在 world 中的位姿，depth 默认按 640x480 处理；
+      SDFMap 用时间同步后的 pose+depth 将像素反投影到世界坐标。pose_type=1 时使用这一路。
+    -->
+    <arg name="camera_pose_topic" value="/pcl_render_node/camera_pose"/>
+    <arg name="depth_topic" value="/pcl_render_node/depth"/>
+
+    <!--
+      另一条可选输入路径是世界系点云（例如 LiDAR）。SDFMap 同时注册点云订阅，但通常只让
+      depth+pose 或 cloud 中一路真正有数据，防止同一观测被重复融合。当前仿真主要使用上面的深度路径。
+    -->
+    <arg name="cloud_topic" value="/pcl_render_node/cloud"/>
+
+    <!-- 针孔模型内参，必须和 simulator.xml 加载的 camera.yaml 保持一致。 -->
+    <arg name="cx" value="321.04638671875"/>
+    <arg name="cy" value="243.44969177246094"/>
+    <arg name="fx" value="387.229248046875"/>
+    <arg name="fy" value="387.229248046875"/>
+
+    <!-- 统一传给前端搜索、后端优化和 B-spline 可行性检查的速度/加速度上限。 -->
+    <arg name="max_vel" value="3.0" />
+    <arg name="max_acc" value="2.0" />
+
+    <!-- 1：使用 RViz 的 2D Nav Goal；2：依次使用下面的预设航点。 -->
+    <arg name="flight_type" value="1" />
+    
+    <!-- flight_type=2 时，每次收到触发消息便取下一个航点，到末尾后循环。 -->
+    <arg name="point_num" value="2" />
+
+    <arg name="point0_x" value="19.0" />
+    <arg name="point0_y" value="0.0" />
+    <arg name="point0_z" value="1.0" />
+
+    <!-- 增加航点时还需同步增大 point_num，并在 kino_algorithm.xml 中声明/转发相应参数。 -->
+    <arg name="point1_x" value="-19.0" />
+    <arg name="point1_y" value="0.0" />
+    <arg name="point1_z" value="1.0" />
+
+    <arg name="point2_x" value="0.0" />
+    <arg name="point2_y" value="19.0" />
+    <arg name="point2_z" value="1.0" />
+    
+  </include>
+
+  <!--
+    轨迹执行层：接收 planning/bspline，按 ROS 时间以 100 Hz 采样，并发布 PositionCommand。
+    它不做搜索或避障；重规划通知只会让旧轨迹尽快停止，随后等待新 B-spline 覆盖缓存。
+  -->
+  <node pkg="plan_manage" name="traj_server" type="traj_server" output="screen">
+    <!-- traj_server 源码发布绝对名 /position_cmd，这里接到控制器实际监听的 /planning/pos_cmd。 -->
+    <remap from="/position_cmd" to="planning/pos_cmd"/>
+
+    <!-- 仅用于记录/可视化真实轨迹，不参与 B-spline 时间采样。 -->
+    <remap from="/odom_world" to="$(arg odom_topic)"/>
+    <!--
+      当前 traj_server 会读取但不使用该参数；源码另算了硬编码 2.0 s 的前视点，
+      也只供已经注释停用的 yaw 方案使用，因此不影响现行控制输出。
+    -->
+    <param name="traj_server/time_forward" value="1.5" type="double"/>
+  </node>
+
+  <!--
+    目标适配层：把 RViz PoseStamped 转为 FSM 订阅的 nav_msgs/Path。
+    这里使用私有 topic（~）remap；节点最终发布 /waypoint_generator/waypoints。
+  -->
+  <node pkg="waypoint_generator" name="waypoint_generator" type="waypoint_generator" output="screen">
+    <remap from="~odom" to="$(arg odom_topic)"/>        
+    <remap from="~goal" to="/move_base_simple/goal"/>
+    <remap from="~traj_start_trigger" to="/traj_start_trigger" />
+    <!-- 单点模式下每次 goal 立即发布；kino FSM 最终会把手动目标高度固定为 1.0 m。 -->
+    <param name="waypoint_type" value="manual-lonely-waypoint"/>    
+  </node>
+
+  <!--
+    启动随机地图、深度传感器、四旋翼动力学和 SO3 控制闭环。
+    c_num/p_num 分别控制圆环障碍和柱状障碍数量；地图尺寸和 odom 名称继续沿用本层配置。
+  -->
+  <include file="$(find plan_manage)/launch/simulator.xml">
+    <arg name="map_size_x_" value="$(arg map_size_x)"/>
+    <arg name="map_size_y_" value="$(arg map_size_y)"/>
+    <arg name="map_size_z_" value="$(arg map_size_z)"/>
+    <arg name="c_num" value="10"/>
+    <arg name="p_num" value="150"/>
+
+    <arg name="odometry_topic" value="$(arg odom_topic)" />
+  </include>
+
+</launch>

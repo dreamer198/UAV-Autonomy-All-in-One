@@ -27,7 +27,12 @@ def localization_fault_reason(value):
 
 
 def odometry_sanity_reason(message, previous_position, max_speed, max_jump):
-    """Reject values that cannot represent the configured vehicle motion."""
+    """Reject malformed values and discontinuous localization positions.
+
+    ``max_speed`` is an optional diagnostic ceiling. A value of zero disables
+    it because a vehicle's valid speed is a planner/airframe capability, not a
+    localization-interface invariant.
+    """
     pose = message.pose.pose
     twist = message.twist.twist
     position = (pose.position.x, pose.position.y, pose.position.z)
@@ -49,7 +54,7 @@ def odometry_sanity_reason(message, previous_position, max_speed, max_jump):
         return "localization odometry contains an invalid orientation"
 
     speed = math.sqrt(sum(value * value for value in velocity))
-    if speed > max_speed:
+    if max_speed > 0.0 and speed > max_speed:
         return (
             "localization odometry reports implausible speed "
             "{:.2f} m/s (limit {:.2f} m/s)"
@@ -128,7 +133,11 @@ class LocalizationGuard:
         self.timestamp_future_tolerance = float(
             rospy.get_param("~timestamp_future_tolerance", 0.1)
         )
-        self.max_speed = float(rospy.get_param("~max_speed", 3.0))
+        # Disabled by default: normal finite vehicle velocity must not latch a
+        # localization fault merely because it exceeds an arbitrary framework
+        # constant. Deployments may opt into a sensor-specific gross-error
+        # ceiling by setting a positive value.
+        self.max_speed = float(rospy.get_param("~max_speed", 0.0))
         self.max_jump = float(rospy.get_param("~max_jump", 2.0))
         self.odometry_topic = rospy.get_param(
             "~odometry_topic", "/localization/odom"
@@ -140,11 +149,12 @@ class LocalizationGuard:
             ("state_timeout", self.state_timeout),
             ("timestamp_max_age", self.timestamp_max_age),
             ("timestamp_future_tolerance", self.timestamp_future_tolerance),
-            ("max_speed", self.max_speed),
             ("max_jump", self.max_jump),
         ):
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError("~{} must be finite and positive".format(name))
+        if not math.isfinite(self.max_speed) or self.max_speed < 0.0:
+            raise ValueError("~max_speed must be finite and non-negative")
 
         self.state = None
         self.state_received_at = 0.0
@@ -184,12 +194,17 @@ class LocalizationGuard:
                 self.fault_reason,
             )
         else:
+            speed_policy = (
+                "{:.2f} m/s".format(self.max_speed)
+                if self.max_speed > 0.0
+                else "disabled"
+            )
             rospy.loginfo(
                 "Localization guard active: odom timeout=%.2f s, "
-                "startup timeout=%.2f s, max speed=%.2f m/s, max jump=%.2f m.",
+                "startup timeout=%.2f s, speed ceiling=%s, max jump=%.2f m.",
                 self.odom_timeout,
                 self.startup_timeout,
-                self.max_speed,
+                speed_policy,
                 self.max_jump,
             )
 

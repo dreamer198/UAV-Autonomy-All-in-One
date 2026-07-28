@@ -1,0 +1,84 @@
+<launch>
+  <arg name="backend_id" default="fast-kino"/>
+  <arg name="backend_namespace" default="fast_kino"/>
+  <arg name="planner" default="1"/>
+  <arg name="profile" default="local"/>
+  <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
+  <arg name="base_config" default="$(find sim2real_fast_adapter)/config/base.yaml"/>
+  <arg name="profile_config" default="$(find sim2real_fast_adapter)/config/$(arg profile).yaml"/>
+  <arg name="odom_topic" default="/localization/odom"/>
+  <arg name="cloud_topic" default="/localization/cloud_registered"/>
+
+  <group ns="/planning/backends/$(arg backend_namespace)">
+    <node pkg="plan_manage" name="planner" type="fast_planner_node"
+          output="screen" required="true">
+      <rosparam command="load" file="$(arg base_config)"/>
+      <rosparam command="load" file="$(arg profile_config)"/>
+      <param name="planner_node/planner" value="$(arg planner)" type="int"/>
+      <param name="manager/use_kinodynamic_path"
+             value="$(eval int(arg('planner')) == 1)" type="bool"/>
+      <param name="manager/use_topo_path"
+             value="$(eval int(arg('planner')) == 2)" type="bool"/>
+
+      <remap from="/planning/fast_goal"
+             to="/planning/backends/$(arg backend_namespace)/native/goal"/>
+      <remap from="/planning/bspline"
+             to="/planning/backends/$(arg backend_namespace)/native/bspline"/>
+      <remap from="/planning/replan"
+             to="/planning/backends/$(arg backend_namespace)/native/replan"/>
+      <remap from="/planning/new"
+             to="/planning/backends/$(arg backend_namespace)/native/new"/>
+      <remap from="/planning/heartbeat"
+             to="/planning/backends/$(arg backend_namespace)/native/heartbeat"/>
+      <remap from="/planning/progress"
+             to="/planning/backends/$(arg backend_namespace)/native/progress"/>
+      <remap from="/odom_world"
+             to="/planning/backends/$(arg backend_namespace)/native/odom_world"/>
+      <remap from="/sdf_map/odom"
+             to="/planning/backends/$(arg backend_namespace)/native/odom_world"/>
+      <remap from="/sdf_map/cloud"
+             to="/planning/backends/$(arg backend_namespace)/native/cloud_world"/>
+      <remap from="/sdf_map/depth"
+             to="/planning/backends/$(arg backend_namespace)/native/unused_depth"/>
+      <remap from="/sdf_map/pose"
+             to="/planning/backends/$(arg backend_namespace)/native/unused_pose"/>
+      <!-- Native map/marker semantics remain backend debug data. Only the
+           common planner_visualization node may publish stable RViz topics. -->
+      <remap from="/sdf_map/occupancy"
+             to="/planning/viz/backend/internal_inflated_occupancy"/>
+      <remap from="/sdf_map/occupancy_inflate"
+             to="/planning/viz/raw/inflated_occupancy"/>
+      <remap from="/sdf_map/esdf" to="/planning/viz/backend/esdf"/>
+      <remap from="/sdf_map/update_range"
+             to="/planning/viz/backend/update_range"/>
+      <remap from="/planning_vis/trajectory"
+             to="/planning/viz/backend/trajectory"/>
+      <!-- The upstream topo marker has no active draw call. Keep its dormant
+           publisher plugin-private instead of exposing a dead public topic. -->
+      <remap from="/planning_vis/topo_path"
+             to="/planning/backends/$(arg backend_namespace)/viz/topo_path"/>
+      <remap from="/planning_vis/prediction"
+             to="/planning/viz/backend/prediction"/>
+      <remap from="/planning_vis/visib_constraint"
+             to="/planning/viz/backend/visibility"/>
+      <remap from="/planning_vis/frontier"
+             to="/planning/viz/backend/frontier"/>
+      <remap from="/planning_vis/yaw" to="/planning/viz/backend/yaw"/>
+      <remap from="/sdf_map/unknown" to="/planning/viz/backend/unknown"/>
+    </node>
+
+    <node pkg="sim2real_fast_adapter" name="adapter"
+          type="fast_backend_adapter_node" output="screen" required="true">
+      <rosparam command="load" file="$(arg base_config)"/>
+      <rosparam command="load" file="$(arg profile_config)"/>
+      <param name="backend_id" value="$(arg backend_id)"/>
+      <param name="backend_namespace" value="$(arg backend_namespace)"/>
+      <param name="planner" value="$(arg planner)" type="int"/>
+      <param name="profile" value="$(arg profile)"/>
+      <param name="runtime_mode" value="$(arg runtime_mode)"/>
+      <param name="odom_topic" value="$(arg odom_topic)"/>
+      <param name="cloud_topic" value="$(arg cloud_topic)"/>
+      <remap from="viz/occupancy" to="/planning/viz/raw/occupancy"/>
+    </node>
+  </group>
+</launch>

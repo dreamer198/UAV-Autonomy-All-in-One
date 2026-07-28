@@ -1,14 +1,17 @@
 FROM ros:noetic-ros-base-focal
 
-LABEL org.opencontainers.image.title="UAV Autonomy All-in-One real-flight runtime"
+LABEL org.opencontainers.image.title="UAV Autonomy All-in-One real-flight runtime" \
+      io.sim2real.planner-workspaces="v1"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     ROS_DISTRO=noetic \
-    ROS_EDITION=ROS1
+    ROS_EDITION=ROS1 \
+    SIM2REAL_RUNTIME_MODE=real
 
 SHELL ["/bin/bash", "-lc"]
 
 ARG UBUNTU_PORTS_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
+ARG NLOPT_DEBIAN_VERSION=2.6.1-8ubuntu2
 
 RUN sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" /etc/apt/sources.list \
  && apt-get -o Acquire::Retries=5 update \
@@ -24,6 +27,8 @@ RUN sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" /et
     libeigen3-dev \
     libgflags-dev \
     libgoogle-glog-dev \
+    libnlopt-cxx-dev="${NLOPT_DEBIAN_VERSION}" \
+    libnlopt-dev="${NLOPT_DEBIAN_VERSION}" \
     libopencv-dev \
     libpcl-dev \
     net-tools \
@@ -34,6 +39,7 @@ RUN sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" /et
     python3-osrf-pycommon \
     python3-pip \
     python3-rosdep \
+    python3-yaml \
     ros-noetic-cv-bridge \
     ros-noetic-ddynamic-reconfigure \
     ros-noetic-eigen-conversions \
@@ -56,10 +62,11 @@ RUN /opt/ros/noetic/lib/mavros/install_geographiclib_datasets.sh
 WORKDIR /root
 
 RUN mkdir -p \
+    /opt/uav-autonomy-aio \
     /root/code \
     /root/flight_bags \
     /root/livox_ws/src \
-    /root/catkin_ws/src
+    /root/localization_ws/src
 
 COPY deployment/docker/root.bashrc /root/.bashrc
 COPY deployment/docker/livox_ros_driver2.package.ros1.xml /tmp/livox_ros_driver2.package.xml
@@ -67,10 +74,13 @@ COPY deployment/docker/patch_fastlio_for_livox_ros_driver2.sh /tmp/patch_fastlio
 
 COPY third_party/Livox-SDK2 /tmp/src/Livox-SDK2
 COPY third_party/livox_ros_driver2 /root/livox_ws/src/livox_ros_driver2
-COPY third_party/FAST_LIO /root/catkin_ws/src/FAST_LIO
-COPY third_party/Diff-Planner-PX4 /root/catkin_ws/src/Diff-Planner-PX4
-COPY common /root/catkin_ws/src/sim2real_common
-COPY deployment/ros_pkgs/sim2real_deployment /root/catkin_ws/src/sim2real_deployment
+COPY third_party/FAST_LIO /root/localization_ws/src/FAST_LIO
+COPY third_party/Diff-Planner-PX4 /opt/uav-autonomy-aio/third_party/Diff-Planner-PX4
+COPY third_party/Fast-Planner /opt/uav-autonomy-aio/third_party/Fast-Planner
+COPY common /opt/uav-autonomy-aio/common
+COPY simulation/ros_pkgs /opt/uav-autonomy-aio/simulation/ros_pkgs
+COPY deployment/ros_pkgs /opt/uav-autonomy-aio/deployment/ros_pkgs
+COPY planning /opt/uav-autonomy-aio/planning
 
 COPY deployment/config/rviz/jetson_real_stack.rviz /root/jetson_real_stack.rviz
 COPY deployment/config/livox/MID360s_config.json /root/livox_ws/src/livox_ros_driver2/config/MID360s_config.json
@@ -78,10 +88,11 @@ COPY deployment/config/controller.yaml /root/deployment/controller.yaml
 
 RUN chmod +x \
     /tmp/patch_fastlio_for_livox_ros_driver2.sh \
-    /root/catkin_ws/src/sim2real_common/scripts/*.py \
-    /root/catkin_ws/src/sim2real_deployment/scripts/*.py \
+    /opt/uav-autonomy-aio/planning/scripts/*.sh \
+    /opt/uav-autonomy-aio/common/scripts/*.py \
+    /opt/uav-autonomy-aio/deployment/ros_pkgs/sim2real_deployment/scripts/*.py \
  && cp /tmp/livox_ros_driver2.package.xml /root/livox_ws/src/livox_ros_driver2/package.xml \
- && /tmp/patch_fastlio_for_livox_ros_driver2.sh /root/catkin_ws/src/FAST_LIO
+ && /tmp/patch_fastlio_for_livox_ros_driver2.sh /root/localization_ws/src/FAST_LIO
 
 RUN source /opt/ros/noetic/setup.bash \
  && echo "Skip rosdep install: real-flight dependencies are installed explicitly with apt."
@@ -102,11 +113,22 @@ RUN source /opt/ros/noetic/setup.bash \
 
 RUN source /opt/ros/noetic/setup.bash \
  && source /root/livox_ws/devel/setup.bash \
- && cd /root/catkin_ws \
+ && cd /root/localization_ws \
  && catkin init \
  && catkin config --extend /root/livox_ws/devel --cmake-args -DCMAKE_BUILD_TYPE=Release \
- && catkin build quadrotor_msgs pose_utils traj_utils sim2real_common sim2real_deployment \
  && catkin build
+
+# Build public/control, Diff, and Fast in independent catkin domains. Only the
+# interface and control setup files are sourced by /root/.bashrc at runtime.
+RUN /opt/uav-autonomy-aio/planning/scripts/build_planner_workspaces.sh \
+      --project-root /opt/uav-autonomy-aio \
+      --workspace-root /opt/uav-autonomy-aio/planning/workspaces \
+      --underlay /root/localization_ws/devel \
+      --flavor deployment \
+      --jobs "$(nproc)" \
+ && mkdir -p /root/catkin_ws/devel \
+ && ln -s /opt/uav-autonomy-aio/planning/workspaces/control_ws/devel/setup.bash \
+      /root/catkin_ws/devel/setup.bash
 
 WORKDIR /root
 

@@ -1,18 +1,24 @@
 <launch>
   <arg name="drone_id" default="0"/>
   <arg name="vehicle_config"/>
-  <arg name="planner_config" default="$(find sim2real_common)/config/planner.yaml"/>
+  <arg name="planner_id" default="$(optenv SIM2REAL_PLANNER diff)"/>
+  <arg name="planner_profile" default="$(optenv SIM2REAL_PLANNER_PROFILE local)"/>
+  <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
+  <arg name="repository_root"
+       default="$(optenv SIM2REAL_REPOSITORY_ROOT $(find sim2real_common)/..)"/>
+  <arg name="manifest_root" default="$(arg repository_root)/planning/plugins"/>
   <arg name="odom_topic" default="/localization/odom"/>
   <arg name="cloud_topic" default="/localization/cloud_registered"/>
 
   <include file="$(find sim2real_common)/launch/planner.launch">
     <arg name="drone_id" value="$(arg drone_id)"/>
-    <arg name="planner_config" value="$(arg planner_config)"/>
+    <arg name="planner_id" value="$(arg planner_id)"/>
+    <arg name="planner_profile" value="$(arg planner_profile)"/>
+    <arg name="runtime_mode" value="$(arg runtime_mode)"/>
+    <arg name="repository_root" value="$(arg repository_root)"/>
+    <arg name="manifest_root" value="$(arg manifest_root)"/>
     <arg name="odom_topic" value="$(arg odom_topic)"/>
     <arg name="cloud_topic" value="$(arg cloud_topic)"/>
-  </include>
-  <include file="$(find sim2real_common)/launch/trajectory_converter.launch">
-    <arg name="drone_id" value="$(arg drone_id)"/>
   </include>
   <include file="$(find sim2real_common)/launch/controller.launch">
     <arg name="vehicle_config" value="$(arg vehicle_config)"/>

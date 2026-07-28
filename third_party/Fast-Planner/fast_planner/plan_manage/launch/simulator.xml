@@ -1,0 +1,142 @@
+<launch>
+  <!--
+    Fast-Planner 的闭环仿真环境。节点链路如下：
+      random_forest -> global_cloud -> pcl_render_node -> depth + camera_pose
+      traj_server /planning/pos_cmd -> so3_control -> so3_cmd -> quadrotor simulator
+      simulator /visual_slam/odom -> disturbance_generator -> /state_ukf/odom
+      /state_ukf/odom 再反馈给规划、控制、目标生成和传感器仿真。
+
+    本文件由 kino_replan.launch include，map_size_*、障碍数量和 odometry_topic 由上层传入。
+  -->
+
+  <!-- 动力学仿真的初始位置；地图生成也用 x/y 避开出生点附近的障碍。 -->
+  <arg name="init_x" value="-19.0"/>
+  <arg name="init_y" value="-0.0"/>
+  <arg name="init_z" value="1.0"/> 
+  <!-- obj_num 是旧版动态物体接口遗留参数，本文件当前没有消费它。 -->
+  <arg name="obj_num" value="1" />
+  <!-- 无默认值参数必须由 include 方提供：地图尺寸、圆环数、柱体数和系统 odom topic。 -->
+  <arg name="map_size_x_"/>
+  <arg name="map_size_y_"/>
+  <arg name="map_size_z_"/>
+  <arg name="c_num"/>
+  <arg name="p_num"/>
+  <arg name="odometry_topic"/>
+
+  <!--
+    随机静态地图：生成柱体和圆环的稠密点云，发布 /map_generator/global_cloud。
+    当前 pubSensedPoints() 在全图发布后直接 return；odom 只被缓存，后面的局部裁剪代码未执行。
+  -->
+  <node pkg ="map_generator" name ="random_forest" type ="random_forest" output = "screen">    
+    <remap from="~odometry"   to="$(arg odometry_topic)"/>    
+    <param name="init_state_x"   value="$(arg init_x)"/>
+    <param name="init_state_y"   value="$(arg init_y)"/>
+    <param name="map/x_size"     value="$(arg map_size_x_)" />
+    <param name="map/y_size"     value="$(arg map_size_y_)" />
+    <param name="map/z_size"     value="$(arg map_size_z_)" />
+    <param name="map/resolution" value="0.1"/>        
+
+    <!-- seed 是旧配置遗留项，当前 random_forest_sensing.cpp 未读取；p_num 是柱状障碍数量。 -->
+    <param name="ObstacleShape/seed" value="-1"/>
+    <param name="map/obs_num"    value="$(arg p_num)"/>
+    <param name="ObstacleShape/lower_rad" value="0.5"/>
+    <param name="ObstacleShape/upper_rad" value="0.7"/>
+    <param name="ObstacleShape/lower_hei" value="0.0"/>
+    <param name="ObstacleShape/upper_hei" value="3.0"/>        
+
+    <!-- 圆环障碍数量及其半径、高度、倾角参数范围。 -->
+    <param name="map/circle_num" value="$(arg c_num)"/>        
+    <param name="ObstacleShape/radius_l" value="0.7"/>        
+    <param name="ObstacleShape/radius_h" value="0.5"/>        
+    <param name="ObstacleShape/z_l" value="0.7"/>        
+    <param name="ObstacleShape/z_h" value="0.8"/>        
+    <param name="ObstacleShape/theta" value="0.5"/>        
+
+  <!-- 局部感知半径（m）与局部点云发布频率（Hz）。 -->
+  <param name="sensing/radius" value="5.0"/>
+  <param name="sensing/rate"   value="10.0"/>
+  </node>
+
+  <!--
+    四旋翼刚体动力学：订阅 so3_cmd 与外力/力矩扰动，积分状态后发布原始
+    /visual_slam/odom。这里的 odom 频率高于规划频率，供控制与状态扰动节点使用。
+  -->
+  <node pkg="so3_quadrotor_simulator" type="quadrotor_simulator_so3" name="quadrotor_simulator_so3" output="screen">
+        <param name="rate/odom" value="200.0"/>
+        <param name="simulator/init_state_x" value="$(arg init_x)"/>
+        <param name="simulator/init_state_y" value="$(arg init_y)"/>
+        <param name="simulator/init_state_z" value="$(arg init_z)"/>
+
+        <remap from="~odom" to="/visual_slam/odom"/>
+        <remap from="~cmd" to="so3_cmd"/>
+        <remap from="~force_disturbance" to="force_disturbance"/>    
+        <remap from="~moment_disturbance" to="moment_disturbance"/>        
+  </node>
+ 
+  <!--
+    位置到姿态/推力控制器：读取 traj_server 的 PositionCommand 和估计 odom，发布 SO3Command。
+    required=true 表示控制 nodelet 退出时 roslaunch 终止整套仿真，避免无控制器继续积分。
+  -->
+  <node pkg="nodelet" type="nodelet" args="standalone so3_control/SO3ControlNodelet" name="so3_control" required="true" output="screen">
+        <remap from="~odom" to="/state_ukf/odom"/>
+        <remap from="~position_cmd" to="/planning/pos_cmd"/>
+        <remap from="~motors" to="motors"/>
+        <remap from="~corrections" to="corrections"/>
+        <remap from="~so3_cmd" to="so3_cmd"/>
+        <!-- 先加载默认 Hummingbird 增益/修正，再用下面的 mass 和姿态增益覆盖指定项。 -->
+        <rosparam file="$(find so3_control)/config/gains_hummingbird.yaml"/>
+        <rosparam file="$(find so3_control)/config/corrections_hummingbird.yaml"/>
+        <param name="mass" value="0.74"/>
+        <param name="use_angle_corrections " value="false"/>
+        <param name="use_external_yaw "      value="false"/>
+        <!--
+          上面两个参数名末尾实际含空格；控制器也没有读取 use_angle_corrections，并按无空格名称
+          查询 use_external_yaw，所以这两行不会产生预期覆盖。保留原配置以忠实说明现有行为。
+        -->
+        <param name="gains/rot/z" value="1.0"/>    
+        <param name="gains/ang/z" value="0.1"/>        
+  </node>  
+ 
+  <!--
+    状态与扰动适配层：输入动力学真值 /visual_slam/odom，输出可配置噪声/漂移后的
+    /state_ukf/odom，同时把动态重配置给出的外力/力矩扰动反馈给动力学节点。
+  -->
+  <node pkg="so3_disturbance_generator" name="so3_disturbance_generator" type="so3_disturbance_generator" output="screen">
+        <remap from="~odom" to="/visual_slam/odom"/>             
+        <remap from="~noisy_odom" to="/state_ukf/odom"/>          
+        <remap from="~correction" to="/visual_slam/correction"/>   
+        <remap from="~force_disturbance" to="force_disturbance"/>        
+        <remap from="~moment_disturbance" to="moment_disturbance"/>            
+  </node> 
+ 
+  <!-- RViz 中显示原始动力学真值轨迹；颜色 RGBA 和模型缩放只影响可视化。 -->
+  <node pkg="odom_visualization" name="odom_visualization" type="odom_visualization" output="screen">
+        <remap from="~odom" to="/visual_slam/odom"/>
+        <param name="color/a" value="1.0"/>    
+        <param name="color/r" value="0.0"/>        
+        <param name="color/g" value="0.0"/>        
+        <param name="color/b" value="1.0"/>       
+        <param name="covariance_scale" value="100.0"/>       
+        <param name="robot_scale" value="1.0"/>
+  </node>
+
+  <!--
+    深度传感器仿真：把全局地图点云和估计 odom 投影为相机深度图，并发布
+    /pcl_render_node/depth 与 /pcl_render_node/camera_pose，恰好接入 kino_algorithm.xml。
+  -->
+  <node pkg="local_sensing_node" type="pcl_render_node" name="pcl_render_node" output="screen">
+        <!-- camera.yaml 中的分辨率/内参应和上层传给 SDFMap 的 cx、cy、fx、fy 一致。 -->
+        <rosparam command="load" file="$(find local_sensing_node)/params/camera.yaml" />
+        <param name="sensing_horizon"  value="5.0" />
+        <param name="sensing_rate"     value="30.0"/>
+        <param name="estimation_rate"  value="30.0"/>
+
+        <param name="map/x_size"     value="$(arg map_size_x_)"/>
+        <param name="map/y_size"     value="$(arg map_size_y_)"/>
+        <param name="map/z_size"     value="$(arg map_size_z_)"/>
+
+        <remap from="~global_map" to="/map_generator/global_cloud"/>
+        <remap from="~odometry"   to="$(arg odometry_topic)"/>
+  </node>
+
+</launch>

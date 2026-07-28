@@ -7,15 +7,18 @@ ARG PX4_COMMIT=1dacb4cdef2d7145754fc788fa8dc482eed74b40
 ARG MID360_REPOSITORY=https://github.com/Tfly6/Mid360_px4_sim_plugin.git
 ARG MID360_COMMIT=44bcd80e0edf6e797edd004cd5bb2bb8fcfd9d18
 ARG BUILD_JOBS=4
+ARG NLOPT_DEBIAN_VERSION=2.6.1-8ubuntu2
 
 LABEL org.opencontainers.image.title="UAV Autonomy All-in-One simulation" \
       io.diff-planner.simulation.px4-commit="$PX4_COMMIT" \
-      io.diff-planner.simulation.mid360-commit="$MID360_COMMIT"
+      io.diff-planner.simulation.mid360-commit="$MID360_COMMIT" \
+      io.sim2real.planner-workspaces="v1"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     ROS_DISTRO=noetic \
     PX4_DIR=/opt/PX4-Autopilot \
     SIMULATION_WS=/opt/simulation_ws \
+    SIM2REAL_RUNTIME_MODE=simulation \
     PYTHONDONTWRITEBYTECODE=1
 
 SHELL ["/bin/bash", "-lc"]
@@ -45,6 +48,8 @@ RUN apt-get -o Acquire::Retries=5 update \
     libgoogle-glog-dev \
     libgstreamer-plugins-base1.0-dev \
     libgstreamer1.0-dev \
+    libnlopt-cxx-dev="${NLOPT_DEBIAN_VERSION}" \
+    libnlopt-dev="${NLOPT_DEBIAN_VERSION}" \
     libopencv-dev \
     libpcl-dev \
     libprotobuf-dev \
@@ -63,6 +68,7 @@ RUN apt-get -o Acquire::Retries=5 update \
     python3-rosdep \
     python3-setuptools \
     python3-wheel \
+    python3-yaml \
     rsync \
     ros-noetic-cv-bridge \
     ros-noetic-ddynamic-reconfigure \
@@ -87,9 +93,10 @@ RUN apt-get -o Acquire::Retries=5 update \
     zip \
  && rm -rf /var/lib/apt/lists/*
 
-# PX4 v1.14's generator imports the Empy 3 API. Installing this explicitly
-# prevents a future Empy 4 release from breaking an otherwise pinned build.
-RUN python3 -m pip install --no-cache-dir "empy==3.3.4"
+# PX4 v1.14 and ROS Noetic generators both use the Empy 3 API. 3.3.2 is the
+# Focal/Noetic version; 3.3.4 breaks gencpp by shadowing its len() template
+# helper, while Empy 4 removes the API entirely.
+RUN python3 -m pip install --no-cache-dir "empy==3.3.2"
 
 RUN git clone --branch "$PX4_TAG" --depth 1 "$PX4_REPOSITORY" "$PX4_DIR" \
  && test "$(git -C "$PX4_DIR" rev-parse HEAD)" = "$PX4_COMMIT" \

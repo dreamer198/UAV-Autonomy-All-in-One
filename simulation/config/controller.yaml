@@ -1,6 +1,6 @@
 # PX4 SITL iris_mid360 专用的 SE3 控制与安全参数。这里不定义质量、
 # 惯量、电机模型或 PX4 内环参数。Planner 参数统一维护在
-# sim2real_common/config/planner.yaml，不放在本文件中。
+# 规划与地图参数属于所选插件，不放在本文件中。
 
 # 启用仿真专用控制路径。公共 controller.yaml 仍禁止自动 OFFBOARD 和解锁，
 # 并以 odom_timeout=0.2 s 判断 MAVROS 里程计是否新鲜。必须显式执行

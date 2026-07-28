@@ -30,7 +30,7 @@ class ShellSafetyContractsTest(unittest.TestCase):
         for source in (sim, real):
             self.assertIn("Only one vehicle is supported", source)
             self.assertIn("--drone-id 0", source)
-            self.assertIn("drone_id:=0", source)
+            self.assertIn("planner_gateway.launch", source)
         self.assertIn("DRONE_ID=0", real)
         self.assertNotIn("/drone_${DRONE_ID}_planning", sim)
         self.assertNotIn("/drone_${DRONE_ID}_planning", real)
@@ -211,6 +211,25 @@ class ShellSafetyContractsTest(unittest.TestCase):
             sim.index("    restart)") : sim.index("    recreate)")
         ]
         self.assertIn("require_inactive_simulation", restart_body)
+
+    def test_planner_builder_sources_underlay_before_ros_tool_checks(self):
+        source = self.read("planning/scripts/build_planner_workspaces.sh")
+        setup_source = 'source "$BASE_SETUP"'
+        rospack_check = (
+            'command -v rospack >/dev/null 2>&1 || '
+            'die "rospack is not installed"'
+        )
+        self.assertIn(setup_source, source)
+        self.assertIn(rospack_check, source)
+        self.assertLess(
+            source.index(setup_source, source.index("BASE_SETUP=")),
+            source.index(rospack_check),
+        )
+        self.assertIn("Preserve the top-level catkin setup symlink", source)
+        self.assertIn("reset_relocated_build_cache", source)
+        self.assertIn(
+            '[[ "$workspace" == "$WORKSPACE_ROOT/"*_ws ]]', source
+        )
 
     def test_outdoor_scene_publish_is_bounded_and_read_only_actions_do_not_generate(self):
         source = self.read("launch/outdoor_bag_sim.sh")

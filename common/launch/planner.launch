@@ -1,31 +1,32 @@
 <launch>
+  <!-- Compatibility entry point. Planner selection and process isolation now
+       belong to sim2real_planner_manager; this file must never launch a native
+       planner directly. -->
   <arg name="drone_id" default="0"/>
+  <arg name="planner_id" default="$(optenv SIM2REAL_PLANNER diff)"/>
+  <arg name="planner_profile" default="$(optenv SIM2REAL_PLANNER_PROFILE local)"/>
+  <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
+  <arg name="repository_root"
+       default="$(optenv SIM2REAL_REPOSITORY_ROOT $(find sim2real_common)/..)"/>
+  <arg name="manifest_root" default="$(arg repository_root)/planning/plugins"/>
   <arg name="odom_topic" default="/localization/odom"/>
   <arg name="cloud_topic" default="/localization/cloud_registered"/>
-  <arg name="planner_config" default="$(find sim2real_common)/config/planner.yaml"/>
-  <arg name="trajectory_server_config" default="$(find sim2real_common)/config/trajectory_server.yaml"/>
+  <arg name="goal_topic" default="/goal"/>
+  <arg name="mavros_state_topic" default="/mavros/state"/>
+  <arg name="output_topic" default="/command/trajectory"/>
+  <arg name="require_offboard" default="true"/>
 
-  <node pkg="diff_planner" name="drone_$(arg drone_id)_diff_planner_node" type="diff_planner_node" output="screen">
-    <remap from="~odom_world" to="$(arg odom_topic)"/>
-    <remap from="~mandatory_stop" to="/mandatory_stop_to_planner"/>
-    <remap from="~planning/trajectory" to="/drone_$(arg drone_id)_planning/trajectory"/>
-    <remap from="~planning/data_display" to="/drone_$(arg drone_id)_planning/data_display"/>
-    <remap from="~planning/broadcast_traj_send" to="/broadcast_traj_from_planner"/>
-    <remap from="~planning/broadcast_traj_recv" to="/bridge/broadcast_traj_from_planner"/>
-    <remap from="~planning/heartbeat" to="/drone_$(arg drone_id)_traj_server/heartbeat"/>
-    <remap from="~grid_map/odom" to="$(arg odom_topic)"/>
-    <remap from="~grid_map/cloud" to="$(arg cloud_topic)"/>
-    <remap from="~grid_map/pose" to="/localization/unused_camera_pose"/>
-    <remap from="~grid_map/depth" to="/localization/unused_depth"/>
-    <rosparam command="load" file="$(arg planner_config)"/>
-    <param name="manager/drone_id" value="$(arg drone_id)" type="int"/>
-  </node>
-
-  <node pkg="diff_planner" name="drone_$(arg drone_id)_traj_server" type="traj_server" output="screen">
-    <remap from="position_cmd" to="/drone_$(arg drone_id)_planning/pos_cmd"/>
-    <remap from="~planning/trajectory" to="/drone_$(arg drone_id)_planning/trajectory"/>
-    <remap from="~planning/yaw" to="/drone_$(arg drone_id)_planning/yaw"/>
-    <remap from="~heartbeat" to="/drone_$(arg drone_id)_traj_server/heartbeat"/>
-    <rosparam command="load" file="$(arg trajectory_server_config)"/>
-  </node>
+  <include file="$(find sim2real_planner_manager)/launch/planner_gateway.launch">
+    <arg name="planner_id" value="$(arg planner_id)"/>
+    <arg name="planner_profile" value="$(arg planner_profile)"/>
+    <arg name="runtime_mode" value="$(arg runtime_mode)"/>
+    <arg name="repository_root" value="$(arg repository_root)"/>
+    <arg name="manifest_root" value="$(arg manifest_root)"/>
+    <arg name="odom_topic" value="$(arg odom_topic)"/>
+    <arg name="cloud_topic" value="$(arg cloud_topic)"/>
+    <arg name="goal_topic" value="$(arg goal_topic)"/>
+    <arg name="mavros_state_topic" value="$(arg mavros_state_topic)"/>
+    <arg name="output_topic" value="$(arg output_topic)"/>
+    <arg name="require_offboard" value="$(arg require_offboard)"/>
+  </include>
 </launch>

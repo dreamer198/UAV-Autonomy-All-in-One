@@ -12,11 +12,10 @@
   <depend>mavros_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>rospy</depend>
-  <depend>traj_utils</depend>
+  <depend>sim2real_planning_msgs</depend>
   <exec_depend>rosgraph</exec_depend>
-  <exec_depend>diff_planner</exec_depend>
-  <exec_depend>quadrotor_msgs</exec_depend>
   <exec_depend>se3_controller</exec_depend>
+  <exec_depend>sim2real_planner_manager</exec_depend>
 
   <test_depend>python3-nose</test_depend>
   <test_depend>python3-yaml</test_depend>

@@ -1,14 +1,23 @@
-# shellcheck shell=bash disable=SC1091
+# shellcheck shell=bash disable=SC1090,SC1091
 # ROS Noetic + repository-owned PX4/Gazebo/Mid360 simulation environment.
 [ -f /opt/ros/noetic/setup.bash ] && source /opt/ros/noetic/setup.bash
 [ -f /opt/simulation_ws/devel/setup.bash ] && source /opt/simulation_ws/devel/setup.bash
 
-# The deployment overlay is mounted at runtime and may not exist while the
-# image is being built. Source it before appending the non-catkin PX4 paths,
-# because catkin setup files replace ROS_PACKAGE_PATH.
-SIM2REAL_WS="${SIM_WORKSPACE_CONTAINER:-/workspaces/sim2real_ws}"
-if [ -f "$SIM2REAL_WS/devel/setup.bash" ]; then
-  source "$SIM2REAL_WS/devel/setup.bash"
+# Source only the public interfaces and control plane globally. Diff and Fast
+# remain isolated and are sourced by the planner manager's backend subprocess.
+SIM2REAL_PROJECT_ROOT="${SIM2REAL_PROJECT_ROOT:-/opt/uav-autonomy-aio}"
+SIM2REAL_INTERFACES_SETUP="$SIM2REAL_PROJECT_ROOT/planning/workspaces/interfaces_ws/devel/setup.bash"
+SIM2REAL_CONTROL_SETUP="$SIM2REAL_PROJECT_ROOT/planning/workspaces/control_ws/devel/setup.bash"
+if [ -f "$SIM2REAL_INTERFACES_SETUP" ]; then
+  source "$SIM2REAL_INTERFACES_SETUP"
+fi
+if [ -f "$SIM2REAL_CONTROL_SETUP" ]; then
+  source "$SIM2REAL_CONTROL_SETUP"
+else
+  # Compatibility fallback for a container created before workspace isolation.
+  SIM2REAL_LEGACY_WS="${SIM_WORKSPACE_CONTAINER:-/workspaces/sim2real_ws}"
+  [ ! -f "$SIM2REAL_LEGACY_WS/devel/setup.bash" ] ||
+    source "$SIM2REAL_LEGACY_WS/devel/setup.bash"
 fi
 
 PX4_DIR=/opt/PX4-Autopilot

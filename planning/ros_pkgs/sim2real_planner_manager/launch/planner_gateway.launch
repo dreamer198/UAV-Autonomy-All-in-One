@@ -1,0 +1,78 @@
+<launch>
+  <arg name="planner_id" default="diff"/>
+  <arg name="planner_profile" default="local"/>
+  <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
+  <arg name="manifest_root" default="$(find sim2real_planner_manager)/../../plugins"/>
+  <arg name="repository_root" default="$(find sim2real_planner_manager)/../../.."/>
+  <arg name="start_backend" default="true"/>
+
+  <arg name="goal_topic" default="/goal"/>
+  <arg name="odom_topic" default="/localization/odom"/>
+  <arg name="cloud_topic" default="/localization/cloud_registered"/>
+  <arg name="mavros_state_topic" default="/mavros/state"/>
+  <arg name="output_topic" default="/command/trajectory"/>
+  <arg name="require_offboard" default="true"/>
+  <arg name="accept_goals_without_offboard" default="false"/>
+  <!-- /mavros/state is nominally about 1 Hz; allow ordinary scheduling jitter. -->
+  <arg name="state_timeout" default="3.0"/>
+  <!-- Measure average plugin rates across replanning handoff transients. -->
+  <arg name="rate_window" default="1.0"/>
+  <arg name="enforce_unique_output" default="true"/>
+  <arg name="start_visualization" default="true"/>
+  <!-- These are display-only limits. They do not change either planner map
+       or collision checks; the lower cutoff hides virtual ground layers. -->
+  <arg name="viz_min_obstacle_z" default="0.36"/>
+  <arg name="viz_max_obstacle_z" default="3.2"/>
+
+  <node
+    if="$(arg start_backend)"
+    pkg="sim2real_planner_manager"
+    type="planner_backend_runner.py"
+    name="selected_planner_backend"
+    output="screen"
+    required="true"
+    args="--planner $(arg planner_id) --profile $(arg planner_profile) --runtime-mode $(arg runtime_mode) --manifest-root $(arg manifest_root) --repository-root $(arg repository_root) --arg odom_topic=$(arg odom_topic) --arg cloud_topic=$(arg cloud_topic)"/>
+
+  <node
+    pkg="sim2real_planner_manager"
+    type="planner_gateway.py"
+    name="planner_gateway"
+    output="screen"
+    required="true">
+    <param name="planner_id" value="$(arg planner_id)"/>
+    <param name="runtime_mode" value="$(arg runtime_mode)"/>
+    <param name="manifest_root" value="$(arg manifest_root)"/>
+    <param name="repository_root" value="$(arg repository_root)"/>
+    <param name="goal_topic" value="$(arg goal_topic)"/>
+    <param name="mavros_state_topic" value="$(arg mavros_state_topic)"/>
+    <param name="output_topic" value="$(arg output_topic)"/>
+    <param name="require_offboard" value="$(arg require_offboard)"/>
+    <param name="accept_goals_without_offboard" value="$(arg accept_goals_without_offboard)"/>
+    <param name="state_timeout" value="$(arg state_timeout)"/>
+    <param name="rate_window" value="$(arg rate_window)"/>
+    <param name="enforce_unique_output" value="$(arg enforce_unique_output)"/>
+  </node>
+
+  <!-- Selected plugins publish private/raw visualization. This common node is
+       the only publisher of the stable RViz map and bounds topics, so the
+       RViz configuration never branches on planner ID. -->
+  <node
+    if="$(arg start_visualization)"
+    pkg="sim2real_planner_manager"
+    type="planner_visualization.py"
+    name="planner_visualization"
+    output="screen">
+    <param name="world_frame" value="world"/>
+    <param name="min_obstacle_z" value="$(arg viz_min_obstacle_z)"/>
+    <param name="max_obstacle_z" value="$(arg viz_max_obstacle_z)"/>
+    <param name="raw_occupancy_topic" value="/planning/viz/raw/occupancy"/>
+    <param name="raw_inflated_topic"
+           value="/planning/viz/raw/inflated_occupancy"/>
+    <param name="occupancy_topic" value="/planning/viz/occupancy"/>
+    <param name="inflated_topic"
+           value="/planning/viz/inflated_occupancy"/>
+    <param name="bounds_topic" value="/planning/viz/planning_bounds"/>
+    <param name="capabilities_topic" value="/planning/capabilities"/>
+    <param name="status_topic" value="/planning/status"/>
+  </node>
+</launch>

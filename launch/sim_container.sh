@@ -15,13 +15,18 @@ CONTAINER_NAME="${SIM_DEV_CONTAINER:-diff_planner_px4_sim}"
 SOURCE_HOST="${SIM_SOURCE_HOST:-$PROJECT_ROOT/third_party/Diff-Planner-PX4}"
 COMMON_SOURCE_HOST="${SIM_COMMON_SOURCE_HOST:-$PROJECT_ROOT/common}"
 ADAPTER_SOURCE_HOST="${SIM_ADAPTER_SOURCE_HOST:-$PROJECT_ROOT/simulation/ros_pkgs/sim2real_simulation}"
+PROJECT_SOURCE_HOST="${SIM_PROJECT_SOURCE_HOST:-$PROJECT_ROOT}"
 SIMULATION_CONFIG_HOST="${SIM_CONFIG_HOST:-$PROJECT_ROOT/simulation/config}"
 RUNTIME_HOST="${SIM_RUNTIME_HOST:-$PROJECT_ROOT/runtime/simulation}"
 WORKSPACE_HOST="${SIM_WORKSPACE_HOST:-$RUNTIME_HOST/catkin_ws}"
+PLANNER_WORKSPACES_HOST="${SIM_PLANNER_WORKSPACES_HOST:-$PROJECT_ROOT/planning/workspaces}"
+PLANNER_PLUGIN_PATH="${SIM2REAL_PLANNER_PLUGIN_PATH:-}"
 WORKSPACE_CONTAINER="${SIM_WORKSPACE_CONTAINER:-/workspaces/sim2real_ws}"
 SOURCE_CONTAINER="$WORKSPACE_CONTAINER/src/Diff-Planner-PX4"
 COMMON_SOURCE_CONTAINER="$WORKSPACE_CONTAINER/src/sim2real_common"
 ADAPTER_SOURCE_CONTAINER="$WORKSPACE_CONTAINER/src/sim2real_simulation"
+PROJECT_SOURCE_CONTAINER="${SIM_PROJECT_SOURCE_CONTAINER:-/opt/uav-autonomy-aio}"
+PLANNER_WORKSPACES_CONTAINER="$PROJECT_SOURCE_CONTAINER/planning/workspaces"
 SIMULATION_CONFIG_CONTAINER="${SIM_CONFIG_CONTAINER:-/etc/sim2real/simulation}"
 RUNTIME_CONTAINER="${SIM_RUNTIME_CONTAINER:-/root/simulation_runtime}"
 DISPLAY_VALUE="${DISPLAY:-:0}"
@@ -35,9 +40,11 @@ usage() {
 Usage: sim_container.sh {build|run|stop|restart|recreate|rm|shell|status|verify} [--force]
 
 Builds and manages the repository-owned PX4/Gazebo/Mid360 simulation image.
-The host Diff-Planner-PX4 source is mounted read-only; its build products are
-kept under runtime/simulation/catkin_ws. No pre-existing ros_noetic container
-is used. SIM_GPU_MODE defaults to auto and accepts auto|nvidia|dri|none.
+The repository is mounted read-only and the four generated planner workspaces
+are mounted read-write below planning/workspaces. Legacy source mounts are
+retained for compatibility but are not used to overlay Fast and Diff together.
+No pre-existing ros_noetic container is used. SIM_GPU_MODE defaults to auto
+and accepts auto|nvidia|dri|none.
 Container mutation is refused while a simulation stack is active. --force is
 reserved for recovery after normal './launch/sim.sh stop' cannot be used.
 EOF
@@ -116,7 +123,7 @@ active_simulation_detected() {
 
   container_running || return 1
   docker top "$CONTAINER_NAME" -eo args 2>/dev/null |
-    grep -Eq '(^|[ /])(roscore|rosmaster|gzserver|gzclient|mavros_node|px4|se3_controller_node|diff_planner_node|traj_server)([[:space:]]|$)|outdoor_mid360\.launch|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
+    grep -Eq '(^|[ /])(roscore|rosmaster|gzserver|gzclient|mavros_node|px4|se3_controller_node|diff_planner_node|fast_planner_node|traj_server)([[:space:]]|$)|planner_backend_runner\.py|planner_(manager|gateway|visualization)\.py|command_gateway\.py|(diff|fast)_backend_adapter|sim2real_(diff|fast)_adapter|outdoor_mid360\.launch|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
 }
 
 require_inactive_simulation() {
@@ -143,6 +150,31 @@ append_extra_args() {
   output_array_ref+=("${parsed[@]}")
 }
 
+append_planner_plugin_mounts() {
+  local destination_name="$1"
+  # shellcheck disable=SC2178
+  local -n output_array_ref="$destination_name"
+  [ -n "$PLANNER_PLUGIN_PATH" ] || return 0
+  local entry mount_source mount_target
+  local -a entries=()
+  IFS=: read -r -a entries <<<"$PLANNER_PLUGIN_PATH"
+  for entry in "${entries[@]}"; do
+    [ -n "$entry" ] || continue
+    [[ "$entry" = /* ]] ||
+      die "SIM2REAL_PLANNER_PLUGIN_PATH entries must be absolute: $entry"
+    [ -e "$entry" ] ||
+      die "Planner plugin search path does not exist: $entry"
+    if [ -f "$entry" ]; then
+      mount_source="$(realpath -e "$(dirname "$entry")")"
+      mount_target="$(dirname "$entry")"
+    else
+      mount_source="$(realpath -e "$entry")"
+      mount_target="$entry"
+    fi
+    output_array_ref+=(-v "$mount_source:$mount_target:ro")
+  done
+}
+
 canonical_path() {
   realpath -m "$1"
 }
@@ -160,30 +192,40 @@ mount_rw_for() {
 verify_mounts() {
   container_exists || die "Container '$CONTAINER_NAME' does not exist. Run '$0 run' first."
 
-  local expected_source expected_common expected_adapter expected_config expected_workspace expected_runtime
-  local actual_source actual_common actual_adapter actual_config actual_workspace actual_runtime
-  local actual_source_rw actual_common_rw actual_adapter_rw actual_config_rw actual_workspace_rw actual_runtime_rw
+  local expected_source expected_common expected_adapter expected_project expected_planner_workspaces
+  local expected_config expected_workspace expected_runtime
+  local actual_source actual_common actual_adapter actual_project actual_planner_workspaces
+  local actual_config actual_workspace actual_runtime
+  local actual_source_rw actual_common_rw actual_adapter_rw actual_project_rw actual_planner_workspaces_rw
+  local actual_config_rw actual_workspace_rw actual_runtime_rw
   local expected_image_id actual_image_id
-  local actual_workspace_env expected_gpu_mode actual_gpu_mode actual_gpu_request
+  local actual_workspace_env actual_plugin_path expected_gpu_mode actual_gpu_mode actual_gpu_request
   expected_source="$(canonical_path "$SOURCE_HOST")"
   expected_common="$(canonical_path "$COMMON_SOURCE_HOST")"
   expected_adapter="$(canonical_path "$ADAPTER_SOURCE_HOST")"
+  expected_project="$(canonical_path "$PROJECT_SOURCE_HOST")"
+  expected_planner_workspaces="$(canonical_path "$PLANNER_WORKSPACES_HOST")"
   expected_config="$(canonical_path "$SIMULATION_CONFIG_HOST")"
   expected_workspace="$(canonical_path "$WORKSPACE_HOST")"
   expected_runtime="$(canonical_path "$RUNTIME_HOST")"
   actual_source="$(mount_source_for "$SOURCE_CONTAINER")"
   actual_common="$(mount_source_for "$COMMON_SOURCE_CONTAINER")"
   actual_adapter="$(mount_source_for "$ADAPTER_SOURCE_CONTAINER")"
+  actual_project="$(mount_source_for "$PROJECT_SOURCE_CONTAINER")"
+  actual_planner_workspaces="$(mount_source_for "$PLANNER_WORKSPACES_CONTAINER")"
   actual_config="$(mount_source_for "$SIMULATION_CONFIG_CONTAINER")"
   actual_workspace="$(mount_source_for "$WORKSPACE_CONTAINER")"
   actual_runtime="$(mount_source_for "$RUNTIME_CONTAINER")"
   actual_source_rw="$(mount_rw_for "$SOURCE_CONTAINER")"
   actual_common_rw="$(mount_rw_for "$COMMON_SOURCE_CONTAINER")"
   actual_adapter_rw="$(mount_rw_for "$ADAPTER_SOURCE_CONTAINER")"
+  actual_project_rw="$(mount_rw_for "$PROJECT_SOURCE_CONTAINER")"
+  actual_planner_workspaces_rw="$(mount_rw_for "$PLANNER_WORKSPACES_CONTAINER")"
   actual_config_rw="$(mount_rw_for "$SIMULATION_CONFIG_CONTAINER")"
   actual_workspace_rw="$(mount_rw_for "$WORKSPACE_CONTAINER")"
   actual_runtime_rw="$(mount_rw_for "$RUNTIME_CONTAINER")"
   actual_workspace_env="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" | sed -n 's/^SIM_WORKSPACE_CONTAINER=//p' | tail -n 1)"
+  actual_plugin_path="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" | sed -n 's/^SIM2REAL_PLANNER_PLUGIN_PATH=//p' | tail -n 1)"
   expected_gpu_mode="$(resolve_gpu_mode)" || return 1
   actual_gpu_mode="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" | sed -n 's/^SIM_GPU_MODE_RESOLVED=//p' | tail -n 1)"
 
@@ -195,6 +237,12 @@ verify_mounts() {
   }
   [ "$(canonical_path "$actual_adapter")" = "$expected_adapter" ] || {
     die "Container simulation adapter mount is stale: '$actual_adapter'. Run '$0 recreate'."
+  }
+  [ "$(canonical_path "$actual_project")" = "$expected_project" ] || {
+    die "Container repository mount is stale: '$actual_project'. Run '$0 recreate'."
+  }
+  [ "$(canonical_path "$actual_planner_workspaces")" = "$expected_planner_workspaces" ] || {
+    die "Container planner-workspaces mount is stale: '$actual_planner_workspaces'. Run '$0 recreate'."
   }
   [ "$(canonical_path "$actual_config")" = "$expected_config" ] || {
     die "Container simulation config mount is stale: '$actual_config'. Run '$0 recreate'."
@@ -214,6 +262,12 @@ verify_mounts() {
   [ "$actual_adapter_rw" = "false" ] || {
     die "Container simulation adapter mount must be read-only. Run '$0 recreate'."
   }
+  [ "$actual_project_rw" = "false" ] || {
+    die "Container repository mount must be read-only. Run '$0 recreate'."
+  }
+  [ "$actual_planner_workspaces_rw" = "true" ] || {
+    die "Container planner workspaces must be writable. Run '$0 recreate'."
+  }
   [ "$actual_config_rw" = "false" ] || {
     die "Container simulation config mount must be read-only. Run '$0 recreate'."
   }
@@ -225,6 +279,9 @@ verify_mounts() {
   }
   [ "$actual_workspace_env" = "$WORKSPACE_CONTAINER" ] || {
     die "Container SIM_WORKSPACE_CONTAINER is stale: '$actual_workspace_env'. Run '$0 recreate'."
+  }
+  [ "$actual_plugin_path" = "$PLANNER_PLUGIN_PATH" ] || {
+    die "Container planner plugin path is stale. Run '$0 recreate'."
   }
   [ "$actual_gpu_mode" = "$expected_gpu_mode" ] || {
     die "Container GPU mode is stale: '${actual_gpu_mode:-unset}' (expected '$expected_gpu_mode'). Run '$0 recreate'."
@@ -245,6 +302,8 @@ verify_mounts() {
   info "Source mount: $expected_source -> $SOURCE_CONTAINER (read-only)"
   info "Common mount: $expected_common -> $COMMON_SOURCE_CONTAINER (read-only)"
   info "Simulation adapter: $expected_adapter -> $ADAPTER_SOURCE_CONTAINER (read-only)"
+  info "Repository: $expected_project -> $PROJECT_SOURCE_CONTAINER (read-only)"
+  info "Planner workspaces: $expected_planner_workspaces -> $PLANNER_WORKSPACES_CONTAINER"
   info "Simulation config: $expected_config -> $SIMULATION_CONFIG_CONTAINER (read-only)"
   info "Overlay workspace: $expected_workspace -> $WORKSPACE_CONTAINER"
   info "Graphics acceleration: $expected_gpu_mode"
@@ -273,8 +332,14 @@ build_image() {
 }
 
 ensure_image() {
-  if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
-    info "Simulation image is missing; building it from $DOCKERFILE"
+  local planner_layout=""
+  planner_layout="$(
+    docker image inspect \
+      -f '{{index .Config.Labels "io.sim2real.planner-workspaces"}}' \
+      "$IMAGE_NAME" 2>/dev/null || true
+  )"
+  if [ "$planner_layout" != "v1" ]; then
+    info "Simulation image is missing or predates planner workspace isolation; building it from $DOCKERFILE"
     build_image
   fi
 }
@@ -292,6 +357,8 @@ verify_environment() {
     test "$(realpath "$(rospack find livox_laser_simulation)")" = "/opt/simulation_ws/src/Mid360_px4_sim_plugin/livox_laser_simulation"
     test -x /opt/PX4-Autopilot/build/px4_sitl_default/bin/px4
     test -e /opt/simulation_ws/devel/lib/liblivox_laser_simulation.so
+    test -f /usr/include/nlopt.hpp
+    pkg-config --exists nlopt
     case "$SIM_EXPECTED_GPU_MODE" in
       nvidia)
         command -v nvidia-smi >/dev/null
@@ -313,8 +380,10 @@ validate_container_inputs() {
   [ -d "$SOURCE_HOST" ] || die "Diff-Planner source not found: $SOURCE_HOST"
   [ -d "$COMMON_SOURCE_HOST" ] || die "Common ROS package not found: $COMMON_SOURCE_HOST"
   [ -d "$ADAPTER_SOURCE_HOST" ] || die "Simulation adapter package not found: $ADAPTER_SOURCE_HOST"
+  [ -x "$PROJECT_SOURCE_HOST/planning/scripts/build_planner_workspaces.sh" ] ||
+    die "Planner workspace builder not found below: $PROJECT_SOURCE_HOST"
   [ -d "$SIMULATION_CONFIG_HOST" ] || die "Simulation config not found: $SIMULATION_CONFIG_HOST"
-  mkdir -p "$WORKSPACE_HOST/src" "$RUNTIME_HOST/logs" "$RUNTIME_HOST/ros_logs"
+  mkdir -p "$WORKSPACE_HOST/src" "$PLANNER_WORKSPACES_HOST" "$RUNTIME_HOST/logs" "$RUNTIME_HOST/ros_logs"
 }
 
 create_container() {
@@ -338,15 +407,21 @@ create_container() {
     -e "QT_X11_NO_MITSHM=1"
     -e "PYTHONDONTWRITEBYTECODE=1"
     -e "SIM_WORKSPACE_CONTAINER=$WORKSPACE_CONTAINER"
+    -e "SIM2REAL_PROJECT_ROOT=$PROJECT_SOURCE_CONTAINER"
+    -e "SIM2REAL_RUNTIME_MODE=simulation"
+    -e "SIM2REAL_PLANNER_PLUGIN_PATH=$PLANNER_PLUGIN_PATH"
     -e "SIM_GPU_MODE_RESOLVED=$gpu_mode"
     -v /etc/localtime:/etc/localtime:ro
     -v "$WORKSPACE_HOST:$WORKSPACE_CONTAINER"
     -v "$SOURCE_HOST:$SOURCE_CONTAINER:ro"
     -v "$COMMON_SOURCE_HOST:$COMMON_SOURCE_CONTAINER:ro"
     -v "$ADAPTER_SOURCE_HOST:$ADAPTER_SOURCE_CONTAINER:ro"
+    -v "$PROJECT_SOURCE_HOST:$PROJECT_SOURCE_CONTAINER:ro"
+    -v "$PLANNER_WORKSPACES_HOST:$PLANNER_WORKSPACES_CONTAINER"
     -v "$SIMULATION_CONFIG_HOST:$SIMULATION_CONFIG_CONTAINER:ro"
     -v "$RUNTIME_HOST:$RUNTIME_CONTAINER"
   )
+  append_planner_plugin_mounts docker_args
 
   case "$gpu_mode" in
     nvidia)

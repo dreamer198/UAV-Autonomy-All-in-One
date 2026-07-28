@@ -1,0 +1,223 @@
+<launch>
+  <!--
+    规划算法子 launch：只创建 fast_planner_node，并把参数按模块写入其私有命名空间。
+    这里的 arg 都由 kino_replan.launch 的 include 传入；直接 roslaunch 本文件会因缺少参数失败。
+  -->
+
+  <!-- 地图物理尺寸，由上层场景 launch 统一提供。 -->
+  <arg name="map_size_x_"/>
+  <arg name="map_size_y_"/>
+  <arg name="map_size_z_"/>
+
+  <!-- 状态与传感器 topic；下面通过 remap 接到 SDFMap/FSM 源码使用的固定接口名。 -->
+  <arg name="odometry_topic"/>
+  <arg name="camera_pose_topic"/>
+  <arg name="depth_topic"/>
+  <arg name="cloud_topic"/>
+
+  <!-- 深度相机针孔模型内参。 -->
+  <arg name="cx"/>
+  <arg name="cy"/>
+  <arg name="fx"/>
+  <arg name="fy"/>
+
+  <!-- 规划全链路共享的动力学约束。 -->
+  <arg name="max_vel"/>
+  <arg name="max_acc"/>
+
+  <!-- 预设航点；仅 flight_type=2 时由 FSM 依次读取。 -->
+  <arg name="point_num"/>
+  <arg name="point0_x"/>
+  <arg name="point0_y"/>
+  <arg name="point0_z"/>
+  <arg name="point1_x"/>
+  <arg name="point1_y"/>
+  <arg name="point1_z"/>
+  <arg name="point2_x"/>
+  <arg name="point2_y"/>
+  <arg name="point2_z"/>
+
+  <!-- 目标来源：1 为手动目标，2 为预设航点。 -->
+  <arg name="flight_type"/>
+
+  <!--
+    单个 fast_planner_node 内部同时持有 SDFMap、EDTEnvironment、搜索器、优化器和重规划 FSM。
+    关键数据流：
+      odometry_topic -> /odom_world（FSM）以及 /sdf_map/odom（地图）
+      depth+pose 或 cloud -> SDFMap -> ESDF/占据查询 -> 搜索与优化
+      waypoint_generator -> FSM -> /planning/bspline
+  -->
+  <node pkg="plan_manage" name="fast_planner_node" type="fast_planner_node" output="screen">
+    <!-- 同一 odom 同时服务状态机起点状态和地图传感器位姿。 -->
+    <remap from="/odom_world" to="$(arg odometry_topic)"/>
+    <remap from="/sdf_map/odom" to="$(arg odometry_topic)"/>
+    <remap from="/sdf_map/cloud" to="$(arg cloud_topic)"/>
+    <remap from = "/sdf_map/pose"   to = "$(arg camera_pose_topic)"/> 
+    <remap from = "/sdf_map/depth" to = "$(arg depth_topic)"/>
+
+    <!-- main() 的策略选择：1=kinodynamic FSM，2=topological FSM；本配置使用前者。 -->
+    <param name="planner_node/planner" value="1" type="int"/>
+
+    <!--
+      FSM 的空间触发阈值：新局部轨迹开始后先飞过 thresh_replan，且距最终目标仍大于
+      thresh_no_replan，才进入下一轮滚动重规划；靠近终点时持续执行当前轨迹。
+    -->
+    <param name="fsm/flight_type" value="$(arg flight_type)" type="int"/>
+    <param name="fsm/thresh_replan" value="1.5" type="double"/>
+    <param name="fsm/thresh_no_replan" value="2.0" type="double"/>
+
+    <param name="fsm/waypoint_num" value="$(arg point_num)" type="int"/>
+    <param name="fsm/waypoint0_x" value="$(arg point0_x)" type="double"/>
+    <param name="fsm/waypoint0_y" value="$(arg point0_y)" type="double"/>
+    <param name="fsm/waypoint0_z" value="$(arg point0_z)" type="double"/>
+    <param name="fsm/waypoint1_x" value="$(arg point1_x)" type="double"/>
+    <param name="fsm/waypoint1_y" value="$(arg point1_y)" type="double"/>
+    <param name="fsm/waypoint1_z" value="$(arg point1_z)" type="double"/>
+    <param name="fsm/waypoint2_x" value="$(arg point2_x)" type="double"/>
+    <param name="fsm/waypoint2_y" value="$(arg point2_y)" type="double"/>
+    <param name="fsm/waypoint2_z" value="$(arg point2_z)" type="double"/>
+
+    <!-- 地图几何：resolution 是体素边长，map_size_* 是全局缓冲区的物理范围。 -->
+    <param name="sdf_map/resolution"      value="0.1" /> 
+    <param name="sdf_map/map_size_x"   value="$(arg map_size_x_)" /> 
+    <param name="sdf_map/map_size_y"   value="$(arg map_size_y_)" /> 
+    <param name="sdf_map/map_size_z"   value="$(arg map_size_z_)" /> 
+    <!-- 每次传感器更新只融合相机附近的局部范围，以控制在线更新成本。 -->
+    <param name="sdf_map/local_update_range_x"  value="5.5" /> 
+    <param name="sdf_map/local_update_range_y"  value="5.5" /> 
+    <param name="sdf_map/local_update_range_z"  value="4.5" /> 
+    <!--
+      obstacles_inflation 将占据体素向外膨胀，近似吸收飞行器半径；local_bound_inflate
+      扩大本次 ESDF 更新边界，local_map_margin 则以体素数给局部地图边界留余量。
+    -->
+    <param name="sdf_map/obstacles_inflation"     value="0.099" /> 
+    <param name="sdf_map/local_bound_inflate"    value="0.0"/>
+    <param name="sdf_map/local_map_margin" value="50"/>
+    <param name="sdf_map/ground_height"        value="-1.0"/>
+    <!-- 深度反投影使用的相机内参。 -->
+    <param name="sdf_map/cx" value="$(arg cx)"/>
+    <param name="sdf_map/cy" value="$(arg cy)"/>
+    <param name="sdf_map/fx" value="$(arg fx)"/>
+    <param name="sdf_map/fy" value="$(arg fy)"/>
+    <!--
+      深度预处理：容差用于相邻帧一致性检查，maxdist/mindist 限定有效测距，margin 裁掉
+      图像边缘像素，scaling_factor 将常见的毫米整型深度换算为米，skip_pixel 做降采样。
+    -->
+    <param name="sdf_map/use_depth_filter" value="true"/>
+    <param name="sdf_map/depth_filter_tolerance" value="0.15"/>
+    <param name="sdf_map/depth_filter_maxdist"   value="5.0"/>
+    <param name="sdf_map/depth_filter_mindist"   value="0.2"/>
+    <param name="sdf_map/depth_filter_margin"    value="2"/>
+    <param name="sdf_map/k_depth_scaling_factor" value="1000.0"/>
+    <param name="sdf_map/skip_pixel" value="2"/>
+    <!--
+      概率占据融合：一条测量射线的端点按 p_hit 更新、沿途自由体素按 p_miss 更新；
+      p_min/p_max 限制累计置信度，超过 p_occ 才视为障碍。当前实现只用 max_ray_length
+      截断远距离射线；min_ray_length 的判断在 sdf_map.cpp 中被注释，配置值暂不生效。
+    -->
+    <param name="sdf_map/p_hit"  value="0.65"/>
+    <param name="sdf_map/p_miss" value="0.35"/>
+    <param name="sdf_map/p_min"  value="0.12"/>
+    <param name="sdf_map/p_max"  value="0.90"/>
+    <param name="sdf_map/p_occ"  value="0.80"/>
+    <param name="sdf_map/min_ray_length" value="0.5"/>
+    <param name="sdf_map/max_ray_length" value="4.5"/>
+
+    <!-- ESDF/占据可视化参数；virtual_ceil_height 还会把指定高度当作虚拟天花板。 -->
+    <param name="sdf_map/esdf_slice_height" value="0.3"/>
+    <param name="sdf_map/visualization_truncate_height"   value="2.49"/>
+    <param name="sdf_map/virtual_ceil_height"   value="2.5"/>
+    <param name="sdf_map/show_occ_time"  value="false"/>
+    <param name="sdf_map/show_esdf_time" value="false"/>
+    <!-- pose_type=1：同步 depth+PoseStamped；pose_type=2：同步 depth+Odometry。 -->
+    <param name="sdf_map/pose_type"     value="1"/>  
+    <param name="sdf_map/frame_id"      value="world"/>
+
+  <!--
+    PlannerManager 公共配置。control_points_distance 决定粗路径转 B-spline 控制点时的采样密度；
+    local_segment_length/clearance_threshold 服务 topo/global 路径，max_jerk 当前只读取未使用。
+  -->
+    <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
+    <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
+    <param name="manager/max_jerk" value="4" type="double"/>
+    <param name="manager/dynamic_environment" value="0" type="int"/>
+    <param name="manager/local_segment_length" value="6.0" type="double"/>
+    <param name="manager/clearance_threshold" value="0.2" type="double"/>
+    <param name="manager/control_points_distance" value="0.5" type="double"/>
+
+    <!-- 模块开关决定 initPlanModules() 实际构造哪些搜索器/优化器。 -->
+    <param name="manager/use_geometric_path" value="false" type="bool"/>
+    <param name="manager/use_kinodynamic_path" value="true" type="bool"/>
+    <param name="manager/use_topo_path" value="false" type="bool"/>
+    <param name="manager/use_optimization" value="true" type="bool"/>
+
+  <!--
+    Kinodynamic A* 前端：节点是位置+速度状态，边是持续 tau 的常加速度运动原语。
+    max_tau/init_max_tau 限制普通/初始扩展时长；w_time 权衡控制量与耗时；horizon 到达后
+    可返回局部结果；lambda_heu 调整启发式强度；check_num 是每条运动原语的碰撞采样数。
+  -->
+    <param name="search/max_tau" value="0.6" type="double"/>
+    <param name="search/init_max_tau" value="0.8" type="double"/>
+    <param name="search/max_vel" value="$(arg max_vel)" type="double"/>
+    <param name="search/max_acc" value="$(arg max_acc)" type="double"/>
+    <param name="search/w_time" value="10.0" type="double"/>
+    <param name="search/horizon" value="7.0" type="double"/>
+    <param name="search/lambda_heu" value="5.0" type="double"/>
+    <param name="search/resolution_astar" value="0.1" type="double"/>
+    <param name="search/time_resolution" value="0.8" type="double"/>
+    <!-- margin 是旧参数：当前 setParam() 未读取，搜索实际检查膨胀占据栅格。 -->
+    <param name="search/margin" value="0.2" type="double"/>
+    <param name="search/allocate_num" value="100000" type="int"/>
+    <param name="search/check_num" value="5" type="int"/>
+
+  <!--
+    B-spline 后端代价权重：lambda1 平滑（jerk）、lambda2 障碍距离、lambda3 动力学可行性、
+    lambda4 终点、lambda7 航点；dist0 是障碍距离代价开始生效的安全距离。kino 的
+    NORMAL_PHASE 默认启用前三项，未到终点时再启用 lambda4；lambda7 在本流程不参与代价。
+  -->
+    <param name="optimization/lambda1" value="10.0" type="double"/>
+    <param name="optimization/lambda2" value="5.0" type="double"/>
+    <param name="optimization/lambda3" value="0.00001" type="double"/>
+    <param name="optimization/lambda4" value="0.01" type="double"/>
+    <param name="optimization/lambda7" value="100.0" type="double"/>
+    <param name="optimization/dist0" value="0.4" type="double"/>
+    <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
+    <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>
+
+    <!-- NLopt 算法枚举：algorithm1 用于 topo 引导的二次型阶段；kino 的非线性代价使用 algorithm2。 -->
+    <param name="optimization/algorithm1" value="15" type="int"/>
+    <param name="optimization/algorithm2" value="11" type="int"/>
+
+    <!--
+      不同优化阶段各自的最大迭代次数和墙钟时间预算；调用方传下标选择一档。
+      kino 当前传入下标 1，因此实际使用 max_iteration_num2 和 max_iteration_time2。
+    -->
+    <param name="optimization/max_iteration_num1" value="2" type="int"/>
+    <param name="optimization/max_iteration_num2" value="300" type="int"/>
+    <param name="optimization/max_iteration_num3" value="200" type="int"/>
+    <param name="optimization/max_iteration_num4" value="200" type="int"/>
+
+    <param name="optimization/max_iteration_time1" value="0.0001" type="double"/>
+    <param name="optimization/max_iteration_time2" value="0.005" type="double"/>
+    <param name="optimization/max_iteration_time3" value="0.003" type="double"/>
+    <param name="optimization/max_iteration_time4" value="0.003" type="double"/>
+
+    <!-- 优化器按三次 B-spline 计算控制点范围和代价。 -->
+    <param name="optimization/order" value="3" type="int"/>
+
+    <!--
+      下列 bspline/limit_* 连续重复两遍，且当前源码没有 nh.param 读取，均不生效。
+      实际可行性检查由 Manager 调 setPhysicalLimits(manager/max_vel, manager/max_acc)，
+      单轮时间伸长上限 ratio=1.1 也直接硬编码在 NonUniformBspline::setPhysicalLimits() 中。
+    -->
+    <param name="bspline/limit_vel" value="$(arg max_vel)" type="double"/>
+    <param name="bspline/limit_acc" value="$(arg max_acc)" type="double"/>
+    <param name="bspline/limit_ratio" value="1.1" type="double"/>
+
+    <param name="bspline/limit_vel" value="$(arg max_vel)" type="double"/>
+    <param name="bspline/limit_acc" value="$(arg max_acc)" type="double"/>
+    <param name="bspline/limit_ratio" value="1.1" type="double"/>
+
+  </node>
+
+</launch>

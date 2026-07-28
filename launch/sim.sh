@@ -5,21 +5,65 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SCENE="${SIM_SCENE:-default}"
-if [ "${1:-}" = "--scene" ]; then
-  [ "$#" -ge 3 ] || {
-    echo "[ERROR] Usage: sim.sh --scene NAME ACTION [ARGS...]" >&2
-    exit 1
-  }
-  SCENE="$2"
-  shift 2
-elif [[ "${1:-}" == --scene=* ]]; then
-  SCENE="${1#--scene=}"
-  [ -n "$SCENE" ] || {
-    echo "[ERROR] --scene requires a non-empty scene name." >&2
-    exit 1
-  }
-  shift
-fi
+PLANNER_ID="${SIM_PLANNER:-diff}"
+PLANNER_PROFILE="${SIM_PLANNER_PROFILE:-}"
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --scene)
+      [ "$#" -ge 2 ] || {
+        echo "[ERROR] --scene requires a value." >&2
+        exit 1
+      }
+      SCENE="$2"
+      shift 2
+      ;;
+    --scene=*)
+      SCENE="${1#--scene=}"
+      shift
+      ;;
+    --planner)
+      [ "$#" -ge 2 ] || {
+        echo "[ERROR] --planner requires a value." >&2
+        exit 1
+      }
+      PLANNER_ID="$2"
+      shift 2
+      ;;
+    --planner=*)
+      PLANNER_ID="${1#--planner=}"
+      shift
+      ;;
+    --planner-profile)
+      [ "$#" -ge 2 ] || {
+        echo "[ERROR] --planner-profile requires a value." >&2
+        exit 1
+      }
+      PLANNER_PROFILE="$2"
+      shift 2
+      ;;
+    --planner-profile=*)
+      PLANNER_PROFILE="${1#--planner-profile=}"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      echo "[ERROR] Unknown global option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+[ -n "$SCENE" ] || {
+  echo "[ERROR] --scene requires a non-empty scene name." >&2
+  exit 1
+}
+[ -n "$PLANNER_ID" ] || {
+  echo "[ERROR] --planner requires a non-empty plugin ID." >&2
+  exit 1
+}
 
 SCENE="${SCENE%.env}"
 [[ "$SCENE" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || {
@@ -53,10 +97,12 @@ DEV_CONTAINER="${SIM_DEV_CONTAINER:-diff_planner_px4_sim}"
 # silently fall back to the legacy ros_noetic container.
 SIMULATOR_CONTAINER="$DEV_CONTAINER"
 DEV_CONTAINER_SCRIPT="$SCRIPT_DIR/sim_container.sh"
-DEV_WORKSPACE="${SIM_WORKSPACE_CONTAINER:-/workspaces/sim2real_ws}"
-DEV_SOURCE="$DEV_WORKSPACE/src/Diff-Planner-PX4"
-COMMON_SOURCE="$DEV_WORKSPACE/src/sim2real_common"
-ADAPTER_SOURCE="$DEV_WORKSPACE/src/sim2real_simulation"
+PLANNING_PROJECT_ROOT="${SIM_PROJECT_SOURCE_CONTAINER:-/opt/uav-autonomy-aio}"
+PLANNER_WORKSPACES="$PLANNING_PROJECT_ROOT/planning/workspaces"
+PLANNER_MANIFEST_ROOT="$PLANNING_PROJECT_ROOT/planning/plugins"
+PLANNER_MANIFEST_TOOL_HOST="$PROJECT_ROOT/planning/scripts/planner_manifest.py"
+PLANNER_BUILD_TOOL="$PLANNING_PROJECT_ROOT/planning/scripts/build_planner_workspaces.sh"
+PLANNER_WORKSPACE_SETUP_REL=""
 DEV_RUNTIME="${SIM_RUNTIME_CONTAINER:-/root/simulation_runtime}"
 BASE_SIM_WORKSPACE="${SIM_BASE_WORKSPACE_CONTAINER:-/opt/simulation_ws}"
 SOURCE_HOST="${SIM_SOURCE_HOST:-$PROJECT_ROOT/third_party/Diff-Planner-PX4}"
@@ -117,7 +163,7 @@ PLANNER_CONFIG="${SIM_PLANNER_CONFIG:-}"
 CONTROLLER_CONFIG="${SIM_CONTROLLER_CONFIG:-/etc/sim2real/simulation/controller.yaml}"
 RVIZ_CONFIG="${SIM_RVIZ_CONFIG:-/etc/sim2real/simulation/rviz/sim.rviz}"
 REQUIRE_ARMED_GOAL="${SIM_REQUIRE_ARMED_GOAL:-true}"
-TEST_PACKAGES="${SIM_TEST_PACKAGES:-path_searching diff_planner sim2real_common sim2real_simulation}"
+TEST_WORKSPACES="${SIM_TEST_WORKSPACES:-interfaces,control,diff,fast}"
 MISSION_RUNNER_HOST="$PROJECT_ROOT/common/scripts/waypoint_mission.py"
 MISSION_EXECUTOR_HOST="$PROJECT_ROOT/common/scripts/mission_executor.py"
 ARM_EXECUTOR_HOST="$PROJECT_ROOT/common/scripts/arm_executor.py"
@@ -130,7 +176,7 @@ START_ROSBAG="${SIM_START_ROSBAG:-true}"
 ROSBAG_DIR="${SIM_ROSBAG_DIR:-$DEV_RUNTIME/flight_bags}"
 ROSBAG_PREFIX="${SIM_ROSBAG_PREFIX:-se3_test}"
 ROSBAG_NODE_NAME="${SIM_ROSBAG_NODE_NAME:-/flight_recorder}"
-ROSBAG_TOPICS="${SIM_ROSBAG_TOPICS:-/clock /tf /tf_static /gazebo/model_states /mavros/local_position/odom /localization/odom /localization/cloud_registered /livox/imu /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/battery /mavros/altitude /mavros/rc/in /mavros/setpoint_raw/attitude /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local /command/trajectory /desire_odom_pub /drone_0_planning/pos_cmd /drone_0_planning/trajectory /drone_0_planning/data_display /drone_0_diff_planner_node/grid_map/occupancy_inflate /goal}"
+ROSBAG_TOPICS="${SIM_ROSBAG_TOPICS:-/clock /tf /tf_static /gazebo/model_states /mavros/local_position/odom /localization/odom /localization/cloud_registered /livox/imu /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/battery /mavros/altitude /mavros/rc/in /mavros/setpoint_raw/attitude /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local /command/trajectory /desire_odom_pub /goal /planning/goal /planning/command /planning/status /planning/capabilities /planning/viz/occupancy /planning/viz/inflated_occupancy /planning/viz/planning_bounds /planning/viz/active_goal /planning/viz/executed_path}"
 ROSBAG_TOPICS_QUOTED=""
 ROSBAG_EXTRA_ARGS="${SIM_ROSBAG_EXTRA_ARGS:-}"
 ROSBAG_EXTRA_ARGS_QUOTED=""
@@ -147,15 +193,16 @@ fi
 
 usage() {
   cat <<'EOF'
-Usage: sim.sh [--scene NAME] {build|test|start|stop|restart|status|attach|arm|land|goal|mission|shell}
+Usage: sim.sh [--scene NAME] [--planner ID] [--planner-profile NAME] ACTION
 
 Actions:
   build                 Incrementally build the host deployment source.
-  test                  Build, then test diff_planner and both adapter packages.
+  test                  Build and test all four isolated workspaces.
   start                 Build and start the complete simulation stack.
   restart               Stop, rebuild changed code, and start again.
   stop                  Gracefully stop this script's simulation stack.
   status                Show containers, tmux windows, nodes, and source paths.
+  planners              List discovered plugins; does not require a build.
   attach                Attach to the host tmux session.
   arm                   Arm, use PX4 AUTO.TAKEOFF, then enter OFFBOARD hold.
   land                  Request landing and wait for simulated disarm.
@@ -169,6 +216,8 @@ Actions:
 
 Stack examples:
   ./launch/sim.sh start
+  ./launch/sim.sh --planner fast-kino start
+  ./launch/sim.sh --planner fast-topo start
   ./launch/sim.sh --scene outdoor_rectangular_forest restart
   SIM_GAZEBO_GUI=false SIM_START_RVIZ=false ./launch/sim.sh restart
   SIM_START_ROSBAG=false ./launch/sim.sh restart
@@ -191,6 +240,39 @@ warn() {
 die() {
   echo "[ERROR] $*" >&2
   exit 1
+}
+
+list_planners() {
+  [ -x "$PLANNER_MANIFEST_TOOL_HOST" ] ||
+    die "Planner manifest tool is missing: $PLANNER_MANIFEST_TOOL_HOST"
+  python3 "$PLANNER_MANIFEST_TOOL_HOST" \
+    --project-root "$PROJECT_ROOT" \
+    --manifest-root "$PROJECT_ROOT/planning/plugins" \
+    list
+}
+
+resolve_selected_planner() {
+  local require_built="${1:-false}"
+  local -a args=(
+    "$PLANNER_MANIFEST_TOOL_HOST"
+    --project-root "$PROJECT_ROOT"
+    --manifest-root "$PROJECT_ROOT/planning/plugins"
+    resolve "$PLANNER_ID"
+    --mode simulation
+  )
+  [ -z "$PLANNER_PROFILE" ] || args+=(--profile "$PLANNER_PROFILE")
+  PLANNER_PROFILE="$(python3 "${args[@]}" --field profile)" ||
+    die "Planner selection failed. Run '$0 planners' to inspect available plugins."
+  PLANNER_WORKSPACE_SETUP_REL="$(python3 "${args[@]}" --field workspace_setup_relative)" ||
+    die "Planner workspace resolution failed."
+  local container_setup="$PLANNER_WORKSPACE_SETUP_REL"
+  if [[ "$container_setup" != /* ]]; then
+    container_setup="$PLANNING_PROJECT_ROOT/$container_setup"
+  fi
+  if [ "$require_built" = "true" ] && ! docker exec -i "$DEV_CONTAINER" \
+    test -f "$container_setup"; then
+    die "Selected planner workspace is not built in the container: $PLANNER_WORKSPACE_SETUP_REL"
+  fi
 }
 
 require_bool() {
@@ -412,8 +494,9 @@ docker_tmux_command() {
   setup="$(container_setup "$container")"
   shell_cmd="set -eo pipefail; unset ROS_HOSTNAME; $setup; export ROS_MASTER_URI='$ROS_MASTER_URI' ROS_IP='$ROS_IP' ROS_HOME='$ros_home' ROS_LOG_DIR='$ros_log_dir'; mkdir -p \"\$ROS_HOME\" \"\$ROS_LOG_DIR\"; $inner_cmd"
 
-  printf 'docker exec -it -e ROS_MASTER_URI=%q -e ROS_IP=%q -e ROS_HOME=%q -e ROS_LOG_DIR=%q -e PYTHONDONTWRITEBYTECODE=1 %q bash -lc %q' \
-    "$ROS_MASTER_URI" "$ROS_IP" "$ros_home" "$ros_log_dir" "$container" "$shell_cmd"
+  printf 'docker exec -it -e ROS_MASTER_URI=%q -e ROS_IP=%q -e ROS_HOME=%q -e ROS_LOG_DIR=%q -e SIM2REAL_DIFF_PLANNER_CONFIG=%q -e PYTHONDONTWRITEBYTECODE=1 %q bash -lc %q' \
+    "$ROS_MASTER_URI" "$ROS_IP" "$ros_home" "$ros_log_dir" \
+    "$PLANNER_CONFIG" "$container" "$shell_cmd"
 }
 
 enable_window_logging() {
@@ -662,112 +745,47 @@ build_overlay() {
   ensure_prereqs
   ensure_dev_container
 
-  local build_args=""
-  if [ -n "$BUILD_JOBS" ]; then
-    [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || die "SIM_BUILD_JOBS must be a positive integer."
-    build_args="-j$BUILD_JOBS -p$BUILD_JOBS"
-  fi
-
-  info "Incrementally building host source in $DEV_WORKSPACE"
+  # The workspace builder detects "internal compiler error:" and reports
+  # "GCC crashed while compiling the overlay" before its one bounded fallback:
+  # catkin build --no-status -j1 -p1. Ordinary failures still exit "$build_status".
+  [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] ||
+    die "SIM_BUILD_JOBS must be a positive integer."
+  info "Building isolated interfaces/control/Diff/Fast workspaces"
   docker exec -i \
-    -e SIM_WORKSPACE_CONTAINER=/__build_from_image_underlay__ \
-    -e "SIM_DEV_WORKSPACE=$DEV_WORKSPACE" \
-    -e "SIM_BASE_SIM_WORKSPACE=$BASE_SIM_WORKSPACE" \
-    -e "SIM_DEV_SOURCE=$DEV_SOURCE" \
-    -e "SIM_COMMON_SOURCE=$COMMON_SOURCE" \
-    -e "SIM_ADAPTER_SOURCE=$ADAPTER_SOURCE" \
-    -e "SIM_CATKIN_BUILD_ARGS=$build_args" \
     -e PYTHONDONTWRITEBYTECODE=1 \
-    "$DEV_CONTAINER" bash -s <<'CONTAINER_BUILD_SCRIPT'
-set -eo pipefail
-source /root/.bashrc
-mkdir -p "$SIM_DEV_WORKSPACE/src"
-cd "$SIM_DEV_WORKSPACE"
-
-underlay_marker="$SIM_DEV_WORKSPACE/.simulation_underlay"
-migrated_underlay=false
-if [ ! -f "$underlay_marker" ] || \
-   ! grep -qx "schema=sim2real-v1" "$underlay_marker" || \
-   ! grep -qx "underlay=$SIM_BASE_SIM_WORKSPACE/devel" "$underlay_marker"; then
-  migrated_underlay=true
-fi
-
-for profile_file in \
-  "$SIM_DEV_WORKSPACE/.catkin_tools/profiles/default/config.yaml" \
-  "$SIM_DEV_WORKSPACE/.catkin_tools/profiles/default/build.yaml"; do
-  if [ -f "$profile_file" ] && \
-     ! grep -qx "extend_path: $SIM_BASE_SIM_WORKSPACE/devel" "$profile_file"; then
-    sed -i -E "s#^extend_path:.*#extend_path: $SIM_BASE_SIM_WORKSPACE/devel#" "$profile_file"
-    migrated_underlay=true
-  fi
-done
-
-catkin init
-catkin config --extend "$SIM_BASE_SIM_WORKSPACE/devel" --cmake-args -DCMAKE_BUILD_TYPE=Release
-if [ "$migrated_underlay" = true ]; then
-  echo "[INFO] Migrating catkin underlay to $SIM_BASE_SIM_WORKSPACE/devel; cleaning generated workspace products once."
-  catkin clean --yes
-fi
-
-read -r -a build_args <<< "$SIM_CATKIN_BUILD_ARGS"
-build_output="$(mktemp)"
-cleanup_build_output() {
-  rm -f "$build_output"
-}
-trap cleanup_build_output EXIT
-
-if catkin build --no-status "${build_args[@]}" 2>&1 | tee "$build_output"; then
-  :
-else
-  build_status="${PIPESTATUS[0]}"
-  if grep -Eq \
-    'internal compiler error: (Segmentation fault|Bus error|Aborted)|cc1plus.*(Segmentation fault|Bus error)' \
-    "$build_output"; then
-    echo "[WARN] GCC crashed while compiling the overlay; retrying once serially (-j1 -p1)." >&2
-    catkin build --no-status -j1 -p1
-  else
-    exit "$build_status"
-  fi
-fi
-
-cleanup_build_output
-trap - EXIT
-
-source "$SIM_DEV_WORKSPACE/devel/setup.bash"
-for package in diff_planner se3_controller traj_utils rviz_plugins sim2real_common sim2real_simulation; do
-  resolved="$(rospack find "$package")"
-  case "$package:$resolved" in
-    diff_planner:"$SIM_DEV_SOURCE"/*|se3_controller:"$SIM_DEV_SOURCE"/*|traj_utils:"$SIM_DEV_SOURCE"/*|rviz_plugins:"$SIM_DEV_SOURCE"/*) ;;
-    sim2real_common:"$SIM_COMMON_SOURCE"|sim2real_simulation:"$SIM_ADAPTER_SOURCE") ;;
-    *) echo "[ERROR] Package $package resolved to stale source: $resolved" >&2; exit 1 ;;
-  esac
-done
-printf 'schema=sim2real-v1\nunderlay=%s\n' "$SIM_BASE_SIM_WORKSPACE/devel" > "$underlay_marker"
-CONTAINER_BUILD_SCRIPT
-  info "Build complete; common, simulation adapter, and planner sources are active."
+    "$DEV_CONTAINER" \
+    "$PLANNER_BUILD_TOOL" \
+      --project-root "$PLANNING_PROJECT_ROOT" \
+      --workspace-root "$PLANNER_WORKSPACES" \
+      --underlay "$BASE_SIM_WORKSPACE/devel" \
+      --flavor simulation \
+      --jobs "$BUILD_JOBS"
+  info "All isolated planner workspaces built successfully."
 }
 
 test_overlay() {
-  build_overlay
-  # shellcheck disable=SC2206
-  local packages=( $TEST_PACKAGES )
-  info "Running catkin tests: ${packages[*]}"
+  resolve_selected_planner false
+  ensure_prereqs
+  ensure_dev_container
+  [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] ||
+    die "SIM_BUILD_JOBS must be a positive integer."
+  info "Building and testing isolated workspaces: $TEST_WORKSPACES"
   docker exec -i \
     -e "ROS_HOME=$DEV_ROS_HOME" \
     -e "ROS_LOG_DIR=$DEV_ROS_LOG_DIR" \
-    "$DEV_CONTAINER" bash -lc "
-    set -eo pipefail
-    source /root/.bashrc
-    export ROS_HOME='$DEV_ROS_HOME' ROS_LOG_DIR='$DEV_ROS_LOG_DIR'
-    mkdir -p \"\$ROS_HOME\" \"\$ROS_LOG_DIR\"
-    cd '$DEV_WORKSPACE'
-    catkin test --no-status ${packages[*]}
-    if command -v catkin_test_results >/dev/null 2>&1; then
-      catkin_test_results --verbose '$DEV_WORKSPACE/build'
-    fi
-  "
+    -e PYTHONDONTWRITEBYTECODE=1 \
+    "$DEV_CONTAINER" \
+    "$PLANNER_BUILD_TOOL" \
+      --project-root "$PLANNING_PROJECT_ROOT" \
+      --workspace-root "$PLANNER_WORKSPACES" \
+      --underlay "$BASE_SIM_WORKSPACE/devel" \
+      --flavor simulation \
+      --jobs "$BUILD_JOBS" \
+      --workspaces "$TEST_WORKSPACES" \
+      --test
+  resolve_selected_planner true
 
-  info "Validating shared Planner, converter, controller, and simulation adapter launches."
+  info "Validating manager, controller, and simulation adapter launches."
   docker exec -i \
     -e "ROS_MASTER_URI=$ROS_MASTER_URI" \
     -e "ROS_IP=$ROS_IP" \
@@ -776,8 +794,10 @@ test_overlay() {
       unset ROS_HOSTNAME
       source /root/.bashrc
       export ROS_MASTER_URI='$ROS_MASTER_URI' ROS_IP='$ROS_IP'
-      roslaunch --nodes sim2real_common planner.launch
-      roslaunch --nodes sim2real_common trajectory_converter.launch
+      roslaunch --nodes sim2real_planner_manager planner_gateway.launch \
+        planner_id:='$PLANNER_ID' planner_profile:='$PLANNER_PROFILE' \
+        runtime_mode:=simulation \
+        manifest_root:='$PLANNER_MANIFEST_ROOT' repository_root:='$PLANNING_PROJECT_ROOT'
       roslaunch --nodes sim2real_common controller.launch vehicle_config:='$CONTROLLER_CONFIG'
       roslaunch --nodes sim2real_simulation localization.launch
       roslaunch --nodes sim2real_simulation goal_bridge.launch
@@ -842,6 +862,7 @@ cleanup_failed_start() {
 }
 
 start_stack() {
+  resolve_selected_planner false
   ensure_prereqs
   acquire_start_lock
   local active_marker=""
@@ -875,13 +896,16 @@ start_stack() {
 
   if [ "$SKIP_BUILD" != "true" ]; then
     build_overlay
-  elif ! docker exec -i "$DEV_CONTAINER" test -f "$DEV_WORKSPACE/devel/setup.bash"; then
-    die "SIM_SKIP_BUILD=true was requested, but the overlay has not been built yet."
+  elif ! docker exec -i "$DEV_CONTAINER" \
+    test -f "$PLANNER_WORKSPACES/control_ws/devel/setup.bash"; then
+    die "SIM_SKIP_BUILD=true was requested, but the control workspace has not been built."
   fi
+  resolve_selected_planner true
 
   info "Starting simulation tmux session: $SESSION_NAME"
   info "Simulation image/container: $SIMULATOR_CONTAINER"
   info "Simulation scene: ${SCENE_DESCRIPTION:-$SCENE}"
+  info "Planner plugin: $PLANNER_ID (profile=$PLANNER_PROFILE)"
   if [ -n "$WORLD" ]; then
     info "Gazebo world: $WORLD"
   fi
@@ -927,6 +951,10 @@ start_stack() {
     'timeout 8 rostopic echo -n 1 /localization/odom/header >/dev/null' localization
   wait_for_condition "shared registered point cloud" "$DEV_CONTAINER" \
     'timeout 8 rostopic echo -n 1 /localization/cloud_registered/header >/dev/null' localization
+  wait_for_condition "stable RViz environment map" "$DEV_CONTAINER" \
+    "width=\"\$(timeout 8 rostopic echo -n 1 /planning/viz/environment/width 2>/dev/null | awk 'NF && \$1 != \"---\" {print \$1; exit}')\" && [[ \"\$width\" =~ ^[0-9]+\$ ]] && (( width > 0 ))" localization
+  wait_for_condition "flight and goal visualization" "$DEV_CONTAINER" \
+    "rosnode list | grep -qx '/flight_visualization'" localization
 
   # Keep the localization failure behavior identical to the real stack.
   create_window localization_guard "$DEV_CONTAINER" \
@@ -936,21 +964,14 @@ start_stack() {
 
   if [ "$START_PLANNER" = "true" ]; then
     local planner_cmd
-    planner_cmd='exec roslaunch sim2real_common planner.launch drone_id:=0 odom_topic:=/localization/odom cloud_topic:=/localization/cloud_registered'
-    if [ -n "$PLANNER_CONFIG" ]; then
-      planner_cmd+=" planner_config:=$PLANNER_CONFIG"
-    fi
+    printf -v planner_cmd \
+      'exec roslaunch sim2real_planner_manager planner_gateway.launch planner_id:=%q planner_profile:=%q runtime_mode:=simulation manifest_root:=%q repository_root:=%q require_offboard:=true goal_topic:=/goal mavros_state_topic:=/mavros/state output_topic:=/command/trajectory' \
+      "$PLANNER_ID" "$PLANNER_PROFILE" "$PLANNER_MANIFEST_ROOT" "$PLANNING_PROJECT_ROOT"
     create_window planner "$DEV_CONTAINER" "$planner_cmd"
-    wait_for_condition "Diff-Planner nodes" "$DEV_CONTAINER" \
-      "rosnode list | grep -q 'diff_planner_node' && rosnode list | grep -q 'traj_server'" planner
-    ros_exec "$DEV_CONTAINER" \
-      "ground=\$(rosparam get /drone_0_diff_planner_node/grid_map/virtual_ground); ceil=\$(rosparam get /drone_0_diff_planner_node/grid_map/virtual_ceil); inflation=\$(rosparam get /drone_0_diff_planner_node/grid_map/obstacles_inflation); awk -v z='$RVIZ_GOAL_Z' -v ground=\"\$ground\" -v ceil=\"\$ceil\" -v inflation=\"\$inflation\" 'BEGIN { exit !(z > ground + inflation && z < ceil - inflation) }'" >/dev/null || \
-      die "SIM_RVIZ_GOAL_Z=$RVIZ_GOAL_Z does not leave obstacle-inflation clearance inside the shared Planner vertical fence."
-
-    create_window traj_converter "$DEV_CONTAINER" \
-      'exec roslaunch sim2real_common trajectory_converter.launch drone_id:=0'
-    wait_for_condition "shared trajectory converter" "$DEV_CONTAINER" \
-      "rosnode list | grep -qx '/trajectory_msg_converter' && rostopic list | grep -qx '/command/trajectory'" traj_converter
+    wait_for_condition "$PLANNER_ID planner gateway" "$DEV_CONTAINER" \
+      "rostopic list | grep -qx '/planning/status' && rostopic list | grep -qx '/planning/capabilities' && rosnode list | grep -qx '/planner_gateway' && rosnode list | grep -qx '/planner_visualization'" planner
+    wait_for_condition "$PLANNER_ID READY state" "$DEV_CONTAINER" \
+      "status=\$(timeout 5 rostopic echo -n 1 /planning/status 2>/dev/null) && grep -Eq '^state: 1$' <<<\"\$status\" && grep -Eq '^odom_ready: True$' <<<\"\$status\" && grep -Eq '^map_ready: True$' <<<\"\$status\"" planner
   else
     info "Planner startup skipped (SIM_START_PLANNER=false)."
   fi
@@ -1124,7 +1145,7 @@ stop_stack() {
 
   if [ "$has_session" = "true" ]; then
     info "Stopping simulation session: $SESSION_NAME"
-    for window_name in rviz goal_bridge se3 traj_converter planner localization_guard localization sitl roscore; do
+    for window_name in rviz goal_bridge se3 planner localization_guard localization sitl roscore; do
       if tmux_has_window "$window_name"; then
         tmux send-keys -t "$SESSION_NAME:$window_name" C-c
       fi
@@ -1135,20 +1156,23 @@ stop_stack() {
 
   if [ "$owned_stack" = "true" ]; then
     kill_matching "$DEV_CONTAINER" INT \
-      "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "pointcloud_to_world.py" "sim_odometry_adapter.py" \
-      "traj_server" "diff_planner_node" "trajectory_msg_converter.py" "rviz_2d_goal_bridge.py" "rviz"
+      "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
+      "pointcloud_to_world.py" "sim_odometry_adapter.py" "stable_environment_viz.py" "flight_visualization.py" "planner_backend_runner.py" "planner_manager.py" "planner_gateway.py" "planner_visualization.py" "command_gateway.py" \
+      "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
     kill_matching "$SIMULATOR_CONTAINER" INT \
       "outdoor_mid360.launch" "mavros_node" "gzserver" "gzclient" "PX4-Autopilot.*px4" "rosmaster" "roscore"
     sleep 2
     kill_matching "$DEV_CONTAINER" TERM \
-      "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "pointcloud_to_world.py" "sim_odometry_adapter.py" \
-      "traj_server" "diff_planner_node" "trajectory_msg_converter.py" "rviz_2d_goal_bridge.py" "rviz"
+      "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
+      "pointcloud_to_world.py" "sim_odometry_adapter.py" "stable_environment_viz.py" "flight_visualization.py" "planner_backend_runner.py" "planner_manager.py" "planner_gateway.py" "planner_visualization.py" "command_gateway.py" \
+      "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
     kill_matching "$SIMULATOR_CONTAINER" TERM \
       "outdoor_mid360.launch" "mavros_node" "gzserver" "gzclient" "PX4-Autopilot.*px4" "rosmaster" "roscore"
     sleep 2
     kill_matching "$DEV_CONTAINER" KILL \
-      "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "pointcloud_to_world.py" "sim_odometry_adapter.py" \
-      "traj_server" "diff_planner_node" "trajectory_msg_converter.py" "rviz_2d_goal_bridge.py" "rviz"
+      "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
+      "pointcloud_to_world.py" "sim_odometry_adapter.py" "stable_environment_viz.py" "flight_visualization.py" "planner_backend_runner.py" "planner_manager.py" "planner_gateway.py" "planner_visualization.py" "command_gateway.py" \
+      "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
     kill_matching "$SIMULATOR_CONTAINER" KILL \
       "outdoor_mid360.launch" "mavros_node" "gzserver" "gzclient" "PX4-Autopilot.*px4" "rosmaster" "roscore"
     if rosbag_record_process_running; then
@@ -1192,12 +1216,15 @@ status_stack() {
   fi
 
   if container_running "$DEV_CONTAINER" && master_is_running; then
-    info "Active shared and simulation package paths:"
+    info "Active interface/control package paths:"
     ros_exec "$DEV_CONTAINER" \
-      "for package in diff_planner se3_controller traj_utils rviz_plugins sim2real_common sim2real_simulation; do printf '%s=' \"\$package\"; rospack find \"\$package\"; done"
+      "for package in sim2real_planning_msgs sim2real_planner_manager se3_controller sim2real_common sim2real_simulation; do printf '%s=' \"\$package\"; rospack find \"\$package\"; done"
     info "Core ROS nodes:"
     ros_exec "$DEV_CONTAINER" \
-      "rosnode list | grep -E 'sitl|gazebo|mavros|diff_planner|traj_server|se3_controller|pointcloud|traj_msg|goal_bridge|flight_recorder|rviz' || true"
+      "rosnode list | grep -E 'sitl|gazebo|mavros|planner|traj_server|se3_controller|pointcloud|stable_environment|flight_visualization|goal_bridge|flight_recorder|rviz' || true"
+    info "Planner status:"
+    ros_exec "$DEV_CONTAINER" \
+      "timeout 4 rostopic echo -n 1 /planning/status 2>/dev/null || true"
     if rosbag_record_process_running; then
       info "rosbag recorder is active: $(current_rosbag_output_prefix 2>/dev/null || echo unknown-prefix)"
     else
@@ -1352,6 +1379,12 @@ main() {
   local action="${1:-}"
   shift || true
 
+  if [ "$action" = "planners" ]; then
+    [ "$#" -eq 0 ] || die "Usage: $0 planners"
+    list_planners
+    return 0
+  fi
+
   validate_bool_config
 
   case "$action" in
@@ -1369,6 +1402,7 @@ main() {
       stop_stack
       ;;
     restart)
+      resolve_selected_planner false
       acquire_start_lock
       stop_stack
       start_stack
@@ -1376,6 +1410,9 @@ main() {
       ;;
     status)
       status_stack
+      ;;
+    planners)
+      list_planners
       ;;
     attach)
       attach_stack

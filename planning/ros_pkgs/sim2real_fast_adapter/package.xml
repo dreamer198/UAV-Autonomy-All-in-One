@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>sim2real_fast_adapter</name>
+  <version>0.1.0</version>
+  <description>Isolated Fast-Planner backend adapter for the sim2real planner API.</description>
+  <maintainer email="maintainers@invalid.local">UAV-Autonomy-All-in-One maintainers</maintainer>
+  <license>GPL-3.0</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>plan_manage</depend>
+  <depend>bspline</depend>
+  <depend>sim2real_planning_msgs</depend>
+  <test_depend>python3-yaml</test_depend>
+  <test_depend>rostest</test_depend>
+  <test_depend>rosunit</test_depend>
+</package>

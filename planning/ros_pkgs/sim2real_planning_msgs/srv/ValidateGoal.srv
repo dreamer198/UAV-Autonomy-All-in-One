@@ -1,0 +1,4 @@
+sim2real_planning_msgs/PlannerGoal goal
+---
+bool valid
+string reason

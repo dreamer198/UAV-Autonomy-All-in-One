@@ -11,6 +11,20 @@
   <arg name="cloud_max_points" default="80000"/>
   <arg name="cloud_min_range" default="0.2"/>
   <arg name="cloud_max_range" default="50.0"/>
+  <arg name="environment_viz_enable" default="true"/>
+  <arg name="environment_viz_topic" default="/planning/viz/environment"/>
+  <arg name="environment_viz_voxel_size" default="0.12"/>
+  <arg name="environment_viz_min_range" default="0.2"/>
+  <!-- Gazebo's MID-360 emits no-return endpoints at 45 m. Keep them out of
+       this display-only accumulator so RViz does not grow a phantom shell. -->
+  <arg name="environment_viz_max_range" default="44.0"/>
+  <!-- Hide the ground plane from the accumulated obstacle display. The RViz
+       grid remains available for selecting XY goals. -->
+  <arg name="environment_viz_min_z" default="0.15"/>
+  <arg name="environment_viz_max_z" default="3.2"/>
+  <arg name="environment_viz_min_hits" default="2"/>
+  <arg name="environment_viz_max_voxels" default="300000"/>
+  <arg name="environment_viz_publish_rate" default="2.0"/>
 
   <node pkg="sim2real_simulation" type="sim_odometry_adapter.py" name="sim_odometry_adapter" output="screen">
     <param name="input_topic" value="$(arg input_odom_topic)"/>
@@ -43,5 +57,41 @@
     <param name="max_points" value="$(arg cloud_max_points)"/>
     <param name="min_range" value="$(arg cloud_min_range)"/>
     <param name="max_range" value="$(arg cloud_max_range)"/>
+  </node>
+
+  <!-- A human-facing persistent layer derived only from the shared cloud
+       contract. It is not remapped into Diff or Fast and cannot affect
+       collision checking or planning. -->
+  <node if="$(arg environment_viz_enable)"
+        pkg="sim2real_simulation" type="stable_environment_viz.py"
+        name="stable_environment_viz" output="screen">
+    <param name="input_topic" value="$(arg cloud_topic)"/>
+    <param name="output_topic" value="$(arg environment_viz_topic)"/>
+    <param name="world_frame" value="$(arg world_frame)"/>
+    <param name="sensor_frame" value="$(arg lidar_frame)"/>
+    <param name="voxel_size" value="$(arg environment_viz_voxel_size)"/>
+    <param name="min_range" value="$(arg environment_viz_min_range)"/>
+    <param name="max_range" value="$(arg environment_viz_max_range)"/>
+    <param name="min_z" value="$(arg environment_viz_min_z)"/>
+    <param name="max_z" value="$(arg environment_viz_max_z)"/>
+    <param name="min_hits" value="$(arg environment_viz_min_hits)"/>
+    <param name="max_voxels" value="$(arg environment_viz_max_voxels)"/>
+    <param name="publish_rate" value="$(arg environment_viz_publish_rate)"/>
+  </node>
+
+  <!-- Common human-facing flight history and goal markers. This node only
+       subscribes to public state and never publishes planner/control input. -->
+  <node pkg="sim2real_simulation" type="flight_visualization.py"
+        name="flight_visualization" output="screen">
+    <param name="world_frame" value="$(arg world_frame)"/>
+    <param name="odom_topic" value="$(arg odom_topic)"/>
+    <param name="state_topic" value="/mavros/state"/>
+    <param name="status_topic" value="/planning/status"/>
+    <param name="path_topic" value="/planning/viz/executed_path"/>
+    <param name="active_goal_marker_topic"
+           value="/planning/viz/active_goal"/>
+    <param name="path_min_distance" value="0.03"/>
+    <param name="path_max_points" value="5000"/>
+    <param name="path_line_width" value="0.055"/>
   </node>
 </launch>

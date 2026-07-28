@@ -12,6 +12,10 @@ max_feedforward_acc: 1.2
 odom_timeout: 0.2
 imu_timeout: 0.2
 state_timeout: 2.0
+# The gateway and every backend publish at >=80 Hz. If that stream disappears,
+# discard any moving velocity/acceleration setpoint within 80 ms.
+trajectory_command_timeout: 0.08
+command_publisher_node: /planner_gateway
 
 # 里程计或 IMU 失效且状态仍可信时，停止控制输出并限频请求 AUTO.LOITER。
 # 状态本身失效时只停止输出，由 PX4 的 OFFBOARD-loss failsafe 接管。

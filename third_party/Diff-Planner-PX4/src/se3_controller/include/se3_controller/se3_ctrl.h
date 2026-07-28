@@ -5,6 +5,9 @@
 
 #ifndef SE3_CTRL_H
 #define SE3_CTRL_H
+#include <string>
+
+#include <ros/message_event.h>
 #include <ros/ros.h>
 #include <mavros_msgs/State.h>
 #include <mavros_msgs/SetMode.h>
@@ -26,7 +29,7 @@ private:
     ros::NodeHandle nh_;
     ros::Publisher cmd_pub_, desire_odom_pub_, local_pos_pub_;
     ros::Subscriber odom_sub_, imu_sub_, state_sub_;
-    ros::Subscriber desire_odom_sub_, desire_angle_sub_, multiDOFJoint_sub_;
+    ros::Subscriber desire_angle_sub_, multiDOFJoint_sub_;
     ros::ServiceClient set_mode_client_;
     ros::ServiceClient arming_client_;
     ros::ServiceServer land_service_;
@@ -48,12 +51,15 @@ private:
     bool land_mode_request_accepted_{false};
     double max_feedforward_acc_, odom_timeout_{0.2};
     double imu_timeout_{0.2}, state_timeout_{2.0};
+    double trajectory_command_timeout_{0.08};
+    std::string command_publisher_node_{"/planner_gateway"};
     double land_retry_interval_{1.0}, safety_hold_retry_interval_{1.0};
     double ki_pz_{0.0}, int_limit_z_{5.0};
     Eigen::Vector3d geo_fence_;
     ros::Time state_rcv_stamp_, state_msg_stamp_;
     ros::Time last_land_mode_request_, last_safety_hold_request_;
     ros::Time last_offboard_request_, last_arm_request_;
+    ros::WallTime last_trajectory_command_wall_time_;
 
     Eigen::Vector3d kp_p_, kp_v_, kp_a_, kp_q_, kp_w_, kd_p_, kd_v_, kd_a_, kd_q_, kd_w_;
     double limit_err_p_, limit_err_v_, limit_err_a_, limit_d_err_p_, limit_d_err_v_, limit_d_err_a_;
@@ -81,8 +87,9 @@ private:
     void OdomCallback(const nav_msgs::Odometry::ConstPtr &msg);
     void IMUCallback(const sensor_msgs::Imu::ConstPtr &msg);
     void StateCallback(const mavros_msgs::State::ConstPtr &msg);
-    void DesireOdomCallback(const nav_msgs::Odometry::ConstPtr &msg);
-    void multiDOFJointCallback(const trajectory_msgs::MultiDOFJointTrajectory &msg);
+    void multiDOFJointCallback(
+        const ros::MessageEvent<
+            trajectory_msgs::MultiDOFJointTrajectory const> &event);
 
 
     void DynamicTuneCallback(se3_controller::se3_dynamic_tuneConfig &config, uint32_t level){

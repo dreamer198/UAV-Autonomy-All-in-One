@@ -1,0 +1,19 @@
+backend:
+  backend_id: diff
+  api_version: sim2real.planner/v1
+  odom_timeout: 0.5
+  cloud_timeout: 1.0
+  heartbeat_timeout: 0.5
+  startup_grace: 10.0
+  planning_timeout: 10.0
+  status_rate: 20.0
+  goal_position_tolerance: 0.35
+  reached_velocity_tolerance: 0.2
+  reached_yaw_tolerance_deg: 5.0
+  reached_yaw_rate_tolerance_deg_s: 10.0
+  reached_hold_time: 0.5
+  virtual_ground: 0.1
+  virtual_ceil: 3.0
+  obstacle_inflation: 0.33
+  max_velocity: 0.5
+  max_acceleration: 0.8

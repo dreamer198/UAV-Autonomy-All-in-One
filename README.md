@@ -1,9 +1,9 @@
 # UAV Autonomy All-in-One
 
 `UAV Autonomy All-in-One` 是基于 ROS1 Noetic、PX4 和 Gazebo Classic 的一体化
-无人机自主飞行平台，覆盖仿真、传感器与定位适配、规划、轨迹控制、任务执行和
-Jetson 真机部署。当前默认集成 Diff-Planner，后续规划算法可复用公共定位、目标、
-轨迹和控制接口。
+无人机自主飞行平台，覆盖仿真、传感器与定位适配、多规划器、轨迹控制、任务执行和
+Jetson 真机部署。当前提供 Diff-Planner、Fast-Planner Kinodynamic 和
+Fast-Planner Topological 三个可启动时选择的规划插件，默认使用 `diff`。
 
 ```text
 仿真：PX4 SITL + Gazebo + 模拟 MID-360
@@ -14,7 +14,7 @@ Jetson 真机部署。当前默认集成 Diff-Planner，后续规划算法可复
        /localization/cloud_registered
                   │
                   ▼
-  Planner（默认 Diff-Planner）→ traj_server → SE3 → MAVROS → PX4
+  planner_gateway → 选中的规划器插件 → SE3 → MAVROS → PX4
 ```
 
 所有命令均在仓库根目录执行。
@@ -41,6 +41,41 @@ SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
 
 `arm` 使用 PX4 原生 `AUTO.TAKEOFF` 起飞，稳定后自动切入 OFFBOARD。`SIM_TAKEOFF_HEIGHT` 是相对 PX4 Home 的起飞高度，省略时默认为 `1.0 m`。
 
+启动时切换规划器：
+
+```bash
+./launch/sim.sh --planner diff start
+./launch/sim.sh --planner fast-kino start
+./launch/sim.sh --planner fast-topo start
+```
+
+不需要先执行 `./launch/sim.sh planners`。该命令只是可选的诊断工具，用于检查
+manifest 扫描结果、插件 workspace 是否已构建，以及插件允许的仿真/真机模式和默认
+profile；固定使用三个内置规划器时可以直接通过 `--planner` 启动。真机侧对应命令为
+`./launch/real.sh planners`。
+
+规划器只能在完整栈停止后切换，不支持空中热切换或自动 fallback。Fast Kino/Topo
+共用唯一的固定地图配置，不再区分 `local`/`outdoor`，所以三个内置规划器启动时都
+不需要 `--planner-profile`。Fast 地图名义范围为 `30 × 30 × 5 m`，原点为
+`(-15, -15, -1)`，分辨率为 `0.1 m`；计入 `0.1 m` 障碍膨胀后，可接受目标的
+x/y 范围为 `[-14.9, 14.9] m`。森林场景不会再自动替换 Fast 地图配置。Fast 的到达
+状态以真实里程计收敛为准，不再只依据轨迹播放时间。Fast adapter 还会在其私有地图
+输入中补充仿真场景的稠密地面，避免单帧 MID-360 稀疏点云让规划器从墙体下方穿出。
+Fast 的 `manager/max_vel` 和 `manager/max_acc` 是轨迹优化参数，不是公共接口的硬
+拒绝阈值；adapter 会拒绝 NaN/Inf 等非法输出，但不会因为有限轨迹暂时超过这两个
+名义值而撤销整个目标。
+
+仿真 RViz 对三个规划器使用相同的显示布局。默认环境层
+`/planning/viz/environment` 只由公共 world 点云生成：它过滤 MID-360 的无回波端点、
+隐藏地面并持续累积已重复观测的障碍，因此靠近墙体后已显示的场景不会随 Fast 的
+单帧局部地图一起消失。该层仅用于显示，不会回灌或修改任一规划器的私有地图；
+原始激光、归一化占据障碍和安全膨胀层默认打开。插件只发布 raw/backend 调试数据，
+公共 `planner_visualization` 统一过滤显示：Fast 的私有虚拟地面仍参与碰撞检查，但
+不会遮挡 RViz；膨胀层使用高不透明度高度着色，青色线框表示插件声明的固定地图
+边界。算法原生轨迹和搜索图默认关闭，公共紫色线只根据网关已接受的控制指令生成。
+橙色箭头表示 RViz 输入目标，绿色球表示 Planner 当前实际目标，青色轨迹表示实测
+飞行路径。
+
 切换内置场景：
 
 ```bash
@@ -64,6 +99,7 @@ FCU_DEVICE=/dev/ttyACM0 ./launch/real_container.sh run
 按部署指南启动完整栈并完成检查后，飞行入口为：
 
 ```bash
+./launch/real.sh --planner diff start
 REAL_TAKEOFF_HEIGHT=1.5 ./launch/real.sh arm
 ./launch/real.sh goal 2.0 2.0 1.5
 ./launch/real.sh land
@@ -72,6 +108,9 @@ REAL_TAKEOFF_HEIGHT=1.5 ./launch/real.sh arm
 `arm` 使用 PX4 原生起飞并自动交接到 OFFBOARD。`stop/restart` 不会请求降落，
 飞机仍解锁或 MAVROS 状态无法确认时会被拒绝。
 
+Fast Kino/Topo 当前 manifest 的 `real_flight` 为 `false`，真机入口会拒绝启动；
+只有完成各自独立的真机验收后才能放行。
+
 ## 目标与 Mission
 
 ```text
@@ -79,8 +118,10 @@ REAL_TAKEOFF_HEIGHT=1.5 ./launch/real.sh arm
 ./launch/real.sh goal X Y Z [YAW_DEG]
 ```
 
-坐标系为 `world`，yaw 单位为度。目标没有距离硬限制，但 Diff-Planner 使用滚动
-局部地图，长距离参考线不是全局无碰撞路线。复杂路线应使用经过确认的 Mission 航点：
+坐标系为 `world`，yaw 单位为度。目标会先交给当前插件验证：Diff 使用滚动局部
+地图；Fast 只检查统一固定地图的边界及障碍膨胀，不会用局部更新窗口额外缩小目标
+范围。复杂路线应使用经过确认的 Mission
+航点，Mission 会在起飞前逐点调用当前插件的目标验证服务：
 
 ```bash
 ./launch/sim.sh mission MISSION_FILE.json
@@ -97,14 +138,16 @@ REAL_TAKEOFF_HEIGHT=1.5 ./launch/real.sh arm
 | 目录 | 内容 |
 |---|---|
 | `common/` | 两端共享的 ROS launch、参数和飞行命令执行器 |
+| `planning/` | 公共规划消息、manager/gateway、Diff/Fast adapters、插件 manifest 和隔离 workspace 构建脚本 |
 | `simulation/` | 仿真镜像、场景、模型、适配节点和仿真控制参数 |
 | `deployment/` | 真机镜像、Livox/FAST-LIO 适配、外参和真机控制参数 |
 | `launch/` | 宿主机入口脚本 |
-| `third_party/` | Diff-Planner、SE3、FAST-LIO 和 Livox 源码 |
+| `third_party/` | Diff-Planner、Fast-Planner、SE3、FAST-LIO 和 Livox 源码 |
 | `docs/` | 操作、算法与调参文档 |
 | `runtime/` | 自动生成的构建缓存、日志和 rosbag |
 
-公共接口和参数归属见 [`common/README.md`](common/README.md)。
+公共飞行接口和参数归属见 [`common/README.md`](common/README.md)，插件 API、
+workspace 隔离和扩展方法见 [`planning/README.md`](planning/README.md)。
 
 ## 测试与日志
 
@@ -126,6 +169,7 @@ REAL_TAKEOFF_HEIGHT=1.5 ./launch/real.sh arm
 | [仿真运行指南](docs/simulation.md) | 启动、场景、目标、Mission、日志和排错 |
 | [真机部署指南](docs/deployment.md) | Jetson、传感器、飞控配置与操作流程 |
 | [公共自主飞行接口](common/README.md) | 仿真与真机共享的话题、坐标系和 ROS 入口 |
+| [多规划器插件框架](planning/README.md) | 插件选择、公共消息、隔离 workspace、manifest 和扩展方法 |
 | [控制器调参与掉高排查](docs/controller_tuning.md) | 悬停推力、竖直积分和高度问题 |
 | [Diff-Planner 原理](docs/diff_planner_principles.md) | 局部地图、规划流程与能力边界 |
 | [SE3 控制器](docs/se3_controller.md) | 轨迹到姿态、推力的控制链路 |
@@ -137,6 +181,7 @@ REAL_TAKEOFF_HEIGHT=1.5 ./launch/real.sh arm
 本项目基于并集成了以下开源项目，感谢其作者和维护者：
 
 - 规划与控制：[EGO-Planner-v2](https://github.com/ZJU-FAST-Lab/EGO-Planner-v2)、
+  [Fast-Planner](https://github.com/HKUST-Aerial-Robotics/Fast-Planner)、
   [Diff-Planner](https://github.com/DifferentialRobotics/Diff-Planner)、
   [Diff-Planner-PX4](https://github.com/Tfly6/Diff-Planner-PX4) 和
   [SE3 Controller](https://github.com/HITSZ-MAS/se3_controller)；

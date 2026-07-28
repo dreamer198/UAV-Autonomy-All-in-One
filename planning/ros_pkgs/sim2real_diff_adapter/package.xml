@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>sim2real_diff_adapter</name>
+  <version>0.1.0</version>
+  <description>Process boundary adapter for the Diff-Planner backend.</description>
+  <maintainer email="dreamer198@users.noreply.github.com">dreamer198</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>quadrotor_msgs</depend>
+  <depend>rospy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>sim2real_planning_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>traj_utils</depend>
+  <exec_depend>diff_planner</exec_depend>
+
+  <test_depend>python3-nose</test_depend>
+
+  <export/>
+</package>

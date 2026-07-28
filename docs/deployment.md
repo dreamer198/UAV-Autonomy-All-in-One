@@ -232,7 +232,7 @@ armed/OFFBOARD、定位保护和当前 Planner 高度范围。任一条件不满
 
 ## Planner 参数
 
-默认参数来自 `common/config/planner.yaml`。目标和 Mission 航点必须满足：
+Diff 默认参数来自 `planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml`。目标和 Mission 航点必须满足：
 
 ```text
 virtual_ground + obstacles_inflation < Z
@@ -248,7 +248,7 @@ Z < virtual_ceil - obstacles_inflation
 公共 Planner 配置会复制进真机镜像。永久修改后需要重建镜像和容器。临时测试可在飞机落地并解除锁定后使用挂载目录：
 
 ```bash
-cp common/config/planner.yaml runtime/tmp/planner_test.yaml
+cp planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml runtime/tmp/planner_test.yaml
 # 修改 runtime/tmp/planner_test.yaml
 PLANNER_CONFIG=/root/tmp/planner_test.yaml ./launch/real.sh restart
 ```

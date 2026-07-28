@@ -7,7 +7,7 @@ import unittest
 import yaml
 
 
-class PlannerConfigTest(unittest.TestCase):
+class DiffPlannerConfigTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         config_path = os.path.join(
@@ -15,6 +15,13 @@ class PlannerConfigTest(unittest.TestCase):
         )
         with open(config_path, "r", encoding="utf-8") as config_file:
             cls.config = yaml.safe_load(config_file)
+        adapter_config_path = os.path.join(
+            os.path.dirname(__file__), "..", "config", "diff.yaml"
+        )
+        with open(
+            adapter_config_path, "r", encoding="utf-8"
+        ) as adapter_config_file:
+            cls.adapter_config = yaml.safe_load(adapter_config_file)
 
     def test_mid360_map_coverage(self):
         grid_map = self.config["grid_map"]
@@ -50,6 +57,9 @@ class PlannerConfigTest(unittest.TestCase):
         fsm = self.config["fsm"]
         retry_interval = float(fsm["replan_retry_interval"])
         failure_timeout = float(fsm["replan_failure_timeout"])
+        planning_timeout = float(
+            self.adapter_config["backend"]["planning_timeout"]
+        )
 
         self.assertTrue(math.isfinite(retry_interval))
         self.assertTrue(math.isfinite(failure_timeout))
@@ -57,6 +67,8 @@ class PlannerConfigTest(unittest.TestCase):
         self.assertGreater(failure_timeout, retry_interval)
         self.assertEqual(retry_interval, 0.1)
         self.assertEqual(failure_timeout, 1.0)
+        self.assertTrue(math.isfinite(planning_timeout))
+        self.assertEqual(planning_timeout, 10.0)
 
     def test_inflation_matches_current_airframe_baseline(self):
         grid_map = self.config["grid_map"]
@@ -74,6 +86,46 @@ class PlannerConfigTest(unittest.TestCase):
         self.assertAlmostEqual(inflation, 0.33)
         self.assertAlmostEqual(quantized_inflation, 0.33)
         self.assertGreaterEqual(quantized_inflation, required_radius)
+
+    def test_adapter_stop_is_recoverable_without_weakening_mandatory_stop(self):
+        package_root = os.path.realpath(
+            os.path.join(os.path.dirname(__file__), "..")
+        )
+        launch_path = os.path.join(
+            package_root, "launch", "diff_backend.launch"
+        )
+        fsm_path = os.path.abspath(
+            os.path.join(
+                package_root,
+                "..",
+                "..",
+                "..",
+                "third_party",
+                "Diff-Planner-PX4",
+                "src",
+                "diff_planner",
+                "plan_manage",
+                "src",
+                "diff_replan_fsm.cpp",
+            )
+        )
+        with open(launch_path, "r", encoding="utf-8") as launch_file:
+            launch = launch_file.read()
+        with open(fsm_path, "r", encoding="utf-8") as fsm_file:
+            fsm = fsm_file.read()
+
+        self.assertIn(
+            'name="backend/native_stop_topic" '
+            'value="/planning/backends/$(arg backend_id)/native/recoverable_stop"',
+            launch,
+        )
+        self.assertIn("recoverableStopCallback", fsm)
+        mandatory_callback = fsm.split(
+            "void DiffReplanFSM::mandatoryStopCallback", 1
+        )[1].split(
+            "void DiffReplanFSM::recoverableStopCallback", 1
+        )[0]
+        self.assertIn("enable_fail_safe_ = false", mandatory_callback)
 
 
 if __name__ == "__main__":

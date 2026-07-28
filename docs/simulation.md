@@ -86,6 +86,28 @@ MAVROS 使用的 `/move_base_simple/goal` 混淆。目标桥非锁存，并在�
 有限数值、`world` 坐标系、armed/OFFBOARD、MAVROS 状态新鲜度、定位保护和当前
 Planner 高度范围；不合格目标直接丢弃，不会排队。
 
+默认 RViz 的 `Environment/Persistent obstacles` 订阅
+`/planning/viz/environment`。这是从公共 `/localization/cloud_registered` 生成的
+显示专用持久体素层：45 m 无回波端点、地面和单次噪点不会进入显示，已经重复观测到的
+墙体不会因飞机靠墙后的激光遮挡而清空。它不参与 Diff/Fast 建图、目标校验或碰撞
+检查。原始单帧点云位于默认关闭的 `Environment/Live lidar`；`Planner view` 中的
+`Observed obstacles` 和 `Safety clearance` 由公共可视化节点从当前插件的 raw
+输出归一化得到。显示层统一隐藏 z≤0.36 m 的虚拟地面/地面体素，但不会修改送入规划器
+的点云、占据状态或碰撞检查。当前规划占据使用高不透明度紫色大点，与灰白累积地图
+区分；安全膨胀使用高不透明度高度着色。固定地图插件还会显示青色
+`Fixed planning bounds` 线框。算法原生初始路径和执行轨迹保留在
+`/planning/viz/backend/*` 并默认打开；没有实际发布数据的公共 `backend/search`
+已删除，其他内部地图仍默认关闭。
+原始 2D 点击、`selected_goal` 和算法私有 goal marker 不再重复发布或加入 RViz；
+目标显示只保留具有明确公共语义的 `active_goal`。
+
+`Planning` 默认显示两种插件无关的执行信息：
+
+- `Active planner goal`：绿色球，表示 `/planning/status.active_goal` 中当前有效的
+  三维目标；这是唯一的目标 marker，使用规划器最终接受的实际高度和 goal ID；
+- `Actual flight path`：青色折线，仅在 armed 时根据 `/localization/odom` 追加，
+  每次重新解锁都会清空并开始一条新路径，降落后保留最后一次路径。
+
 ## Mission
 
 核对任务文件后执行；根目录的 `mission_*.json` 可作为格式参考：
@@ -180,7 +202,7 @@ SIM_GPU_MODE=none ./launch/sim.sh start
 |---|---|
 | 启动、起飞、界面和录包 | [`launch/sim.sh`](../launch/sim.sh) |
 | 场景 world 与出生位姿 | [`simulation/config/scenes`](../simulation/config/scenes) |
-| Planner、地图和优化器 | [`common/config/planner.yaml`](../common/config/planner.yaml) |
+| Diff Planner、地图和优化器 | [`planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml`](../planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml) |
 | 轨迹预瞄与 yaw | [`common/config/trajectory_server.yaml`](../common/config/trajectory_server.yaml) |
 | 公共控制与安全开关 | [`common/config/controller.yaml`](../common/config/controller.yaml) |
 | 仿真载体控制参数 | [`simulation/config/controller.yaml`](../simulation/config/controller.yaml) |
@@ -204,10 +226,10 @@ virtual_ceil - obstacles_inflation
 原点到射线端点的最短地图更新距离，可过滤机体附近回波和零长度射线；它不是雷达
 最小量程，也不限制最大感知距离。
 
-长期修改应直接编辑 `common/config/planner.yaml`。临时测试完整配置时：
+Diff 的长期修改应直接编辑其插件配置。临时测试完整配置时：
 
 ```bash
-cp common/config/planner.yaml runtime/simulation/planner_override.yaml
+cp planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml runtime/simulation/planner_override.yaml
 # 编辑 runtime/simulation/planner_override.yaml
 SIM_PLANNER_CONFIG=/root/simulation_runtime/planner_override.yaml \
 ./launch/sim.sh restart

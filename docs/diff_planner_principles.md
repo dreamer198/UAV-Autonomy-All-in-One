@@ -73,7 +73,7 @@ virtual_ground + obstacles_inflation
 virtual_ceil - obstacles_inflation
 ```
 
-具体数值以 [planner.yaml](../common/config/planner.yaml) 为准。
+具体数值以 [Diff 插件配置](../planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml) 为准。
 
 ### 2.3 未知空间
 
@@ -187,7 +187,7 @@ INIT → WAIT_TARGET → SEQUENTIAL_START → EXEC_TRAJ
 
 ## 6. 配置来源
 
-仿真和真机共享 [planner.yaml](../common/config/planner.yaml)，yaw 采样参数位于
+仿真和真机共享 [Diff 插件配置](../planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml)，yaw 采样参数位于
 [trajectory_server.yaml](../common/config/trajectory_server.yaml)。常用参数分组：
 
 | 分组 | 主要作用 |

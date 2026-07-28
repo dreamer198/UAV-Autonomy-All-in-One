@@ -124,7 +124,7 @@ dynamic reconfigure 会整组提交控制增益，其默认值已与控制器启
 
 公共 [controller.yaml](../common/config/controller.yaml) 中的
 `max_feedforward_acc` 应覆盖
-[planner.yaml](../common/config/planner.yaml) 的规划加速度范围。若提高 Planner
+[Diff 插件 planner.yaml](../planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml) 的规划加速度范围。若提高 Planner
 加速度而不调整前馈限幅，控制器会裁剪期望加速度，动态误差随之增大。
 
 ### 5.4 位置和速度增益

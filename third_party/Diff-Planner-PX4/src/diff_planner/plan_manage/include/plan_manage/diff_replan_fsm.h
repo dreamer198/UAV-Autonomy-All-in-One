@@ -9,6 +9,7 @@
 #include <ros/ros.h>
 #include <std_msgs/Empty.h>
 #include <std_msgs/Float64.h>
+#include <std_msgs/Header.h>
 #include <vector>
 #include <visualization_msgs/Marker.h>
 
@@ -86,6 +87,7 @@ namespace diff_planner
 
     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_, touch_goal_, mandatory_stop_;
     bool have_queued_emergency_target_;
+    bool recoverable_stop_;
     bool have_goal_yaw_, have_odom_yaw_;
     FSM_EXEC_STATE exec_state_;
     int continously_called_times_{0};
@@ -101,7 +103,7 @@ namespace diff_planner
     /* ROS utils */
     ros::NodeHandle node_;
     ros::Timer exec_timer_, safety_timer_;
-    ros::Subscriber waypoint_sub_, odom_sub_, trigger_sub_, broadcast_ploytraj_sub_, mandatory_stop_sub_;
+    ros::Subscriber waypoint_sub_, odom_sub_, trigger_sub_, broadcast_ploytraj_sub_, mandatory_stop_sub_, recoverable_stop_sub_;
     ros::Publisher poly_traj_pub_, data_disp_pub_, broadcast_ploytraj_pub_, heartbeat_pub_, ground_height_pub_;
 
     /* state machine functions */
@@ -128,6 +130,7 @@ namespace diff_planner
 
     /* input-output */
     void mandatoryStopCallback(const std_msgs::Empty &msg);
+    void recoverableStopCallback(const std_msgs::Header &msg);
     void odometryCallback(const nav_msgs::OdometryConstPtr &msg);
     void triggerCallback(const geometry_msgs::PoseStampedPtr &msg);
     void RecvBroadcastMINCOTrajCallback(const traj_utils::MINCOTrajConstPtr &msg);

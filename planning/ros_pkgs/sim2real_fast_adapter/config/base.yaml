@@ -1,0 +1,152 @@
+fsm:
+  flight_type: 1
+  thresh_replan: 0.5
+  thresh_no_replan: 2.0
+  emergency_stop_velocity: 0.15
+  emergency_stop_settle_time: 0.20
+  # The native Fast demo assumes near-perfect trajectory tracking. PX4/SE3
+  # can lag a rolling B-spline near obstacles, so stop and rebuild from
+  # measured odometry before the reference gets farther ahead than this.
+  max_tracking_error: 0.40
+  waypoint_num: 0
+  act_map: false
+
+sdf_map:
+  frame_id: world
+  max_memory_mb: 512.0
+  obstacles_inflation: 0.1
+  # PointCloud2 mapping historically inflated z by only one voxel regardless
+  # of the configured body margin. Keep horizontal cost unchanged while
+  # blocking unsafe low-clearance hops over the 2.5 m simulation walls.
+  obstacles_inflation_z: 0.3
+  # Registered spinning-lidar messages are partial views, not complete local
+  # snapshots. Dynamic-obstacle mode is disabled for this plugin version, so
+  # retain static occupied voxels instead of forgetting walls every scan.
+  accumulate_cloud: true
+  local_bound_inflate: 0.2
+  local_map_margin: 5
+  ground_height: -1.0
+  fx: 1.0
+  fy: 1.0
+  cx: 0.0
+  cy: 0.0
+  use_depth_filter: false
+  depth_filter_tolerance: 0.15
+  depth_filter_maxdist: 5.0
+  depth_filter_mindist: 0.2
+  depth_filter_margin: 2
+  k_depth_scaling_factor: 1000.0
+  skip_pixel: 2
+  p_hit: 0.65
+  p_miss: 0.35
+  p_min: 0.12
+  p_max: 0.90
+  p_occ: 0.80
+  min_ray_length: 0.2
+  max_ray_length: 5.5
+  esdf_slice_height: 1.0
+  visualization_truncate_height: 3.0
+  virtual_ceil_height: 3.0
+  show_occ_time: false
+  show_esdf_time: false
+  pose_type: 1
+
+manager:
+  max_vel: 0.5
+  max_acc: 0.8
+  max_jerk: 4.0
+  dynamic_environment: 0
+  # Preserve Fast-Topo's native 7 m local segment. Its PRM needs to observe
+  # both the entry and exit of an obstacle along the reference; shortening
+  # this to 3 m makes a wall first seen around 2.4 m look unbounded and skips
+  # topological search entirely. Fast-Kino safely accepts the same horizon.
+  local_segment_length: 7.0
+  # Combined with the 0.1 m horizontal map inflation this covers the Iris
+  # collision envelope without rejecting Topo's inherited boundary points.
+  clearance_threshold: 0.3
+  control_points_distance: 0.3
+  use_geometric_path: false
+  use_optimization: true
+
+search:
+  max_tau: 0.6
+  init_max_tau: 0.8
+  max_vel: 0.5
+  max_acc: 0.8
+  w_time: 10.0
+  horizon: 3.0
+  lambda_heu: 5.0
+  resolution_astar: 0.1
+  time_resolution: 0.8
+  allocate_num: 100000
+  check_num: 8
+
+topo_prm:
+  sample_inflate_x: 1.0
+  # The default ego_swarm route may require passing below two staggered
+  # vertical walls. Its safe detour is about 3.2 m off the direct reference,
+  # so the native 3.5 m box leaves effectively no sampling width after the
+  # configured 0.3 m clearance.
+  sample_inflate_y: 5.0
+  sample_inflate_z: 1.0
+  # Keep the piecewise-linear guide farther from obstacles than the final
+  # 0.3 m execution gate. Cubic B-spline corner smoothing may consume part of
+  # this margin, especially while weaving through staggered walls.
+  clearance: 0.5
+  max_sample_time: 0.02
+  max_sample_num: 4000
+  max_raw_path: 300
+  max_raw_path2: 25
+  short_cut_num: 1
+  reserve_num: 6
+  ratio_to_short: 5.5
+  parallel_shortcut: true
+
+optimization:
+  lambda1: 10.0
+  lambda2: 5.0
+  lambda3: 0.00001
+  lambda4: 0.01
+  lambda5: 1.5
+  lambda6: 10.0
+  lambda7: 20.0
+  dist0: 0.5
+  dist1: 0.0
+  max_vel: 0.5
+  max_acc: 0.8
+  algorithm1: 15
+  algorithm2: 11
+  # Long topological guides need more than the native demo's two guide-phase
+  # evaluations; both phases remain bounded by a 20 ms wall-clock limit.
+  max_iteration_num1: 20
+  max_iteration_num2: 300
+  max_iteration_num3: 200
+  max_iteration_num4: 200
+  max_iteration_time1: 0.0001
+  max_iteration_time2: 0.02
+  max_iteration_time3: 0.003
+  max_iteration_time4: 0.003
+  order: 3
+
+adapter:
+  odom_timeout: 0.5
+  cloud_timeout: 1.0
+  # The public world cloud can contain isolated returns from the airframe.
+  # Fast's PointCloud2 map treats every point as an obstacle immediately, so
+  # remove only the physically occupied body/rotor envelope in the adapter.
+  self_filter_enabled: true
+  self_filter_radius: 0.35
+  self_filter_min_z: -0.20
+  self_filter_max_z: 0.20
+  self_filter_pose_tolerance: 0.10
+  heartbeat_timeout: 0.25
+  progress_timeout: 0.25
+  planning_timeout: 10.0
+  map_settle_time: 0.1
+  command_rate: 100.0
+  status_rate: 20.0
+  goal_position_tolerance: 0.35
+  reached_velocity_tolerance: 0.2
+  reached_yaw_tolerance_deg: 5.0
+  reached_yaw_rate_tolerance_deg_s: 10.0
+  reached_hold_time: 0.5
