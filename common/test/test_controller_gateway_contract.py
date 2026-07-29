@@ -88,6 +88,38 @@ class ControllerGatewayContractTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertNotIn("validate_command_limits", source)
 
+    def test_planner_selection_has_no_implicit_diff_default(self):
+        launch_files = (
+            PROJECT_ROOT / "common" / "launch" / "planner.launch",
+            PROJECT_ROOT / "common" / "launch" / "planning_control.launch",
+            PROJECT_ROOT
+            / "planning"
+            / "ros_pkgs"
+            / "sim2real_planner_manager"
+            / "launch"
+            / "planner_gateway.launch",
+        )
+        for path in launch_files:
+            with self.subTest(path=path):
+                root = ET.parse(path).getroot()
+                planner_arg = next(
+                    element
+                    for element in root.findall("arg")
+                    if element.attrib.get("name") == "planner_id"
+                )
+                self.assertNotIn("default", planner_arg.attrib)
+
+        gateway_source = (
+            PROJECT_ROOT
+            / "planning"
+            / "ros_pkgs"
+            / "sim2real_planner_manager"
+            / "scripts"
+            / "planner_gateway.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('get_param("~planner_id", "")', gateway_source)
+        self.assertIn("no default planner exists", gateway_source)
+
 
 if __name__ == "__main__":
     unittest.main()

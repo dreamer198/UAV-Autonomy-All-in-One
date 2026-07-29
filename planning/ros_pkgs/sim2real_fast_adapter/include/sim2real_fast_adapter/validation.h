@@ -96,6 +96,39 @@ inline bool goalInsideMapBounds(const geometry_msgs::Point& point,
   return true;
 }
 
+inline double virtualFloorMinimumGoalHeight(
+    double floor_height, double vertical_inflation, double clearance,
+    double resolution) {
+  if (!finite(floor_height) || !finite(vertical_inflation) ||
+      !finite(clearance) || !finite(resolution) ||
+      vertical_inflation < 0.0 || clearance < 0.0 || resolution <= 0.0) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  const double inflation_steps =
+      std::ceil(vertical_inflation / resolution);
+  // SDFMap stores a point at its voxel centre, which may be half a voxel
+  // above the requested plane, and then inflates it by whole voxel steps.
+  return floor_height + (inflation_steps + 0.5) * resolution + clearance;
+}
+
+inline bool goalAboveVirtualFloor(
+    double goal_z, double floor_height, double vertical_inflation,
+    double clearance, double resolution, std::string* reason) {
+  const double minimum_height = virtualFloorMinimumGoalHeight(
+      floor_height, vertical_inflation, clearance, resolution);
+  if (!finite(goal_z) || !finite(minimum_height)) {
+    if (reason) *reason = "invalid Fast virtual-floor geometry";
+    return false;
+  }
+  if (goal_z < minimum_height) {
+    if (reason) {
+      *reason = "goal does not preserve the planner clearance above the Fast virtual floor";
+    }
+    return false;
+  }
+  return true;
+}
+
 inline Eigen::Vector3d bodyVelocityToWorld(const Eigen::Quaterniond& body_in_world,
                                            const Eigen::Vector3d& body_velocity) {
   return body_in_world.normalized() * body_velocity;

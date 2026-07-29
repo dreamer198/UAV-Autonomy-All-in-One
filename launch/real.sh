@@ -4,7 +4,7 @@ set -Eeuo pipefail
 CONTAINER_NAME="${CONTAINER_NAME:-diff_planner_px4_real}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PLANNER_ID="${REAL_PLANNER:-diff}"
+PLANNER_ID="${REAL_PLANNER:-}"
 PLANNER_PROFILE="${REAL_PLANNER_PROFILE:-}"
 PLANNING_PROJECT_ROOT="${REAL_PROJECT_ROOT_CONTAINER:-/opt/uav-autonomy-aio}"
 PLANNER_MANIFEST_ROOT="$PLANNING_PROJECT_ROOT/planning/plugins"
@@ -92,6 +92,9 @@ usage() {
   cat <<'EOF'
 Usage: real.sh [--planner ID] [--planner-profile NAME] ACTION
 
+Planner selection:
+  start and restart require --planner ID or REAL_PLANNER.
+
 Default assumptions for UAV Autonomy All-in-One:
   - compatibility container name: diff_planner_px4_real
   - container was created by launch/real_container.sh
@@ -125,6 +128,13 @@ need_cmd() {
   fi
 }
 
+require_planner_selection() {
+  if [ -z "$PLANNER_ID" ]; then
+    echo "[ERROR] No planner selected. Pass --planner ID or set REAL_PLANNER. Run '$0 planners' to list available plugins." >&2
+    return 1
+  fi
+}
+
 ensure_prereqs() {
   need_cmd tmux
   need_cmd docker
@@ -142,6 +152,7 @@ list_planners() {
 }
 
 resolve_selected_planner() {
+  require_planner_selection
   local -a args=(
     "$PLANNER_MANIFEST_TOOL_HOST"
     --project-root "$PROJECT_ROOT"
@@ -151,7 +162,7 @@ resolve_selected_planner() {
   )
   [ -z "$PLANNER_PROFILE" ] || args+=(--profile "$PLANNER_PROFILE")
   PLANNER_PROFILE="$(python3 "${args[@]}" --field profile)" || {
-    echo "[ERROR] Planner selection failed. Run '$0 planners' to inspect real-flight capabilities." >&2
+    echo "[ERROR] Planner selection failed. Run '$0 planners' to inspect available plugins." >&2
     return 1
   }
   PLANNER_WORKSPACE_SETUP_REL="$(python3 "${args[@]}" --field workspace_setup_relative)" ||
@@ -812,13 +823,13 @@ prepare_runtime_planner_config() {
   if ! awk \
     -v resolution="$PLANNER_RESOLUTION" \
     -v inflation="$PLANNER_OBSTACLES_INFLATION" '
-      resolution != "" && /^  resolution:[[:space:]]*/ {
-        print "  resolution: " resolution
+      resolution != "" && /^    resolution:[[:space:]]*/ {
+        print "    resolution: " resolution
         resolution_replaced = 1
         next
       }
-      inflation != "" && /^  obstacles_inflation:[[:space:]]*/ {
-        print "  obstacles_inflation: " inflation
+      inflation != "" && /^    obstacles_inflation:[[:space:]]*/ {
+        print "    obstacles_inflation: " inflation
         inflation_replaced = 1
         next
       }
@@ -836,8 +847,8 @@ prepare_runtime_planner_config() {
   PLANNER_CONFIG="/root/tmp/$generated_name"
 
   local effective_resolution effective_inflation inflation_summary
-  effective_resolution="${PLANNER_RESOLUTION:-$(awk '/^  resolution:/ {print $2; exit}' "$source_config")}"
-  effective_inflation="${PLANNER_OBSTACLES_INFLATION:-$(awk '/^  obstacles_inflation:/ {print $2; exit}' "$source_config")}"
+  effective_resolution="${PLANNER_RESOLUTION:-$(awk '/^    resolution:/ {print $2; exit}' "$source_config")}"
+  effective_inflation="${PLANNER_OBSTACLES_INFLATION:-$(awk '/^    obstacles_inflation:/ {print $2; exit}' "$source_config")}"
   inflation_summary="$(python3 -c \
     'import math,sys; r,i=map(float,sys.argv[1:]); layers=max(0,math.ceil((i-1e-5)/r)); print("{} layer(s), approximately {:.3f} m".format(layers,layers*r))' \
     "$effective_resolution" "$effective_inflation")"
@@ -1136,9 +1147,9 @@ cleanup_failed_start() {
 }
 
 start_stack() {
+  resolve_selected_planner
   ensure_prereqs
   acquire_start_lock
-  resolve_selected_planner
   validate_start_settings
   if [ "$PLANNER_ID" = "diff" ]; then
     prepare_runtime_planner_config
@@ -1436,10 +1447,18 @@ main() {
           return 1
         }
         PLANNER_ID="$2"
+        if [ -z "$PLANNER_ID" ]; then
+          echo "[ERROR] --planner requires a non-empty plugin ID." >&2
+          return 1
+        fi
         shift 2
         ;;
       --planner=*)
         PLANNER_ID="${1#--planner=}"
+        if [ -z "$PLANNER_ID" ]; then
+          echo "[ERROR] --planner requires a non-empty plugin ID." >&2
+          return 1
+        fi
         shift
         ;;
       --planner-profile)

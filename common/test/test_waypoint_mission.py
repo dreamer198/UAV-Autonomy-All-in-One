@@ -548,6 +548,97 @@ class WaypointMissionConfigTest(unittest.TestCase):
         self.assertFalse(retried)
         self.assertIn("exhausted 2 retries", reason)
 
+    def test_completed_mission_cancels_the_active_planner_goal(self):
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.lock = threading.Lock()
+        runner.config = {"state_timeout": 3.0}
+        runner.current_plan_accepted = True
+        runner.current_planner_stopped_at = time.monotonic()
+        runner.rospy = SimpleNamespace(
+            wait_for_service=lambda name, timeout: self.assertEqual(
+                (name, timeout), ("/planning/cancel", 3.0)
+            )
+        )
+        runner.cancel_goal = lambda: SimpleNamespace(
+            success=True, message="goal cancelled"
+        )
+
+        cancelled, reason = runner._cancel_completed_goal()
+
+        self.assertTrue(cancelled)
+        self.assertEqual(reason, "")
+        self.assertFalse(runner.current_plan_accepted)
+        self.assertIsNone(runner.current_planner_stopped_at)
+
+    def test_completed_mission_reports_planner_cancel_failure(self):
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.lock = threading.Lock()
+        runner.config = {"state_timeout": 3.0}
+        runner.current_plan_accepted = True
+        runner.current_planner_stopped_at = None
+        runner.rospy = SimpleNamespace(
+            wait_for_service=lambda _name, timeout: None
+        )
+        runner.cancel_goal = lambda: SimpleNamespace(
+            success=False, message="no active goal"
+        )
+
+        cancelled, reason = runner._cancel_completed_goal()
+
+        self.assertFalse(cancelled)
+        self.assertEqual(reason, "no active goal")
+
+    def test_runtime_waypoint_validation_reports_backend_rejection(self):
+        validated = []
+
+        class FakePoseStamped:
+            def __init__(self):
+                self.header = SimpleNamespace(stamp=None, frame_id="")
+                self.pose = SimpleNamespace(
+                    position=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                    orientation=SimpleNamespace(
+                        x=0.0, y=0.0, z=0.0, w=0.0
+                    ),
+                )
+
+        class FakePlannerGoal:
+            PLAN = 0
+
+            def __init__(self):
+                self.header = SimpleNamespace(stamp=None)
+                self.session_id = ""
+                self.goal_id = 0
+                self.action = self.PLAN
+                self.goal = None
+                self.constrain_yaw = False
+
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.PoseStamped = FakePoseStamped
+        runner.PlannerGoal = FakePlannerGoal
+        runner.rospy = SimpleNamespace(
+            Time=SimpleNamespace(now=lambda: 123)
+        )
+        runner.validate_goal = lambda goal: (
+            validated.append(goal)
+            or SimpleNamespace(
+                valid=False,
+                reason="goal is inside the required clearance",
+            )
+        )
+
+        valid, reason = runner._validate_waypoint(
+            {"x": 4.0, "y": 5.0, "z": 1.0, "yaw": None},
+            3,
+            6,
+            "mission-runtime",
+        )
+
+        self.assertFalse(valid)
+        self.assertIn("waypoint 3/6", reason)
+        self.assertIn("required clearance", reason)
+        self.assertEqual(validated[0].session_id, "mission-runtime")
+        self.assertEqual(validated[0].goal.pose.position.x, 4.0)
+
 
 if __name__ == "__main__":
     unittest.main()

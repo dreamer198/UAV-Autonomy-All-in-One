@@ -25,6 +25,7 @@
 
 
 #include <plan_manage/topo_replan_fsm.h>
+#include <path_searching/topology_safety.h>
 #include <cmath>
 #include <stdexcept>
 
@@ -39,6 +40,7 @@ void TopoReplanFSM::init(ros::NodeHandle& nh) {
   collide_     = false;
   emergency_recovery_ = false;
   emergency_stop_settled_since_ = ros::Time();
+  next_planning_attempt_ = ros::Time();
   goal_yaw_ = 0.0;
   goal_yaw_constrained_ = false;
   active_goal_id_ = 0;
@@ -50,19 +52,24 @@ void TopoReplanFSM::init(ros::NodeHandle& nh) {
   nh.param("fsm/emergency_stop_velocity", emergency_stop_velocity_threshold_, 0.15);
   nh.param("fsm/emergency_stop_settle_time", emergency_stop_settle_time_, 0.20);
   nh.param("fsm/max_tracking_error", max_tracking_error_, 0.50);
+  nh.param("fsm/planning_retry_interval", planning_retry_interval_, 0.10);
+  nh.param("manager/clearance_threshold", goal_clearance_, -1.0);
   nh.param("fsm/waypoint_num", waypoint_num_, -1);
   nh.param("fsm/act_map", act_map_, false);
   if (!std::isfinite(emergency_stop_velocity_threshold_) ||
       !std::isfinite(emergency_stop_settle_time_) ||
       !std::isfinite(max_tracking_error_) ||
+      !std::isfinite(planning_retry_interval_) ||
+      !std::isfinite(goal_clearance_) ||
       emergency_stop_velocity_threshold_ <= 0.0 ||
       emergency_stop_settle_time_ < 0.0 ||
-      max_tracking_error_ <= 0.0) {
+      max_tracking_error_ <= 0.0 || planning_retry_interval_ <= 0.0 ||
+      goal_clearance_ <= 0.0) {
     ROS_FATAL(
         "invalid emergency recovery parameters: velocity=%f settle_time=%f "
-        "max_tracking_error=%f",
+        "max_tracking_error=%f retry_interval=%f goal_clearance=%f",
         emergency_stop_velocity_threshold_, emergency_stop_settle_time_,
-        max_tracking_error_);
+        max_tracking_error_, planning_retry_interval_, goal_clearance_);
     throw std::runtime_error("invalid Fast-Topo emergency recovery parameters");
   }
   for (int i = 0; i < waypoint_num_; i++) {
@@ -100,6 +107,7 @@ void TopoReplanFSM::goalCallback(const plan_manage::FastPlannerGoalConstPtr& msg
     have_target_ = false;
     emergency_recovery_ = false;
     emergency_stop_settled_since_ = ros::Time();
+    resetPlanningRetry();
     std_msgs::Empty stop;
     replan_pub_.publish(stop);
     if (exec_state_ != INIT) changeFSMExecState(WAIT_TARGET, "CANCEL");
@@ -128,6 +136,7 @@ void TopoReplanFSM::goalCallback(const plan_manage::FastPlannerGoalConstPtr& msg
   active_goal_id_ = msg->goal_id;
   emergency_recovery_ = false;
   emergency_stop_settled_since_ = ros::Time();
+  resetPlanningRetry();
 
   // topo 模式先生成一条全局参考轨迹；这里把目标或预设航点整理成 global waypoints。
   vector<Eigen::Vector3d> global_wp;
@@ -246,6 +255,20 @@ void TopoReplanFSM::printFSMExecState() {
   cout << "state: " + state_str[int(exec_state_)] << endl;
 }
 
+bool TopoReplanFSM::planningRetryPending() const {
+  return !next_planning_attempt_.isZero() &&
+      ros::Time::now() < next_planning_attempt_;
+}
+
+void TopoReplanFSM::deferPlanningRetry() {
+  next_planning_attempt_ =
+      ros::Time::now() + ros::Duration(planning_retry_interval_);
+}
+
+void TopoReplanFSM::resetPlanningRetry() {
+  next_planning_attempt_ = ros::Time();
+}
+
 void TopoReplanFSM::execFSMCallback(const ros::TimerEvent& e) {
   std_msgs::UInt8 progress;
   progress.data = static_cast<uint8_t>(exec_state_);
@@ -315,6 +338,8 @@ void TopoReplanFSM::execFSMCallback(const ros::TimerEvent& e) {
     }
 
     case GEN_NEW_TRAJ: {
+      if (planningRetryPending()) return;
+
       // 生成全新 topo 轨迹：先以当前 odom 作为全局轨迹起点。
       start_pt_  = odom_pos_;
       start_vel_ = odom_vel_;
@@ -328,9 +353,14 @@ void TopoReplanFSM::execFSMCallback(const ros::TimerEvent& e) {
       /* step=1：先生成全局参考轨迹，并截取第一段局部 B-spline 发布执行。 */
       bool success = callTopologicalTraj(1);
       if (success) {
+        resetPlanningRetry();
         changeFSMExecState(EXEC_TRAJ, "FSM");
       } else {
-        changeFSMExecState(GEN_NEW_TRAJ, "FSM");
+        deferPlanningRetry();
+        ROS_WARN_THROTTLE(
+            1.0,
+            "Fast-Topo initial planning failed; retrying every %.2f s.",
+            planning_retry_interval_);
       }
       break;
     }
@@ -397,6 +427,8 @@ void TopoReplanFSM::execFSMCallback(const ros::TimerEvent& e) {
     }
 
     case REPLAN_TRAJ: {
+      if (planningRetryPending()) return;
+
       // 从当前正在执行的局部 B-spline 上取状态作为重规划起点，保证轨迹连续。
       LocalTrajData* info     = &planner_manager_->local_data_;
       ros::Time      time_now = ros::Time::now();
@@ -415,14 +447,20 @@ void TopoReplanFSM::execFSMCallback(const ros::TimerEvent& e) {
       replan_pub_.publish(std_msgs::Empty());
       bool success = callTopologicalTraj(2);
       if (success) {
+        resetPlanningRetry();
         changeFSMExecState(EXEC_TRAJ, "FSM");
       } else {
-        ROS_WARN("Replan fail, retrying...");
+        deferPlanningRetry();
+        ROS_WARN_THROTTLE(
+            1.0, "Fast-Topo replanning failed; retrying every %.2f s.",
+            planning_retry_interval_);
       }
 
       break;
     }
     case REPLAN_NEW: {
+      if (planningRetryPending()) return;
+
       // 目标点被安全检查修改后，重新生成一条新的全局参考轨迹。
       LocalTrajData* info     = &planner_manager_->local_data_;
       ros::Time      time_now = ros::Time::now();
@@ -442,8 +480,10 @@ void TopoReplanFSM::execFSMCallback(const ros::TimerEvent& e) {
       // step=1 表示重新走“全局轨迹生成 + 第一段局部轨迹”流程。
       bool success = callTopologicalTraj(1);
       if (success) {
+        resetPlanningRetry();
         changeFSMExecState(EXEC_TRAJ, "FSM");
       } else {
+        deferPlanningRetry();
         changeFSMExecState(GEN_NEW_TRAJ, "FSM");
       }
 
@@ -463,16 +503,21 @@ void TopoReplanFSM::checkCollisionCallback(const ros::TimerEvent& e) {
         edt_env->evaluateCoarseEDT(target_point_, /* time to program start */ info->duration_) :
         edt_env->evaluateCoarseEDT(target_point_, -1.0);
 
-    if (dist <= 0.3) {
+    if (violatesRequiredClearance(dist, goal_clearance_)) {
       /* try to find a max distance goal around */
       const double dr = 0.5, dtheta = 30, dz = 0.3;
 
       double          new_x, new_y, new_z, max_dist = -1.0;
-      Eigen::Vector3d goal;
+      Eigen::Vector3d goal = target_point_;
+      bool            fallback_found = false;
 
       for (double r = dr; r <= 5 * dr + 1e-3; r += dr) {
+        double          ring_max_dist = -1.0;
+        Eigen::Vector3d ring_goal = target_point_;
         for (double theta = -90; theta <= 270; theta += dtheta) {
-          for (double nz = 1 * dz; nz >= -1 * dz; nz -= dz) {
+          for (int z_index = 0; z_index < 3; ++z_index) {
+            const double nz =
+                z_index == 0 ? 0.0 : (z_index == 1 ? dz : -dz);
 
             new_x = target_point_(0) + r * cos(theta / 57.3);
             new_y = target_point_(1) + r * sin(theta / 57.3);
@@ -483,19 +528,31 @@ void TopoReplanFSM::checkCollisionCallback(const ros::TimerEvent& e) {
                 edt_env->evaluateCoarseEDT(new_pt, /* time to program start */ info->duration_) :
                 edt_env->evaluateCoarseEDT(new_pt, -1.0);
 
-            if (dist > max_dist) {
-              /* reset target_point_ */
-              goal(0)  = new_x;
-              goal(1)  = new_y;
-              goal(2)  = new_z;
-              max_dist = dist;
+            if (isObservedClearance(dist) && dist > ring_max_dist) {
+              ring_goal = new_pt;
+              ring_max_dist = dist;
             }
           }
         }
+        /*
+         * Select the best candidate on the nearest safe ring. The upstream
+         * global maximum tends to choose cells outside the current ESDF box,
+         * where SDFMap reports its 10000 sentinel, and can move the goal into
+         * an obstacle that the next cloud reveals.
+         */
+        if (!violatesRequiredClearance(ring_max_dist, goal_clearance_)) {
+          goal = ring_goal;
+          max_dist = ring_max_dist;
+          fallback_found = true;
+          break;
+        }
       }
 
-      if (max_dist > 0.3) {
-        cout << "change goal, replan." << endl;
+      if (fallback_found) {
+        ROS_WARN(
+            "Topological goal clearance fell below %.3f m; replacing it with "
+            "nearby safe goal (%.3f, %.3f, %.3f), clearance %.3f m.",
+            goal_clearance_, goal.x(), goal.y(), goal.z(), max_dist);
         target_point_ = goal;
         have_target_  = true;
         end_vel_.setZero();
@@ -512,7 +569,11 @@ void TopoReplanFSM::checkCollisionCallback(const ros::TimerEvent& e) {
         // have_target_ = false;
         // cout << "Goal near collision, stop." << endl;
         // changeFSMExecState(WAIT_TARGET, "SAFETY");
-        cout << "goal near collision, keep retry" << endl;
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "Topological goal is below the required %.3f m clearance and no "
+            "nearby safe fallback was found.",
+            goal_clearance_);
         changeFSMExecState(REPLAN_TRAJ, "FSM");
       }
     }

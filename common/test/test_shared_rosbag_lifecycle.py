@@ -109,6 +109,36 @@ class SharedRosbagLifecycleTest(unittest.TestCase):
             source,
         )
 
+    def test_simulation_rejects_a_detached_runtime_bind_mount(self):
+        source = self.read_launcher("launch/sim_container.sh")
+        for expected in (
+            "verify_live_bind_mount()",
+            "stat -Lc '%d:%i'",
+            'verify_live_bind_mount "runtime" '
+            '"$RUNTIME_HOST" "$RUNTIME_CONTAINER"',
+            '"$RUNTIME_HOST/runs"',
+            '"$RUNTIME_HOST/active"',
+            '"$RUNTIME_HOST/flight_bags"',
+            'info "Runtime data: $expected_runtime -> $RUNTIME_CONTAINER"',
+        ):
+            self.assertIn(expected, source)
+
+    def test_simulation_releases_runtime_mounts_and_keeps_ownership_external(self):
+        source = self.read_launcher("launch/sim.sh")
+        for expected in (
+            'SESSION_MARKER="$LIFECYCLE_LOCK_DIR/'
+            'simulation-${SESSION_NAME}.owner"',
+            "rosbag_prefix=%s",
+            'expected_prefix="$(current_rosbag_output_prefix)"',
+            '"$DEV_CONTAINER_SCRIPT" stop',
+            "runtime mounts were released",
+        ):
+            self.assertIn(expected, source)
+        self.assertNotIn(
+            'SESSION_MARKER="$RUNTIME_HOST/active/',
+            source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

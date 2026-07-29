@@ -3,9 +3,10 @@
        belong to sim2real_planner_manager; this file must never launch a native
        planner directly. -->
   <arg name="drone_id" default="0"/>
-  <arg name="planner_id" default="$(optenv SIM2REAL_PLANNER diff)"/>
+  <arg name="planner_id"/>
   <arg name="planner_profile" default="$(optenv SIM2REAL_PLANNER_PROFILE local)"/>
   <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
+  <arg name="scene" default="$(optenv SIM2REAL_SCENE room)"/>
   <arg name="repository_root"
        default="$(optenv SIM2REAL_REPOSITORY_ROOT $(find sim2real_common)/..)"/>
   <arg name="manifest_root" default="$(arg repository_root)/planning/plugins"/>
@@ -20,6 +21,7 @@
     <arg name="planner_id" value="$(arg planner_id)"/>
     <arg name="planner_profile" value="$(arg planner_profile)"/>
     <arg name="runtime_mode" value="$(arg runtime_mode)"/>
+    <arg name="scene" value="$(arg scene)"/>
     <arg name="repository_root" value="$(arg repository_root)"/>
     <arg name="manifest_root" value="$(arg manifest_root)"/>
     <arg name="odom_topic" value="$(arg odom_topic)"/>

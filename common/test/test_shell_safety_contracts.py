@@ -51,6 +51,67 @@ class ShellSafetyContractsTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("Only one vehicle is supported", completed.stdout)
 
+    def test_sim_and_real_require_explicit_planner_for_start(self):
+        cases = (
+            ("launch/sim.sh", "SIM_PLANNER"),
+            ("launch/real.sh", "REAL_PLANNER"),
+        )
+        for relative_launcher, planner_variable in cases:
+            with self.subTest(launcher=relative_launcher):
+                launcher = os.path.join(PROJECT_ROOT, relative_launcher)
+                source = self.read(relative_launcher)
+                self.assertIn(
+                    'PLANNER_ID="${' + planner_variable + ':-}"', source
+                )
+                self.assertNotIn(planner_variable + ":-diff", source)
+                self.assertIn("require_planner_selection", source)
+
+                test_env = os.environ.copy()
+                test_env.pop(planner_variable, None)
+                completed = subprocess.run(
+                    ["bash", launcher, "start"],
+                    cwd=PROJECT_ROOT,
+                    env=test_env,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("No planner selected", completed.stdout)
+
+    def test_sim_requires_explicit_scene_for_start(self):
+        relative_launcher = "launch/sim.sh"
+        launcher = os.path.join(PROJECT_ROOT, relative_launcher)
+        source = self.read(relative_launcher)
+        self.assertIn('SCENE="${SIM_SCENE:-}"', source)
+        self.assertNotIn('SCENE="${SIM_SCENE:-default}"', source)
+        self.assertIn("require_scene_selection", source)
+
+        test_env = os.environ.copy()
+        test_env.pop("SIM_SCENE", None)
+        test_env["SIM_PLANNER"] = "diff"
+        completed = subprocess.run(
+            ["bash", launcher, "start"],
+            cwd=PROJECT_ROOT,
+            env=test_env,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("No scene selected", completed.stdout)
+
+    def test_sim_passes_the_validated_scene_to_the_selected_plugin(self):
+        sim = self.read("launch/sim.sh")
+        self.assertIn(
+            "runtime_mode:=simulation scene:=%q", sim
+        )
+        self.assertIn(
+            '"$PLANNER_ID" "$PLANNER_PROFILE" "$SCENE"', sim
+        )
+
     def test_sim_rejects_invalid_start_boolean_and_recorder_ownership_override(self):
         launcher = os.path.join(PROJECT_ROOT, "launch", "sim.sh")
         if not os.path.isfile(launcher):

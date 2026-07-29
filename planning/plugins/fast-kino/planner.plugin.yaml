@@ -13,6 +13,7 @@ launch:
     backend_namespace: fast_kino
     planner: 1
     profile: local
+    scene: room
     odom_topic: /localization/odom
     cloud_topic: /localization/cloud_registered
 default_profile: local
@@ -27,7 +28,6 @@ rates:
   command_min_hz: 80.0
 capabilities:
   simulation: true
-  real_flight: false
   yaw: true
   cancel: true
   goal_validation: true

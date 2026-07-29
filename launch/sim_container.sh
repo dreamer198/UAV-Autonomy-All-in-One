@@ -189,6 +189,32 @@ mount_rw_for() {
   docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.RW}}{{end}}{{end}}" "$CONTAINER_NAME"
 }
 
+verify_live_bind_mount() {
+  local label="$1"
+  local host_path="$2"
+  local container_path="$3"
+  local host_identity=""
+  local container_identity=""
+
+  [ -e "$host_path" ] ||
+    die "Host $label mount source is missing: $host_path. Run '$0 recreate'."
+
+  # Docker inspect only preserves the configured source path. If that host
+  # directory is deleted and recreated while the container is running, the
+  # bind mount still refers to the deleted inode even though inspect prints
+  # the same path. Compare the live filesystem objects to catch that state.
+  container_running || return 0
+  host_identity="$(stat -Lc '%d:%i' -- "$host_path")" ||
+    die "Cannot inspect host $label mount source: $host_path"
+  container_identity="$(
+    docker exec "$CONTAINER_NAME" \
+      stat -Lc '%d:%i' -- "$container_path" 2>/dev/null
+  )" ||
+    die "Container $label mount target is inaccessible: $container_path. Run '$0 recreate'."
+  [ "$container_identity" = "$host_identity" ] ||
+    die "Container $label mount is detached from '$host_path'. Run '$0 recreate'."
+}
+
 verify_mounts() {
   container_exists || die "Container '$CONTAINER_NAME' does not exist. Run '$0 run' first."
 
@@ -277,6 +303,16 @@ verify_mounts() {
   [ "$actual_runtime_rw" = "true" ] || {
     die "Container runtime mount must be writable. Run '$0 recreate'."
   }
+
+  verify_live_bind_mount "runtime" "$RUNTIME_HOST" "$RUNTIME_CONTAINER"
+  verify_live_bind_mount "overlay workspace" "$WORKSPACE_HOST" "$WORKSPACE_CONTAINER"
+  verify_live_bind_mount "repository" "$PROJECT_SOURCE_HOST" "$PROJECT_SOURCE_CONTAINER"
+  verify_live_bind_mount "planner workspaces" "$PLANNER_WORKSPACES_HOST" "$PLANNER_WORKSPACES_CONTAINER"
+  verify_live_bind_mount "Diff source" "$SOURCE_HOST" "$SOURCE_CONTAINER"
+  verify_live_bind_mount "common source" "$COMMON_SOURCE_HOST" "$COMMON_SOURCE_CONTAINER"
+  verify_live_bind_mount "simulation adapter" "$ADAPTER_SOURCE_HOST" "$ADAPTER_SOURCE_CONTAINER"
+  verify_live_bind_mount "simulation config" "$SIMULATION_CONFIG_HOST" "$SIMULATION_CONFIG_CONTAINER"
+
   [ "$actual_workspace_env" = "$WORKSPACE_CONTAINER" ] || {
     die "Container SIM_WORKSPACE_CONTAINER is stale: '$actual_workspace_env'. Run '$0 recreate'."
   }
@@ -306,6 +342,7 @@ verify_mounts() {
   info "Planner workspaces: $expected_planner_workspaces -> $PLANNER_WORKSPACES_CONTAINER"
   info "Simulation config: $expected_config -> $SIMULATION_CONFIG_CONTAINER (read-only)"
   info "Overlay workspace: $expected_workspace -> $WORKSPACE_CONTAINER"
+  info "Runtime data: $expected_runtime -> $RUNTIME_CONTAINER"
   info "Graphics acceleration: $expected_gpu_mode"
 }
 
@@ -383,7 +420,14 @@ validate_container_inputs() {
   [ -x "$PROJECT_SOURCE_HOST/planning/scripts/build_planner_workspaces.sh" ] ||
     die "Planner workspace builder not found below: $PROJECT_SOURCE_HOST"
   [ -d "$SIMULATION_CONFIG_HOST" ] || die "Simulation config not found: $SIMULATION_CONFIG_HOST"
-  mkdir -p "$WORKSPACE_HOST/src" "$PLANNER_WORKSPACES_HOST" "$RUNTIME_HOST/logs" "$RUNTIME_HOST/ros_logs"
+  mkdir -p \
+    "$WORKSPACE_HOST/src" \
+    "$PLANNER_WORKSPACES_HOST" \
+    "$RUNTIME_HOST/runs" \
+    "$RUNTIME_HOST/active" \
+    "$RUNTIME_HOST/flight_bags" \
+    "$RUNTIME_HOST/logs" \
+    "$RUNTIME_HOST/ros_logs"
 }
 
 create_container() {

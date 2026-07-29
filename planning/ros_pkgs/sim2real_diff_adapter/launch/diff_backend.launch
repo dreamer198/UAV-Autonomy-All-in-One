@@ -2,18 +2,23 @@
   <arg name="backend_id" default="diff"/>
   <arg name="profile" default="local"/>
   <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
+  <!-- Accepted as common plugin startup context. Diff uses a rolling map and
+       therefore does not require scene-specific geometry. -->
+  <arg name="scene" default="room"/>
   <arg name="odom_topic" default="/localization/odom"/>
   <arg name="cloud_topic" default="/localization/cloud_registered"/>
-  <arg name="planner_config"
+  <arg name="config"
        default="$(eval optenv('SIM2REAL_DIFF_PLANNER_CONFIG', '') or find('sim2real_diff_adapter') + '/config/planner.yaml')"/>
-  <arg name="trajectory_server_config" default="$(find sim2real_diff_adapter)/config/trajectory_server.yaml"/>
-  <arg name="adapter_config" default="$(find sim2real_diff_adapter)/config/diff.yaml"/>
 
   <!-- The profile argument is intentionally accepted for the common manager
        contract. Diff-Planner owns one rolling-map parameter set. -->
   <param name="/planning/backends/$(arg backend_id)/selected_profile" value="$(arg profile)"/>
 
   <group ns="/planning/backends/$(arg backend_id)">
+    <!-- planner.yaml is organized by the node names below, so one load
+         populates each private namespace without duplicating files. -->
+    <rosparam command="load" file="$(arg config)"/>
+
     <node pkg="diff_planner" name="planner" type="diff_planner_node" output="screen" required="true">
       <remap from="/goal" to="/planning/backends/$(arg backend_id)/native/goal"/>
       <remap from="~odom_world" to="/planning/backends/$(arg backend_id)/native/odom_world"/>
@@ -36,7 +41,6 @@
              to="/planning/viz/backend/global_trajectory"/>
       <remap from="~optimal_list"
              to="/planning/viz/backend/trajectory"/>
-      <rosparam command="load" file="$(arg planner_config)"/>
       <param name="manager/drone_id" value="0" type="int"/>
     </node>
 
@@ -45,11 +49,9 @@
       <remap from="~planning/trajectory" to="/planning/backends/$(arg backend_id)/native/trajectory"/>
       <remap from="~planning/yaw" to="/planning/backends/$(arg backend_id)/native/yaw"/>
       <remap from="~heartbeat" to="/planning/backends/$(arg backend_id)/native/heartbeat"/>
-      <rosparam command="load" file="$(arg trajectory_server_config)"/>
     </node>
 
     <node pkg="sim2real_diff_adapter" name="adapter" type="diff_backend_adapter.py" output="screen" required="true">
-      <rosparam command="load" file="$(arg adapter_config)"/>
       <param name="backend/backend_id" value="$(arg backend_id)"/>
       <param name="backend/profile" value="$(arg profile)"/>
       <param name="backend/runtime_mode" value="$(arg runtime_mode)"/>

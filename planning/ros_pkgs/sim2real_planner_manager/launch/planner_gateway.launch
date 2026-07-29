@@ -1,7 +1,8 @@
 <launch>
-  <arg name="planner_id" default="diff"/>
+  <arg name="planner_id"/>
   <arg name="planner_profile" default="local"/>
   <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
+  <arg name="scene" default="room"/>
   <arg name="manifest_root" default="$(find sim2real_planner_manager)/../../plugins"/>
   <arg name="repository_root" default="$(find sim2real_planner_manager)/../../.."/>
   <arg name="start_backend" default="true"/>
@@ -19,10 +20,6 @@
   <arg name="rate_window" default="1.0"/>
   <arg name="enforce_unique_output" default="true"/>
   <arg name="start_visualization" default="true"/>
-  <!-- These are display-only limits. They do not change either planner map
-       or collision checks; the lower cutoff hides virtual ground layers. -->
-  <arg name="viz_min_obstacle_z" default="0.36"/>
-  <arg name="viz_max_obstacle_z" default="3.2"/>
 
   <node
     if="$(arg start_backend)"
@@ -31,7 +28,7 @@
     name="selected_planner_backend"
     output="screen"
     required="true"
-    args="--planner $(arg planner_id) --profile $(arg planner_profile) --runtime-mode $(arg runtime_mode) --manifest-root $(arg manifest_root) --repository-root $(arg repository_root) --arg odom_topic=$(arg odom_topic) --arg cloud_topic=$(arg cloud_topic)"/>
+    args="--planner $(arg planner_id) --profile $(arg planner_profile) --runtime-mode $(arg runtime_mode) --manifest-root $(arg manifest_root) --repository-root $(arg repository_root) --arg scene=$(arg scene) --arg odom_topic=$(arg odom_topic) --arg cloud_topic=$(arg cloud_topic)"/>
 
   <node
     pkg="sim2real_planner_manager"
@@ -63,8 +60,6 @@
     name="planner_visualization"
     output="screen">
     <param name="world_frame" value="world"/>
-    <param name="min_obstacle_z" value="$(arg viz_min_obstacle_z)"/>
-    <param name="max_obstacle_z" value="$(arg viz_max_obstacle_z)"/>
     <param name="raw_occupancy_topic" value="/planning/viz/raw/occupancy"/>
     <param name="raw_inflated_topic"
            value="/planning/viz/raw/inflated_occupancy"/>

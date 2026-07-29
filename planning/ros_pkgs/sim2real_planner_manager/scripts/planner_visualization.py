@@ -16,7 +16,7 @@ from sim2real_planning_msgs.msg import (
 from visualization_msgs.msg import Marker
 
 from sim2real_planner_manager.visualization import (
-    filter_point_records,
+    finite_point_records,
     fixed_bounds_edges,
 )
 
@@ -32,23 +32,15 @@ class PlannerVisualization:
         self.world_frame = str(
             rospy.get_param("~world_frame", "world")
         ).lstrip("/")
-        self.min_z = float(rospy.get_param("~min_obstacle_z", 0.36))
-        self.max_z = float(rospy.get_param("~max_obstacle_z", 3.2))
         self.bounds_line_width = float(
             rospy.get_param("~bounds_line_width", 0.045)
         )
         if not self.world_frame:
             raise ValueError("~world_frame must not be empty")
-        for name, value in (
-            ("min_obstacle_z", self.min_z),
-            ("max_obstacle_z", self.max_z),
-            ("bounds_line_width", self.bounds_line_width),
+        if (
+            not math.isfinite(self.bounds_line_width)
+            or self.bounds_line_width <= 0.0
         ):
-            if not math.isfinite(value):
-                raise ValueError("~{} must be finite".format(name))
-        if self.max_z <= self.min_z:
-            raise ValueError("obstacle visualization z limits must increase")
-        if self.bounds_line_width <= 0.0:
             raise ValueError("visualization line width must be positive")
 
         self.lock = threading.RLock()
@@ -114,10 +106,8 @@ class PlannerVisualization:
             queue_size=5,
         )
         rospy.loginfo(
-            "Planner-neutral visualization ready: z=[%.2f, %.2f], "
-            "raw maps -> normalized maps, capabilities -> bounds.",
-            self.min_z,
-            self.max_z,
+            "Planner-neutral visualization ready: finite raw map points -> "
+            "normalized maps, capabilities -> bounds.",
         )
 
     def coordinate_specs(self, message):
@@ -142,7 +132,7 @@ class PlannerVisualization:
             raise ValueError(
                 "point-cloud frame must be {}".format(self.world_frame)
             )
-        data, kept = filter_point_records(
+        data, kept = finite_point_records(
             message.data,
             message.width,
             message.height,
@@ -150,8 +140,6 @@ class PlannerVisualization:
             message.row_step,
             self.coordinate_specs(message),
             message.is_bigendian,
-            self.min_z,
-            self.max_z,
         )
         output = PointCloud2()
         output.header = copy.deepcopy(message.header)

@@ -1,90 +1,139 @@
-# Diff-Planner-private rolling GridMap and dynamics profile.
-fsm:
-  flight_type: 1
-  thresh_replan_time: 1.0
-  planning_horizon: 3.0
-  emergency_time: 1.0
-  goal_yaw_tolerance_deg: 5.0
-  goal_position_tolerance: 0.35
-  stuck_progress_threshold: 0.1
-  stuck_timeout: 5.0
-  replan_retry_interval: 0.1
-  replan_failure_timeout: 1.0
-  realworld_experiment: true
-  fail_safe: true
-  mondify_final_goal: true
-  enable_stuck_detect: true
-  waypoint_num: 2
-  waypoint0_x: 1.0
-  waypoint0_y: 0.0
-  waypoint0_z: 0.8
-  waypoint1_x: 0.0
-  waypoint1_y: 0.0
-  waypoint1_z: 0.8
-  waypoint2_x: 0.0
-  waypoint2_y: 0.0
-  waypoint2_z: 0.8
-  waypoint3_x: 0.0
-  waypoint3_y: 0.0
-  waypoint3_z: 0.8
-  waypoint4_x: 0.0
-  waypoint4_y: 0.0
-  waypoint4_z: 0.8
+# Diff 插件完整配置。顶层名称对应 /planning/backends/diff 下的 ROS 节点名，
+# launch 会一次加载本文件，再由 planner、trajectory_server 和 adapter 分别读取。
+# 单位约定：距离 m，速度 m/s，加速度 m/s^2，jerk m/s^3，时间 s，频率 Hz。
+#
+# 注意：地图/FSM/优化器/adapter 中重复的速度、安全边界和容差代表同一物理约束，
+# 修改时应保持一致；文件末尾的配置测试会检查其中的关键对应关系。
 
-grid_map:
-  resolution: 0.11
-  local_update_range_x: 5.5
-  local_update_range_y: 5.5
-  local_update_range_z: 1.8
-  obstacles_inflation: 0.33
-  enable_virtual_wall: true
-  virtual_ceil: 3.0
-  virtual_ground: 0.1
-  cx: 319.31427001953125
-  cy: 239.09725952148438
-  fx: 386.2706298828125
-  fy: 386.2706298828125
-  use_depth_filter: true
-  depth_filter_tolerance: 0.15
-  depth_filter_mindist: 0.2
-  depth_filter_margin: 2
-  k_depth_scaling_factor: 1000.0
-  skip_pixel: 2
-  p_hit: 0.65
-  p_miss: 0.35
-  p_min: 0.12
-  p_max: 0.90
-  p_occ: 0.80
-  fading_time: -1.0
-  min_ray_length: 0.1
-  visualize_all_directions: true
-  visualization_period: 0.5
-  show_occ_time: false
-  pose_type: 2
-  frame_id: world
+planner:
+  # Diff 重规划状态机。
+  fsm:
+    flight_type: 1                    # 目标来源：1=订阅外部 /goal；2=使用下方预设航点。
+    thresh_replan_time: 1.0           # 当前轨迹执行超过该时间后允许滚动重规划；越小重规划越频繁。
+    planning_horizon: 3.0             # 从当前位置沿全局参考截取局部目标的最大距离。
+    emergency_time: 1.0               # 轨迹剩余时间/碰撞时间小于该值时提前进入紧急处理。
+    goal_yaw_tolerance_deg: 5.0       # 约束 yaw 时，判定到达允许的航向误差。
+    goal_position_tolerance: 0.35     # FSM 判定到达允许的位置误差。
+    stuck_progress_threshold: 0.1     # 机体累计移动达到该距离才算取得新进展。
+    stuck_timeout: 5.0                # 连续未达到上述移动量多久后判定机体卡住。
+    replan_retry_interval: 0.1        # 一次规划失败后再次尝试前的最短间隔。
+    replan_failure_timeout: 1.0       # 连续规划失败超过该时间后进入安全停止；必须大于重试间隔。
+    realworld_experiment: true        # true=等待外部目标/触发；插件的手动目标模式应保持 true。
+    fail_safe: true                   # 规划失败或碰撞迫近时允许生成制动/悬停轨迹。
+    mondify_final_goal: true          # 上游拼写保留；true=目标占据时尝试挪到附近自由点，false=停止。
+    enable_stuck_detect: true         # 是否根据真实里程计位移和上述阈值检测卡住。
 
-manager:
-  max_vel: 0.5
-  max_acc: 0.8
-  polyTraj_piece_length: 1.5
-  feasibility_tolerance: 0.05
-  planning_horizon: 3.0
-  use_multitopology_trajs: false
-  drone_id: 0
+    # 以下航点仅在 flight_type=2 时读取；flight_type=1 时不会参与插件目标规划。
+    waypoint_num: 2                   # 启用的预设航点数量，最大不能超过源码固定数组容量。
+    waypoint0_x: 1.0                  # 第 0 个预设航点的 world x。
+    waypoint0_y: 0.0                  # 第 0 个预设航点的 world y。
+    waypoint0_z: 0.8                  # 第 0 个预设航点的 world z。
+    waypoint1_x: 0.0                  # 第 1 个预设航点的 world x。
+    waypoint1_y: 0.0                  # 第 1 个预设航点的 world y。
+    waypoint1_z: 0.8                  # 第 1 个预设航点的 world z。
+    waypoint2_x: 0.0                  # 第 2 个预设航点的 world x；当前 waypoint_num=2，不读取。
+    waypoint2_y: 0.0                  # 第 2 个预设航点的 world y；当前不读取。
+    waypoint2_z: 0.8                  # 第 2 个预设航点的 world z；当前不读取。
+    waypoint3_x: 0.0                  # 第 3 个预设航点的 world x；当前不读取。
+    waypoint3_y: 0.0                  # 第 3 个预设航点的 world y；当前不读取。
+    waypoint3_z: 0.8                  # 第 3 个预设航点的 world z；当前不读取。
+    waypoint4_x: 0.0                  # 第 4 个预设航点的 world x；当前不读取。
+    waypoint4_y: 0.0                  # 第 4 个预设航点的 world y；当前不读取。
+    waypoint4_z: 0.8                  # 第 4 个预设航点的 world z；当前不读取。
 
-optimization:
-  constraint_points_perPiece: 5
-  weight_obstacle: 10000.0
-  weight_obstacle_soft: 5000.0
-  weight_swarm: 10000.0
-  weight_feasibility: 10000.0
-  weight_sqrvariance: 10000.0
-  weight_time: 10.0
-  obstacle_clearance: 0.1
-  obstacle_clearance_soft: 0.5
-  swarm_clearance: 0.15000000000000002
-  max_vel: 0.5
-  vel_tolerance: 1.0
-  max_acc: 0.8
-  acc_tolerance: 1.0
-  max_jer: 8.0
+  # Diff 滚动 GridMap。输入点云已经位于 world，地图中心随里程计移动。
+  grid_map:
+    resolution: 0.11                  # 体素边长；越小越精细但内存/计算量更大。
+                                      # 若膨胀半径超过 4 个体素，源码会自动增大实际分辨率。
+    local_update_range_x: 5.5         # 以机体为中心，x 方向地图半宽。
+    local_update_range_y: 5.5         # 以机体为中心，y 方向地图半宽。
+    local_update_range_z: 1.8         # 以机体为中心，z 方向地图半高。
+    obstacles_inflation: 0.33         # 障碍向三轴膨胀的安全半径；应覆盖机体和定位误差。
+    enable_virtual_wall: true         # 是否把 virtual_ground/virtual_ceil 作为垂直规划边界。
+    virtual_ceil: 3.0                 # world 坐标中的虚拟天花板高度。
+    virtual_ground: 0.1               # world 坐标中的虚拟地面高度。
+
+    # 以下相机/深度参数只用于深度图输入路径；当前注册 PointCloud2 不依赖相机内参。
+    cx: 319.31427001953125            # 深度相机主点横坐标，单位 pixel。
+    cy: 239.09725952148438            # 深度相机主点纵坐标，单位 pixel。
+    fx: 386.2706298828125             # 深度相机 x 方向焦距，单位 pixel。
+    fy: 386.2706298828125             # 深度相机 y 方向焦距，单位 pixel。
+    use_depth_filter: true             # 深度图路径是否启用前后帧重投影一致性过滤。
+    depth_filter_tolerance: 0.15       # 重投影深度差小于该值才接受，单位 m。
+    depth_filter_mindist: 0.2          # 深度图接受的最小测距。
+    depth_filter_margin: 2             # 忽略图像四周的像素宽度，单位 pixel。
+    k_depth_scaling_factor: 1000.0     # 原始深度值除以该系数得到 m；1000 对应毫米输入。
+    skip_pixel: 2                      # 深度图像素采样步长；越大越快但点更稀疏。
+
+    # 占据概率采用 log-odds 累积，适用于深度图和 Diff 的点云 raycast 路径。
+    p_hit: 0.65                        # 射线端点命中一次时使用的占据概率证据。
+    p_miss: 0.35                       # 射线穿过一次时使用的空闲概率证据。
+    p_min: 0.12                        # 累计占据概率下限，防止空闲证据无限累积。
+    p_max: 0.90                        # 累计占据概率上限，防止命中证据无限累积。
+    p_occ: 0.80                        # 概率高于该阈值时将体素判为占据。
+    fading_time: -1.0                  # 占据衰减时间；小于等于 0 表示关闭衰减。
+    min_ray_length: 0.1                # 忽略距传感器原点更近的端点和射线。
+
+    visualize_all_directions: true     # true=显示整个滚动地图；false=只显示机头前方区域。
+    visualization_period: 0.5          # 占据点云发布周期；增大可降低 RViz/rosbag 开销。
+    show_occ_time: false               # 是否打印 raycast 和占据更新耗时。
+    pose_type: 2                       # 深度图同步位姿类型：1=PoseStamped，2=Odometry。
+    frame_id: world                    # 地图、输入点坐标及可视化使用的固定坐标系。
+
+  # 轨迹管理器：负责局部目标、初始多项式和规划模块组合。
+  manager:
+    max_vel: 0.5                       # 规划使用的最大速度幅值。
+    max_acc: 0.8                       # 规划使用的最大加速度幅值。
+    polyTraj_piece_length: 1.5         # 初始多项式每段期望空间长度；越小段数和变量越多。
+    feasibility_tolerance: 0.05        # 上游保留字段；当前代码只读取保存，未参与可行性判断。
+    planning_horizon: 3.0              # 近机碰撞检查范围；通常与 fsm/planning_horizon 保持一致。
+    use_multitopology_trajs: false     # 是否同时优化多条拓扑候选；单机默认使用单条候选。
+    drone_id: 0                        # 多机轨迹协同编号；0 表示本项目的单机实例。
+
+  # MINCO/多项式轨迹优化代价。所有 weight 均为相对权重，没有可直接比较的物理单位。
+  optimization:
+    constraint_points_perPiece: 5      # 每个多项式分段采样的约束点数量；越大检查更密、计算更慢。
+    weight_obstacle: 10000.0           # 小于 obstacle_clearance 时的强障碍惩罚权重。
+    weight_obstacle_soft: 5000.0       # 小于 obstacle_clearance_soft 时的柔性远场避障权重。
+    weight_swarm: 10000.0              # 多机间距惩罚权重；单机无其他轨迹时不产生作用。
+    weight_feasibility: 10000.0        # 速度、加速度和 jerk 超限的惩罚权重。
+    weight_sqrvariance: 10000.0        # 约束点/分段长度不均匀的惩罚权重。
+    weight_time: 10.0                  # 总轨迹时间代价权重；增大通常促使轨迹更快。
+    obstacle_clearance: 0.1            # 强障碍代价开始作用的 ESDF 距离。
+    obstacle_clearance_soft: 0.5       # 柔性障碍代价开始作用的 ESDF 距离，应不小于强阈值。
+    swarm_clearance: 0.15000000000000002  # 与其他无人机轨迹要求的名义间距。
+    max_vel: 0.5                       # 优化器速度上限，应与 manager/max_vel 一致。
+    vel_tolerance: 1.0                 # 最终可行性复核允许超过 max_vel 的绝对速度余量。
+    max_acc: 0.8                       # 优化器加速度上限，应与 manager/max_acc 一致。
+    acc_tolerance: 1.0                 # 最终可行性复核允许超过 max_acc 的绝对加速度余量。
+    max_jer: 8.0                       # 优化器 jerk 上限。
+
+trajectory_server:
+  # 将多项式轨迹按当前时刻采样成 PositionCommand，并生成路径朝向/yaw。
+  traj_server:
+    time_forward: 1.0                  # 用未来该时间处的位置确定路径朝向；越大转向越提前。
+    yaw_dot_max_deg_s: 35.0            # yaw 角速度上限，单位 deg/s。
+    yaw_dot_dot_max_deg_s2: 90.0       # yaw 角加速度上限，单位 deg/s^2。
+    goal_yaw_switch_distance: 0.5      # 距终点小于该距离后从路径朝向切换到指定终点 yaw。
+
+adapter:
+  # Diff 原生消息与公共 Planner API 之间的状态、目标和命令适配。
+  backend:
+    backend_id: diff                   # 公共插件 ID；用于来源校验，不是算法调参项。
+    api_version: sim2real.planner/v1   # 公共消息接口版本；必须与 manager/manifest 一致。
+    odom_timeout: 0.5                  # 超过该时间未收到有效里程计即令 odom_ready=false。
+    cloud_timeout: 1.0                 # 超过该时间未收到有效注册点云即令 map_ready=false。
+    heartbeat_timeout: 0.5             # 超过该时间未收到 Diff FSM 心跳即判定原生节点失联。
+    startup_grace: 10.0                # 首次 READY 前允许依赖完成启动的最长宽限时间。
+    planning_timeout: 10.0             # 新目标在该时间内没有产生首条轨迹则故障并制动。
+    status_rate: 20.0                  # 公共 PlannerStatus 发布频率。
+    goal_position_tolerance: 0.35      # adapter 判定真实机体到达目标的位置误差。
+    reached_velocity_tolerance: 0.2    # 到达目标时允许的真实速度幅值。
+    reached_yaw_tolerance_deg: 5.0     # 约束 yaw 时允许的真实航向误差。
+    reached_yaw_rate_tolerance_deg_s: 10.0  # 到达目标时允许的真实 yaw 角速度。
+    reached_hold_time: 0.5             # 上述到达条件必须连续满足的时间。
+    virtual_ground: 0.1                # 目标验证使用的 world 虚拟地面；与 GridMap 保持一致。
+    virtual_ceil: 3.0                  # 目标验证使用的 world 虚拟天花板；与 GridMap 保持一致。
+    obstacle_inflation: 0.33           # 目标与上下边界额外保留的净空；与地图膨胀一致。
+    max_velocity: 0.5                  # capabilities 公布的名义最大速度，不用于拒绝有限轨迹。
+    max_acceleration: 0.8              # capabilities 公布的名义最大加速度，不用于拒绝有限轨迹。

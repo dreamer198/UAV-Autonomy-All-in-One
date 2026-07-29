@@ -41,6 +41,7 @@ install(DIRECTORY launch
 if(CATKIN_ENABLE_TESTING)
   catkin_add_nosetests(test/test_command_gate.py)
   catkin_add_nosetests(test/test_manifest.py)
+  catkin_add_nosetests(test/test_rate_monitor.py)
   catkin_add_nosetests(test/test_validation.py)
   catkin_add_nosetests(test/test_visualization.py)
 endif()

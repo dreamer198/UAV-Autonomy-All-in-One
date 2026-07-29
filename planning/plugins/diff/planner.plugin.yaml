@@ -11,6 +11,7 @@ launch:
   arguments:
     backend_id: diff
     profile: local
+    scene: room
     odom_topic: /localization/odom
     cloud_topic: /localization/cloud_registered
 default_profile: local
@@ -25,7 +26,6 @@ rates:
   command_min_hz: 80.0
 capabilities:
   simulation: true
-  real_flight: true
   yaw: true
   cancel: true
   goal_validation: true

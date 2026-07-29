@@ -64,7 +64,7 @@ private:
   int target_type_;  // 1 mannual select, 2 hard code
   double replan_distance_threshold_, replan_time_threshold_;
   double emergency_stop_velocity_threshold_, emergency_stop_settle_time_;
-  double max_tracking_error_;
+  double max_tracking_error_, goal_clearance_, planning_retry_interval_;
   double waypoints_[50][3];
   int waypoint_num_;
   bool act_map_;
@@ -73,6 +73,7 @@ private:
   bool trigger_, have_target_, have_odom_, collide_, emergency_recovery_;
   FSM_EXEC_STATE exec_state_;
   ros::Time emergency_stop_settled_since_;
+  ros::Time next_planning_attempt_;
 
   Eigen::Vector3d odom_pos_, odom_vel_;  // odometry state
   Eigen::Quaterniond odom_orient_;
@@ -96,6 +97,9 @@ private:
                                        // optimization; 1: new, 2: replan
   void changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call);
   void printFSMExecState();
+  bool planningRetryPending() const;
+  void deferPlanningRetry();
+  void resetPlanningRetry();
 
   /* ROS functions */
   void execFSMCallback(const ros::TimerEvent& e);

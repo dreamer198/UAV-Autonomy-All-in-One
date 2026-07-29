@@ -35,6 +35,10 @@ from sim2real_planner_manager.manifest import (
     ManifestError,
     discover_plugins,
 )
+from sim2real_planner_manager.rate_monitor import (
+    observed_rate,
+    rate_sample_time,
+)
 from sim2real_planner_manager.validation import (
     backend_status_allows_new_goal,
     validate_command_mode,
@@ -48,7 +52,11 @@ from sim2real_planner_manager.validation import (
 class PlannerGateway:
     def __init__(self):
         self._lock = threading.RLock()
-        self._planner_id = rospy.get_param("~planner_id", "diff")
+        self._planner_id = str(rospy.get_param("~planner_id", "")).strip()
+        if not self._planner_id:
+            raise RuntimeError(
+                "planner_id must be explicitly selected; no default planner exists"
+            )
         self._runtime_mode = rospy.get_param("~runtime_mode", "")
         manifest_root = rospy.get_param("~manifest_root", "")
         repository_root = rospy.get_param("~repository_root", "")
@@ -317,17 +325,21 @@ class PlannerGateway:
         else:
             self._backend_ready_since = 0.0
 
-    def _observed_rate(self, receipts, now):
-        if not receipts or now - receipts[0] < self._rate_window:
-            return None
-        cutoff = now - self._rate_window
-        recent = [stamp for stamp in receipts if stamp >= cutoff]
-        if len(recent) < 2:
-            return 0.0
-        elapsed = recent[-1] - recent[0]
-        if elapsed <= 0.0:
-            return 0.0
-        return float(len(recent) - 1) / elapsed
+    def _rate_sample_time(self, receipt_monotonic, message_stamp):
+        return rate_sample_time(
+            self._runtime_mode,
+            receipt_monotonic,
+            message_stamp.to_sec(),
+        )
+
+    def _rate_now(self, receipt_monotonic):
+        if self._runtime_mode == "simulation":
+            return rate_sample_time(
+                self._runtime_mode,
+                receipt_monotonic,
+                rospy.Time.now().to_sec(),
+            )
+        return receipt_monotonic
 
     def _preopen_command_rate_ready(self):
         minimum_rate = self._manifest.rates.command_min_hz
@@ -569,7 +581,9 @@ class PlannerGateway:
             self._last_backend_status_at = now
             self._last_backend_status_stamp = message.header.stamp
             self._last_backend_status_seq = int(message.header.seq)
-            self._status_receipts.append(now)
+            self._status_receipts.append(
+                self._rate_sample_time(now, message.header.stamp)
+            )
             self._fault_reported = (
                 self._goal_id > 0 and self._gate.is_revoked
             )
@@ -608,7 +622,6 @@ class PlannerGateway:
         mismatch = []
         pairs = {
             "simulation": expected.simulation,
-            "real_flight": expected.real_flight,
             "yaw": expected.yaw,
             "cancel": expected.cancel,
             "goal_validation": expected.goal_validation,
@@ -699,7 +712,9 @@ class PlannerGateway:
                 and self._gate.vehicle_ready(now)
             )
             if preopen_candidate:
-                self._command_receipts.append(now)
+                self._command_receipts.append(
+                    self._rate_sample_time(now, message.header.stamp)
+                )
                 receipt_recorded = True
                 if not self._preopen_command_rate_ready():
                     rospy.loginfo_throttle(
@@ -739,7 +754,9 @@ class PlannerGateway:
             self._accepted_command_pub.publish(message)
             self._output_pub.publish(output)
             if not receipt_recorded:
-                self._command_receipts.append(now)
+                self._command_receipts.append(
+                    self._rate_sample_time(now, message.header.stamp)
+                )
             if decision.opened_gate:
                 rospy.loginfo(
                     "[planner_gateway] opened command gate for goal=%d trajectory=%d",
@@ -817,6 +834,7 @@ class PlannerGateway:
 
     def _watchdog_callback(self, _event):
         now = self._now_monotonic()
+        rate_now = self._rate_now(now)
         with self._lock:
             if self._goal_id <= 0:
                 backend_status_stale = (
@@ -847,8 +865,8 @@ class PlannerGateway:
                         else "planner backend startup timeout"
                     )
                     return
-                status_rate = self._observed_rate(
-                    self._status_receipts, now
+                status_rate = observed_rate(
+                    self._status_receipts, rate_now, self._rate_window
                 )
                 if (
                     self._backend_ready_since > 0.0
@@ -884,8 +902,12 @@ class PlannerGateway:
                 self._require_offboard
                 and not self._gate.vehicle_ready(now)
             )
-            status_rate = self._observed_rate(self._status_receipts, now)
-            command_rate = self._observed_rate(self._command_receipts, now)
+            status_rate = observed_rate(
+                self._status_receipts, rate_now, self._rate_window
+            )
+            command_rate = observed_rate(
+                self._command_receipts, rate_now, self._rate_window
+            )
             status_rate_low = (
                 status_rate is not None
                 and status_rate < self._manifest.rates.status_min_hz

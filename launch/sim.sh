@@ -4,8 +4,8 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-SCENE="${SIM_SCENE:-default}"
-PLANNER_ID="${SIM_PLANNER:-diff}"
+SCENE="${SIM_SCENE:-}"
+PLANNER_ID="${SIM_PLANNER:-}"
 PLANNER_PROFILE="${SIM_PLANNER_PROFILE:-}"
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
@@ -15,10 +15,18 @@ while [[ "${1:-}" == --* ]]; do
         exit 1
       }
       SCENE="$2"
+      [ -n "$SCENE" ] || {
+        echo "[ERROR] --scene requires a non-empty scene name." >&2
+        exit 1
+      }
       shift 2
       ;;
     --scene=*)
       SCENE="${1#--scene=}"
+      [ -n "$SCENE" ] || {
+        echo "[ERROR] --scene requires a non-empty scene name." >&2
+        exit 1
+      }
       shift
       ;;
     --planner)
@@ -27,10 +35,18 @@ while [[ "${1:-}" == --* ]]; do
         exit 1
       }
       PLANNER_ID="$2"
+      [ -n "$PLANNER_ID" ] || {
+        echo "[ERROR] --planner requires a non-empty plugin ID." >&2
+        exit 1
+      }
       shift 2
       ;;
     --planner=*)
       PLANNER_ID="${1#--planner=}"
+      [ -n "$PLANNER_ID" ] || {
+        echo "[ERROR] --planner requires a non-empty plugin ID." >&2
+        exit 1
+      }
       shift
       ;;
     --planner-profile)
@@ -56,40 +72,8 @@ while [[ "${1:-}" == --* ]]; do
   esac
 done
 
-[ -n "$SCENE" ] || {
-  echo "[ERROR] --scene requires a non-empty scene name." >&2
-  exit 1
-}
-[ -n "$PLANNER_ID" ] || {
-  echo "[ERROR] --planner requires a non-empty plugin ID." >&2
-  exit 1
-}
-
-SCENE="${SCENE%.env}"
-[[ "$SCENE" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || {
-  echo "[ERROR] Scene names may contain only letters, digits, '_' and '-'; paths are not accepted." >&2
-  exit 1
-}
 SCENE_DIR="$PROJECT_ROOT/simulation/config/scenes"
-SCENE_CONFIG="$SCENE_DIR/$SCENE.env"
-[ -f "$SCENE_CONFIG" ] || {
-  echo "[ERROR] Simulation scene config not found: $SCENE_CONFIG" >&2
-  exit 1
-}
-SCENE_DIR_REAL="$(realpath -e "$SCENE_DIR")"
-SCENE_CONFIG_REAL="$(realpath -e "$SCENE_CONFIG")"
-case "$SCENE_CONFIG_REAL" in
-  "$SCENE_DIR_REAL"/*.env) ;;
-  *)
-    echo "[ERROR] Scene config resolves outside the repository scene directory: $SCENE_CONFIG" >&2
-    exit 1
-    ;;
-esac
-# Scene profiles are the single source for the Gazebo world and spawn pose.
-# This keeps world existence checks and recorded initial poses versioned
-# together instead of accepting ad-hoc container paths at startup.
-# shellcheck disable=SC1090
-source "$SCENE_CONFIG"
+SCENE_RESOLVED=false
 
 DEV_CONTAINER="${SIM_DEV_CONTAINER:-diff_planner_px4_sim}"
 # PX4/Gazebo/Mid360 and the development overlay now run in the same
@@ -110,9 +94,8 @@ SESSION_NAME="${SIM_SESSION_NAME:-diff_planner_sim}"
 RUN_ID="${SIM_RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 RUNTIME_HOST="${SIM_RUNTIME_HOST:-$PROJECT_ROOT/runtime/simulation}"
 HOST_LOG_DIR="${SIM_HOST_LOG_DIR:-$RUNTIME_HOST/runs/$RUN_ID/tmux}"
-SESSION_MARKER="$RUNTIME_HOST/active/${SESSION_NAME}.owner"
-DEV_SESSION_MARKER="$DEV_RUNTIME/active/${SESSION_NAME}.owner"
 LIFECYCLE_LOCK_DIR="/tmp/uav-autonomy-aio-${UID}"
+SESSION_MARKER="$LIFECYCLE_LOCK_DIR/simulation-${SESSION_NAME}.owner"
 START_LOCK="$LIFECYCLE_LOCK_DIR/simulation.lifecycle.lock"
 START_LOCK_FD=""
 START_LOCK_DEPTH=0
@@ -130,13 +113,14 @@ WAIT_INTERVAL="${SIM_WAIT_INTERVAL:-2}"
 BUILD_JOBS="${SIM_BUILD_JOBS:-4}"
 SKIP_BUILD="${SIM_SKIP_BUILD:-false}"
 GAZEBO_GUI="${SIM_GAZEBO_GUI:-true}"
-WORLD="${SCENE_WORLD:-}"
-SPAWN_X="${SCENE_SPAWN_X:-2.0}"
-SPAWN_Y="${SCENE_SPAWN_Y:-0.0}"
-SPAWN_Z="${SCENE_SPAWN_Z:-0.0}"
-SPAWN_ROLL="${SCENE_SPAWN_ROLL:-0.0}"
-SPAWN_PITCH="${SCENE_SPAWN_PITCH:-0.0}"
-SPAWN_YAW="${SCENE_SPAWN_YAW:-0.0}"
+SCENE_DESCRIPTION=""
+WORLD=""
+SPAWN_X="2.0"
+SPAWN_Y="0.0"
+SPAWN_Z="0.0"
+SPAWN_ROLL="0.0"
+SPAWN_PITCH="0.0"
+SPAWN_YAW="0.0"
 START_PLANNER="${SIM_START_PLANNER:-true}"
 START_SE3="${SIM_START_SE3:-true}"
 START_GOAL_BRIDGE="${SIM_START_GOAL_BRIDGE:-true}"
@@ -195,6 +179,11 @@ usage() {
   cat <<'EOF'
 Usage: sim.sh [--scene NAME] [--planner ID] [--planner-profile NAME] ACTION
 
+Scene and planner selection:
+  start, restart, and test require --scene NAME and --planner ID.
+  SIM_SCENE and SIM_PLANNER provide the equivalent selections.
+  Built-in scenes: room, forest.
+
 Actions:
   build                 Incrementally build the host deployment source.
   test                  Build and test all four isolated workspaces.
@@ -215,12 +204,12 @@ Actions:
   shell                 Open a shell in the repository-owned simulation container.
 
 Stack examples:
-  ./launch/sim.sh start
-  ./launch/sim.sh --planner fast-kino start
-  ./launch/sim.sh --planner fast-topo start
-  ./launch/sim.sh --scene outdoor_rectangular_forest restart
-  SIM_GAZEBO_GUI=false SIM_START_RVIZ=false ./launch/sim.sh restart
-  SIM_START_ROSBAG=false ./launch/sim.sh restart
+  ./launch/sim.sh --scene room --planner diff start
+  ./launch/sim.sh --scene room --planner fast-kino start
+  ./launch/sim.sh --scene room --planner fast-topo start
+  ./launch/sim.sh --scene forest --planner diff restart
+  SIM_GAZEBO_GUI=false SIM_START_RVIZ=false ./launch/sim.sh --scene room --planner diff restart
+  SIM_START_ROSBAG=false ./launch/sim.sh --scene room --planner diff restart
 
 Flight examples:
   SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
@@ -242,6 +231,51 @@ die() {
   exit 1
 }
 
+require_planner_selection() {
+  [ -n "$PLANNER_ID" ] ||
+    die "No planner selected. Pass --planner ID or set SIM_PLANNER. Run '$0 planners' to list available plugins."
+}
+
+require_scene_selection() {
+  [ -n "$SCENE" ] ||
+    die "No scene selected. Pass --scene NAME or set SIM_SCENE. Built-in scenes: room, forest."
+}
+
+resolve_selected_scene() {
+  [ "$SCENE_RESOLVED" = "false" ] || return 0
+  require_scene_selection
+  SCENE="${SCENE%.env}"
+  [ -n "$SCENE" ] ||
+    die "--scene requires a non-empty scene name."
+  [[ "$SCENE" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] ||
+    die "Scene names may contain only letters, digits, '_' and '-'; paths are not accepted."
+
+  local scene_config="$SCENE_DIR/$SCENE.env"
+  [ -f "$scene_config" ] ||
+    die "Simulation scene config not found: $scene_config"
+  local scene_dir_real scene_config_real
+  scene_dir_real="$(realpath -e "$SCENE_DIR")"
+  scene_config_real="$(realpath -e "$scene_config")"
+  case "$scene_config_real" in
+    "$scene_dir_real"/*.env) ;;
+    *)
+      die "Scene config resolves outside the repository scene directory: $scene_config"
+      ;;
+  esac
+
+  # Scene profiles are the single source for the Gazebo world and spawn pose.
+  # shellcheck disable=SC1090
+  source "$scene_config"
+  WORLD="${SCENE_WORLD:-}"
+  SPAWN_X="${SCENE_SPAWN_X:-2.0}"
+  SPAWN_Y="${SCENE_SPAWN_Y:-0.0}"
+  SPAWN_Z="${SCENE_SPAWN_Z:-0.0}"
+  SPAWN_ROLL="${SCENE_SPAWN_ROLL:-0.0}"
+  SPAWN_PITCH="${SCENE_SPAWN_PITCH:-0.0}"
+  SPAWN_YAW="${SCENE_SPAWN_YAW:-0.0}"
+  SCENE_RESOLVED=true
+}
+
 list_planners() {
   [ -x "$PLANNER_MANIFEST_TOOL_HOST" ] ||
     die "Planner manifest tool is missing: $PLANNER_MANIFEST_TOOL_HOST"
@@ -253,6 +287,7 @@ list_planners() {
 
 resolve_selected_planner() {
   local require_built="${1:-false}"
+  require_planner_selection
   local -a args=(
     "$PLANNER_MANIFEST_TOOL_HOST"
     --project-root "$PROJECT_ROOT"
@@ -409,7 +444,7 @@ release_start_lock() {
 
 first_simulation_owner_marker() {
   local marker
-  for marker in "$RUNTIME_HOST"/active/*.owner; do
+  for marker in "$LIFECYCLE_LOCK_DIR"/simulation-*.owner; do
     [ -e "$marker" ] || continue
     printf '%s\n' "$marker"
     return 0
@@ -515,12 +550,13 @@ create_window() {
 
 managed_rosbag_pids() {
   container_exists "$DEV_CONTAINER" && container_running "$DEV_CONTAINER" || return 1
+  local expected_prefix=""
+  expected_prefix="$(current_rosbag_output_prefix)" || return 1
   docker exec -i \
-    -e "ROSBAG_STATE_FILE=$ROSBAG_STATE_FILE" \
+    -e "ROSBAG_EXPECTED_PREFIX=$expected_prefix" \
     -e "ROSBAG_NODE_REMAP=__name:=${ROSBAG_NODE_NAME#/}" \
     "$DEV_CONTAINER" bash -lc '
-      [ -s "$ROSBAG_STATE_FILE" ] || exit 1
-      IFS= read -r expected_prefix < "$ROSBAG_STATE_FILE"
+      expected_prefix="$ROSBAG_EXPECTED_PREFIX"
       [ -n "$expected_prefix" ] || exit 1
       found=false
       for cmdline in /proc/[0-9]*/cmdline; do
@@ -601,7 +637,23 @@ rosbag_record_process_running() {
 }
 
 current_rosbag_output_prefix() {
-  container_exists "$DEV_CONTAINER" && container_running "$DEV_CONTAINER" || return 1
+  local marker_prefix=""
+  if [ -s "$SESSION_MARKER" ]; then
+    marker_prefix="$(
+      sed -n 's/^rosbag_prefix=//p' "$SESSION_MARKER" | head -n 1
+    )"
+    case "$marker_prefix" in
+      "$ROSBAG_DIR"/*)
+        printf '%s\n' "$marker_prefix"
+        return 0
+        ;;
+    esac
+  fi
+
+  # Compatibility fallback for stacks started before the ownership marker
+  # carried the recorder output prefix.
+  container_exists "$DEV_CONTAINER" && container_running "$DEV_CONTAINER" ||
+    return 1
   docker exec -i \
     -e "ROSBAG_STATE_FILE=$ROSBAG_STATE_FILE" \
     "$DEV_CONTAINER" bash -lc '
@@ -765,6 +817,7 @@ build_overlay() {
 
 test_overlay() {
   resolve_selected_planner false
+  resolve_selected_scene
   ensure_prereqs
   ensure_dev_container
   [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] ||
@@ -796,7 +849,7 @@ test_overlay() {
       export ROS_MASTER_URI='$ROS_MASTER_URI' ROS_IP='$ROS_IP'
       roslaunch --nodes sim2real_planner_manager planner_gateway.launch \
         planner_id:='$PLANNER_ID' planner_profile:='$PLANNER_PROFILE' \
-        runtime_mode:=simulation \
+        runtime_mode:=simulation scene:='$SCENE' \
         manifest_root:='$PLANNER_MANIFEST_ROOT' repository_root:='$PLANNING_PROJECT_ROOT'
       roslaunch --nodes sim2real_common controller.launch vehicle_config:='$CONTROLLER_CONFIG'
       roslaunch --nodes sim2real_simulation localization.launch
@@ -822,31 +875,24 @@ master_is_running() {
 }
 
 create_session_marker() {
-  if mkdir -p "$(dirname "$SESSION_MARKER")" 2>/dev/null && \
-    printf 'run_id=%s\nsession=%s\n' "$RUN_ID" "$SESSION_NAME" > "$SESSION_MARKER" 2>/dev/null; then
-    return 0
+  local marker_tmp="${SESSION_MARKER}.tmp.$$"
+  mkdir -p "$(dirname "$SESSION_MARKER")" ||
+    die "Cannot create the simulation ownership directory."
+  if ! printf \
+    'run_id=%s\nsession=%s\ncontainer=%s\nrosbag_prefix=%s\n' \
+    "$RUN_ID" \
+    "$SESSION_NAME" \
+    "$DEV_CONTAINER" \
+    "$ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}" \
+    >"$marker_tmp"; then
+    rm -f -- "$marker_tmp"
+    die "Cannot write the simulation ownership marker."
   fi
-
-  warn "Host cannot write the simulation marker directly; writing it through the development container."
-  docker exec -i \
-    -e "SIM_MARKER_PATH=$DEV_SESSION_MARKER" \
-    -e "SIM_MARKER_RUN_ID=$RUN_ID" \
-    -e "SIM_MARKER_SESSION=$SESSION_NAME" \
-    "$DEV_CONTAINER" bash -c '
-      mkdir -p "$(dirname "$SIM_MARKER_PATH")"
-      printf "run_id=%s\nsession=%s\n" "$SIM_MARKER_RUN_ID" "$SIM_MARKER_SESSION" > "$SIM_MARKER_PATH"
-    '
+  mv -f -- "$marker_tmp" "$SESSION_MARKER"
 }
 
 remove_session_marker() {
-  if rm -f "$SESSION_MARKER" 2>/dev/null; then
-    return 0
-  fi
-
-  warn "Host cannot remove the simulation marker directly; removing it through the development container."
-  docker exec -i \
-    -e "SIM_MARKER_PATH=$DEV_SESSION_MARKER" \
-    "$DEV_CONTAINER" bash -c 'rm -f -- "$SIM_MARKER_PATH"'
+  rm -f -- "$SESSION_MARKER"
 }
 
 cleanup_failed_start() {
@@ -863,6 +909,7 @@ cleanup_failed_start() {
 
 start_stack() {
   resolve_selected_planner false
+  resolve_selected_scene
   ensure_prereqs
   acquire_start_lock
   local active_marker=""
@@ -965,8 +1012,8 @@ start_stack() {
   if [ "$START_PLANNER" = "true" ]; then
     local planner_cmd
     printf -v planner_cmd \
-      'exec roslaunch sim2real_planner_manager planner_gateway.launch planner_id:=%q planner_profile:=%q runtime_mode:=simulation manifest_root:=%q repository_root:=%q require_offboard:=true goal_topic:=/goal mavros_state_topic:=/mavros/state output_topic:=/command/trajectory' \
-      "$PLANNER_ID" "$PLANNER_PROFILE" "$PLANNER_MANIFEST_ROOT" "$PLANNING_PROJECT_ROOT"
+      'exec roslaunch sim2real_planner_manager planner_gateway.launch planner_id:=%q planner_profile:=%q runtime_mode:=simulation scene:=%q manifest_root:=%q repository_root:=%q require_offboard:=true goal_topic:=/goal mavros_state_topic:=/mavros/state output_topic:=/command/trajectory' \
+      "$PLANNER_ID" "$PLANNER_PROFILE" "$SCENE" "$PLANNER_MANIFEST_ROOT" "$PLANNING_PROJECT_ROOT"
     create_window planner "$DEV_CONTAINER" "$planner_cmd"
     wait_for_condition "$PLANNER_ID planner gateway" "$DEV_CONTAINER" \
       "rostopic list | grep -qx '/planning/status' && rostopic list | grep -qx '/planning/capabilities' && rosnode list | grep -qx '/planner_gateway' && rosnode list | grep -qx '/planner_visualization'" planner
@@ -1182,7 +1229,19 @@ stop_stack() {
     fi
     remove_session_marker
   fi
-  info "Simulation processes stopped; containers were left running for fast reuse."
+
+  # Release the bind mounts while the stack is inactive. If
+  # runtime/simulation is moved to the desktop trash while Docker still holds
+  # the mount, later logs otherwise continue growing below Trash/expunged.
+  if container_running "$DEV_CONTAINER"; then
+    if "$DEV_CONTAINER_SCRIPT" stop; then
+      info "Simulation processes and container stopped; runtime mounts were released."
+    else
+      warn "The simulation container still has an unowned active process and was left running."
+    fi
+  else
+    info "Simulation processes stopped; the container is not running."
+  fi
   release_start_lock
 }
 
@@ -1403,6 +1462,7 @@ main() {
       ;;
     restart)
       resolve_selected_planner false
+      resolve_selected_scene
       acquire_start_lock
       stop_stack
       start_stack

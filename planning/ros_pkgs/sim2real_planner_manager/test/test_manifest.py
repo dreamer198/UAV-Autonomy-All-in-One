@@ -31,7 +31,6 @@ class ManifestTest(unittest.TestCase):
         )
         self.assertEqual(plugins["diff"].api_version, API_VERSION)
         self.assertEqual(plugins["fast-kino"].ros_namespace, "fast_kino")
-        self.assertFalse(plugins["fast-topo"].capabilities.real_flight)
 
     def test_single_fast_profile_and_identity_are_resolved_deterministically(self):
         plugin = discover_plugins(
@@ -44,6 +43,7 @@ class ManifestTest(unittest.TestCase):
                 "backend_id": "malicious",
                 "backend_namespace": "malicious",
                 "profile": "outdoor",
+                "scene": "forest",
                 "cloud_topic": "/test/cloud",
             },
         )
@@ -51,19 +51,21 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(arguments["backend_namespace"], "fast_kino")
         self.assertEqual(plugin.profiles, ("local",))
         self.assertEqual(arguments["profile"], "local")
+        self.assertEqual(arguments["scene"], "forest")
         self.assertEqual(arguments["cloud_topic"], "/test/cloud")
         with self.assertRaises(ManifestError):
             merged_launch_arguments(plugin, profile="outdoor")
         with self.assertRaises(ManifestError):
             merged_launch_arguments(plugin, overrides={"undeclared": "x"})
 
-    def test_runtime_capability_is_fail_closed(self):
+    def test_runtime_mode_validation_and_simulation_capability(self):
         plugins = discover_plugins(
             builtin_root=PLUGIN_ROOT, plugin_path=""
         )
         self.assertTrue(plugins["diff"].supports_runtime("real"))
         self.assertTrue(plugins["fast-kino"].supports_runtime("simulation"))
-        self.assertFalse(plugins["fast-kino"].supports_runtime("real"))
+        self.assertTrue(plugins["fast-kino"].supports_runtime("real"))
+        self.assertTrue(plugins["fast-topo"].supports_runtime("real"))
         with self.assertRaises(ManifestError):
             plugins["diff"].supports_runtime("invalid")
 

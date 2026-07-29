@@ -320,7 +320,19 @@ class SharedMissionExecutor:
                 now - position_setpoint_received_at,
                 self.config["odom_timeout"],
             )
-            if state_is_fresh and state.armed and not odom_is_fresh:
+            # Subscribers are connected asynchronously when this short-lived
+            # mission process starts.  If PX4 is already armed, /mavros/state
+            # can win that startup race by a few milliseconds and arrive
+            # before the first /localization/odom callback.  Wait for the
+            # initial odometry sample until the normal preflight deadline, but
+            # still fail immediately if a stream that has actually been seen
+            # becomes stale while armed.
+            if (
+                state_is_fresh
+                and state.armed
+                and odom_received_at > 0.0
+                and not odom_is_fresh
+            ):
                 raise FlightDirectorError(
                     "localization odometry is unavailable or stale while "
                     "the vehicle is armed"

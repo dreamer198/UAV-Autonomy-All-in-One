@@ -111,7 +111,6 @@ SE3 节点内部的自动 OFFBOARD/解锁受 `enable_sim`、`auto_request_offboa
 
 - [../../docs/diff_planner_principles.md](../../docs/diff_planner_principles.md)
 - [../../docs/se3_controller.md](../../docs/se3_controller.md)
-- [../../docs/controller_tuning.md](../../docs/controller_tuning.md)
 
 ## 参考
 

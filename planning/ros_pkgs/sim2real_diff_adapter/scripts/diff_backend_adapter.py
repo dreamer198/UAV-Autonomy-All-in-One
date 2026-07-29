@@ -831,7 +831,6 @@ class DiffBackendAdapter:
         message.backend_id = self.backend_id
         message.variant = "diff"
         message.simulation = True
-        message.real_flight = True
         message.yaw = True
         message.cancel = True
         message.goal_validation = True

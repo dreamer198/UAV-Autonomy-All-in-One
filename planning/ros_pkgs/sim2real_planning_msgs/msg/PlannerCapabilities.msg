@@ -5,7 +5,6 @@ string backend_id
 string variant
 
 bool simulation
-bool real_flight
 bool yaw
 bool cancel
 bool goal_validation

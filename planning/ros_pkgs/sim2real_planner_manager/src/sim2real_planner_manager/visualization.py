@@ -11,7 +11,7 @@ _NUMPY_FORMATS = {
 }
 
 
-def filter_point_records(
+def finite_point_records(
     data,
     width,
     height,
@@ -19,10 +19,8 @@ def filter_point_records(
     row_step,
     coordinate_specs,
     is_bigendian,
-    min_z,
-    max_z,
 ):
-    """Keep finite XYZ records whose z coordinate lies in the display band.
+    """Keep complete point records whose XYZ coordinates are finite.
 
     The complete point record is copied, so optional fields such as intensity
     remain intact without making the common layer understand planner-specific
@@ -33,14 +31,10 @@ def filter_point_records(
     height = int(height)
     point_step = int(point_step)
     row_step = int(row_step)
-    min_z = float(min_z)
-    max_z = float(max_z)
     if width < 0 or height < 0 or point_step <= 0 or row_step < 0:
         raise ValueError("point-cloud dimensions and strides are invalid")
     if row_step < width * point_step:
         raise ValueError("point-cloud row_step is smaller than its points")
-    if not math.isfinite(min_z) or not math.isfinite(max_z) or max_z <= min_z:
-        raise ValueError("visualization z limits must be finite and increasing")
     if set(coordinate_specs) != {"x", "y", "z"}:
         raise ValueError("coordinate_specs must contain exactly x, y, and z")
 
@@ -92,8 +86,6 @@ def filter_point_records(
         np.isfinite(coordinates["x"])
         & np.isfinite(coordinates["y"])
         & np.isfinite(coordinates["z"])
-        & (coordinates["z"] >= min_z)
-        & (coordinates["z"] <= max_z)
     )
     kept = int(np.count_nonzero(keep))
     records = np.ndarray(

@@ -43,14 +43,14 @@
       <link name="environment_link">
         <collision name="environment_collision">
           <geometry>
-            <mesh><uri>file:///etc/sim2real/simulation/scenes/outdoor_rectangular_forest/meshes/scene.obj</uri></mesh>
+            <mesh><uri>file:///etc/sim2real/simulation/scenes/forest/meshes/scene.obj</uri></mesh>
           </geometry>
           <max_contacts>20</max_contacts>
         </collision>
         <visual name="environment_visual">
           <cast_shadows>true</cast_shadows>
           <geometry>
-            <mesh><uri>file:///etc/sim2real/simulation/scenes/outdoor_rectangular_forest/meshes/scene.obj</uri></mesh>
+            <mesh><uri>file:///etc/sim2real/simulation/scenes/forest/meshes/scene.obj</uri></mesh>
           </geometry>
         </visual>
       </link>

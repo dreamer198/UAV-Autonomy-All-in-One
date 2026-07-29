@@ -24,6 +24,7 @@
 
 
 #include <path_searching/topo_prm.h>
+#include <path_searching/topology_safety.h>
 #include <thread>
 
 namespace fast_planner {
@@ -218,15 +219,8 @@ vector<GraphNode::Ptr> TopologyPRM::findVisibGuard(Eigen::Vector3d pt) {
   for (list<GraphNode::Ptr>::iterator iter = graph_.begin(); iter != graph_.end(); ++iter) {
     if ((*iter)->type_ == GraphNode::Connector) continue;
 
-    /*
-     * A graph edge is executable geometry, not merely an occupancy probe.
-     * Preserve most of the configured guide margin, but leave one voxel for
-     * collision-range guards that sit on the clearance isosurface; using the
-     * exact threshold disconnects those guards because lineVisib treats an
-     * equal distance as occupied.
-     */
     const double edge_clearance =
-        std::max(resolution_, clearance_ - resolution_);
+        topologyEdgeClearance(clearance_, resolution_);
     if (lineVisib(pt, (*iter)->pos_, edge_clearance, pc)) {
       visib_guards.push_back((*iter));
       ++visib_num;
@@ -522,7 +516,7 @@ void TopologyPRM::shortcutPath(vector<Eigen::Vector3d> path, int path_id, int it
     for (int i = 1; i < dis_path.size(); ++i) {
       // Shortcutting must preserve the same edge margin used to build PRM.
       const double edge_clearance =
-          std::max(resolution_, clearance_ - resolution_);
+          topologyEdgeClearance(clearance_, resolution_);
       if (lineVisib(short_path.back(), dis_path[i], edge_clearance, colli_pt, path_id)) continue;
 
       edt_environment_->evaluateEDTWithGrad(colli_pt, -1, dist, grad);

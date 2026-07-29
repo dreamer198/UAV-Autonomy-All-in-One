@@ -25,11 +25,24 @@
 
 // #include <fstream>
 #include <plan_manage/planner_manager.h>
+#include <path_searching/topology_safety.h>
 #include <cmath>
 #include <stdexcept>
 #include <thread>
 
 namespace fast_planner {
+
+namespace {
+
+double clearanceEscapeTolerance(double required_clearance) {
+  return std::min(0.03, 0.10 * required_clearance);
+}
+
+double maximumClearanceEscapeDistance(double required_clearance) {
+  return std::max(0.50, 2.0 * required_clearance);
+}
+
+}  // namespace
 
 /*
  * 阅读导航：FastPlannerManager 是算法模块的装配层，不负责 ROS 状态机，也不直接发送控制命令。
@@ -140,37 +153,74 @@ bool FastPlannerManager::checkTrajCollision(double& distance) {
    * 返回 false 时，distance 是碰撞采样点相对当前位置的直线距离，FSM 用它判断
    * 障碍是否已经近到需要立即重规划。
    */
-  double t_now = (ros::Time::now() - local_data_.start_time_).toSec();
+  const double raw_t_now =
+      (ros::Time::now() - local_data_.start_time_).toSec();
+  if (!std::isfinite(raw_t_now) ||
+      !std::isfinite(local_data_.duration_) ||
+      local_data_.duration_ < 0.0 ||
+      !std::isfinite(pp_.clearance_) || pp_.clearance_ <= 0.0) {
+    distance = 0.0;
+    return false;
+  }
+  const double t_now =
+      std::max(0.0, std::min(raw_t_now, local_data_.duration_));
 
   double tm, tmp;
   local_data_.position_traj_.getTimeSpan(tm, tmp);
   Eigen::Vector3d cur_pt = local_data_.position_traj_.evaluateDeBoor(tm + t_now);
+  if (!cur_pt.allFinite()) {
+    distance = 0.0;
+    return false;
+  }
+
+  const double initial_distance =
+      edt_environment_->evaluateCoarseEDT(cur_pt, -1.0);
+  InitialClearanceEscape clearance_escape(
+      initial_distance, pp_.clearance_,
+      clearanceEscapeTolerance(pp_.clearance_),
+      maximumClearanceEscapeDistance(pp_.clearance_));
+  if (!clearance_escape.accept(initial_distance, 0.0)) {
+    distance = 0.0;
+    return false;
+  }
 
   double          radius = 0.0;
-  Eigen::Vector3d fut_pt;
-  double          fut_t = 0.02;
-
-  while (radius < 6.0 && t_now + fut_t < local_data_.duration_) {
-    fut_pt = local_data_.position_traj_.evaluateDeBoor(tm + t_now + fut_t);
-
-    const double dist = fut_pt.allFinite()
-        ? edt_environment_->evaluateCoarseEDT(fut_pt, -1.0)
-        : -1.0;
-    /*
-     * Use the same configured clearance as candidate selection. Checking
-     * occupancy alone only protects the trajectory centre and allowed the
-     * migrated Iris airframe to clip a wall even though its B-spline was
-     * technically outside an occupied voxel.
-     */
-    if (!std::isfinite(dist) || dist < pp_.clearance_) {
+  double          travelled_distance = 0.0;
+  Eigen::Vector3d previous_pt = cur_pt;
+  const vector<double> sample_times =
+      sampleTimesIncludingEnd(t_now, local_data_.duration_, 0.02);
+  for (size_t index = 1U;
+       index < sample_times.size() && radius < 6.0; ++index) {
+    Eigen::Vector3d fut_pt =
+        local_data_.position_traj_.evaluateDeBoor(tm + sample_times[index]);
+    if (!fut_pt.allFinite()) {
       distance = radius;
       return false;
     }
 
     radius = (fut_pt - cur_pt).norm();
-    fut_t += 0.02;
+    travelled_distance += (fut_pt - previous_pt).norm();
+    previous_pt = fut_pt;
+
+    const double clearance =
+        edt_environment_->evaluateCoarseEDT(fut_pt, -1.0);
+    /*
+     * Keep the configured clearance for normal execution. If a map update
+     * places only the current start slightly inside that margin, permit a
+     * short prefix solely when it continuously escapes and regains the full
+     * margin. This avoids the impossible state where every safe exit is
+     * rejected at its first sample.
+     */
+    if (!clearance_escape.accept(clearance, travelled_distance)) {
+      distance = radius;
+      return false;
+    }
   }
 
+  if (!clearance_escape.complete()) {
+    distance = radius;
+    return false;
+  }
   return true;
 }
 
@@ -575,8 +625,19 @@ bool FastPlannerManager::trajectoryCollisionFree(
     return false;
   }
 
-  const Eigen::Vector3d start = traj.evaluateDeBoorT(0.0);
+  Eigen::Vector3d start = traj.evaluateDeBoorT(0.0);
   if (!start.allFinite()) {
+    first_collision_distance = 0.0;
+    return false;
+  }
+
+  const double initial_clearance =
+      edt_environment_->evaluateCoarseEDT(start, -1.0);
+  InitialClearanceEscape clearance_escape(
+      initial_clearance, clearance,
+      clearanceEscapeTolerance(clearance),
+      maximumClearanceEscapeDistance(clearance));
+  if (!clearance_escape.accept(initial_clearance, 0.0)) {
     first_collision_distance = 0.0;
     return false;
   }
@@ -585,18 +646,29 @@ bool FastPlannerManager::trajectoryCollisionFree(
   // execution-time collision monitor.
   const int sample_count =
       std::max(1, static_cast<int>(std::ceil(duration / 0.02)));
-  for (int i = 0; i <= sample_count; ++i) {
+  double travelled_distance = 0.0;
+  Eigen::Vector3d previous = start;
+  for (int i = 1; i <= sample_count; ++i) {
     const double t = duration * static_cast<double>(i) /
         static_cast<double>(sample_count);
     Eigen::Vector3d point = traj.evaluateDeBoorT(t);
-    const double distance = point.allFinite()
-        ? edt_environment_->evaluateCoarseEDT(point, -1.0)
-        : -1.0;
-    if (!std::isfinite(distance) || distance < clearance) {
-      first_collision_distance =
-          point.allFinite() ? (point - start).norm() : 0.0;
+    if (!point.allFinite()) {
+      first_collision_distance = 0.0;
       return false;
     }
+    travelled_distance += (point - previous).norm();
+    previous = point;
+    const double point_clearance =
+        edt_environment_->evaluateCoarseEDT(point, -1.0);
+    if (!clearance_escape.accept(point_clearance, travelled_distance)) {
+      first_collision_distance =
+          (point - start).norm();
+      return false;
+    }
+  }
+  if (!clearance_escape.complete()) {
+    first_collision_distance = (previous - start).norm();
+    return false;
   }
   return true;
 }
@@ -823,20 +895,26 @@ void FastPlannerManager::findCollisionRange(vector<Eigen::Vector3d>& colli_start
 
   /* find range of collision */
   double t_s = -1.0, t_e = t_mp;
-  for (double tc = t_m; tc <= t_mp + 1e-4; tc += 0.05) {
+  const vector<double> sample_times =
+      sampleTimesIncludingEnd(t_m, t_mp, 0.05);
+  double previous_time = t_m;
+  for (size_t index = 0; index < sample_times.size(); ++index) {
+    const double tc = sample_times[index];
 
     Eigen::Vector3d ptc = initial_traj->evaluateDeBoor(tc);
     safe = edt_environment_->evaluateCoarseEDT(ptc, -1.0) < topo_prm_->clearance_ ? false : true;
 
     if (last_safe && !safe) {
-      colli_start.push_back(initial_traj->evaluateDeBoor(tc - 0.05));
-      if (t_s < 0.0) t_s = tc - 0.05;
+      const double entry_time = index == 0U ? t_m : previous_time;
+      colli_start.push_back(initial_traj->evaluateDeBoor(entry_time));
+      if (t_s < 0.0) t_s = entry_time;
     } else if (!last_safe && safe) {
       colli_end.push_back(ptc);
       t_e = tc;
     }
 
     last_safe = safe;
+    previous_time = tc;
   }
 
   if (colli_start.size() == 0) return;
@@ -844,30 +922,17 @@ void FastPlannerManager::findCollisionRange(vector<Eigen::Vector3d>& colli_start
   if (colli_start.size() == 1 && colli_end.size() == 0) return;
 
   // 按原 B-spline knot 间隔附近的密度，分别采样碰撞区间之前和之后的安全轨迹段。
-  double dt = initial_traj->getInterval();
-  int    sn = max(1, int(ceil((t_s - t_m) / dt)));
-  dt        = (t_s - t_m) / sn;
-
-  for (double tc = t_m; tc <= t_s + 1e-4; tc += dt) {
+  const double guide_step = initial_traj->getInterval();
+  const vector<double> start_times =
+      sampleTimesIncludingEnd(t_m, t_s, guide_step);
+  for (double tc : start_times) {
     start_pts.push_back(initial_traj->evaluateDeBoor(tc));
   }
 
-  dt = initial_traj->getInterval();
-  sn = max(1, int(ceil((t_mp - t_e) / dt)));
-  dt = (t_mp - t_e) / sn;
-  // std::cout << "dt: " << dt << std::endl;
-  // std::cout << "sn: " << sn << std::endl;
-  // std::cout << "t_m: " << t_m << std::endl;
-  // std::cout << "t_mp: " << t_mp << std::endl;
-  // std::cout << "t_s: " << t_s << std::endl;
-  // std::cout << "t_e: " << t_e << std::endl;
-
-  if (dt > 1e-4) {
-    for (double tc = t_e; tc <= t_mp + 1e-4; tc += dt) {
-      end_pts.push_back(initial_traj->evaluateDeBoor(tc));
-    }
-  } else {
-    end_pts.push_back(initial_traj->evaluateDeBoor(t_mp));
+  const vector<double> end_times =
+      sampleTimesIncludingEnd(t_e, t_mp, guide_step);
+  for (double tc : end_times) {
+    end_pts.push_back(initial_traj->evaluateDeBoor(tc));
   }
 }
 

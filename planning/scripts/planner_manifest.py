@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-side planner manifest discovery and capability gate.
+"""Host-side planner manifest discovery and validation.
 
 This utility intentionally has no ROS imports, so `sim.sh planners` and
 `real.sh planners` work before any catkin workspace has been built.
@@ -38,7 +38,6 @@ NESTED_FIELDS = {
     "rates": {"status_min_hz", "command_min_hz"},
     "capabilities": {
         "simulation",
-        "real_flight",
         "yaw",
         "cancel",
         "goal_validation",
@@ -252,10 +251,13 @@ def select(manifests, planner_id, mode, profile, require_built):
         manifest = manifests[planner_id]
     except KeyError as exc:
         raise ManifestError(f"unknown planner id {planner_id!r}") from exc
-    capability = "simulation" if mode == "simulation" else "real_flight"
-    if not manifest["capabilities"][capability]:
+    if mode not in ("simulation", "real"):
         raise ManifestError(
-            f"planner {planner_id!r} is not enabled for {mode.replace('_', ' ')}"
+            f"runtime mode must be 'simulation' or 'real', got {mode!r}"
+        )
+    if mode == "simulation" and not manifest["capabilities"]["simulation"]:
+        raise ManifestError(
+            f"planner {planner_id!r} does not support simulation"
         )
     selected_profile = profile or manifest["default_profile"]
     if selected_profile not in manifest["profiles"]:
@@ -332,14 +334,13 @@ def main():
                     )
                 )
             else:
-                print("ID             DEFAULT    SIM  REAL  BUILT  NAME")
+                print("ID             DEFAULT    SIM  BUILT  NAME")
                 for manifest in records:
                     setup = Path(manifest["_setup"])
                     print(
                         f"{manifest['id']:<14} "
                         f"{manifest['default_profile']:<10} "
                         f"{'yes' if manifest['capabilities']['simulation'] else 'no':<4} "
-                        f"{'yes' if manifest['capabilities']['real_flight'] else 'no':<5} "
                         f"{'yes' if _setup_is_built(setup) else 'no':<6} "
                         f"{manifest['display_name']}"
                     )

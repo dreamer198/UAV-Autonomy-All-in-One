@@ -4,16 +4,20 @@
   <arg name="planner" default="1"/>
   <arg name="profile" default="local"/>
   <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
-  <arg name="base_config" default="$(find sim2real_fast_adapter)/config/base.yaml"/>
-  <arg name="profile_config" default="$(find sim2real_fast_adapter)/config/$(arg profile).yaml"/>
+  <arg name="scene" default="room"/>
+  <arg name="config" default="$(find sim2real_fast_adapter)/config/planner.yaml"/>
+  <arg name="forest_scene_config"
+       default="$(find sim2real_fast_adapter)/config/scenes/forest.yaml"/>
   <arg name="odom_topic" default="/localization/odom"/>
   <arg name="cloud_topic" default="/localization/cloud_registered"/>
 
   <group ns="/planning/backends/$(arg backend_namespace)">
     <node pkg="plan_manage" name="planner" type="fast_planner_node"
           output="screen" required="true">
-      <rosparam command="load" file="$(arg base_config)"/>
-      <rosparam command="load" file="$(arg profile_config)"/>
+      <rosparam command="load" file="$(arg config)"/>
+      <rosparam
+          if="$(eval arg('runtime_mode') == 'simulation' and arg('scene') == 'forest')"
+          command="load" file="$(arg forest_scene_config)"/>
       <param name="planner_node/planner" value="$(arg planner)" type="int"/>
       <param name="manager/use_kinodynamic_path"
              value="$(eval int(arg('planner')) == 1)" type="bool"/>
@@ -45,9 +49,9 @@
       <!-- Native map/marker semantics remain backend debug data. Only the
            common planner_visualization node may publish stable RViz topics. -->
       <remap from="/sdf_map/occupancy"
-             to="/planning/viz/backend/internal_inflated_occupancy"/>
+             to="/planning/backends/$(arg backend_namespace)/viz/native_occupancy"/>
       <remap from="/sdf_map/occupancy_inflate"
-             to="/planning/viz/raw/inflated_occupancy"/>
+             to="/planning/backends/$(arg backend_namespace)/viz/native_inflated_occupancy"/>
       <remap from="/sdf_map/esdf" to="/planning/viz/backend/esdf"/>
       <remap from="/sdf_map/update_range"
              to="/planning/viz/backend/update_range"/>
@@ -69,8 +73,10 @@
 
     <node pkg="sim2real_fast_adapter" name="adapter"
           type="fast_backend_adapter_node" output="screen" required="true">
-      <rosparam command="load" file="$(arg base_config)"/>
-      <rosparam command="load" file="$(arg profile_config)"/>
+      <rosparam command="load" file="$(arg config)"/>
+      <rosparam
+          if="$(eval arg('runtime_mode') == 'simulation' and arg('scene') == 'forest')"
+          command="load" file="$(arg forest_scene_config)"/>
       <param name="backend_id" value="$(arg backend_id)"/>
       <param name="backend_namespace" value="$(arg backend_namespace)"/>
       <param name="planner" value="$(arg planner)" type="int"/>
@@ -79,6 +85,8 @@
       <param name="odom_topic" value="$(arg odom_topic)"/>
       <param name="cloud_topic" value="$(arg cloud_topic)"/>
       <remap from="viz/occupancy" to="/planning/viz/raw/occupancy"/>
+      <remap from="viz/inflated_occupancy"
+             to="/planning/viz/raw/inflated_occupancy"/>
     </node>
   </group>
 </launch>

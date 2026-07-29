@@ -1,4 +1,6 @@
+#include <sim2real_fast_adapter/ground_plane_filter.h>
 #include <sim2real_fast_adapter/validation.h>
+#include <sim2real_fast_adapter/visualization_map.h>
 
 #include <bspline/non_uniform_bspline.h>
 #include <nav_msgs/Odometry.h>
@@ -37,10 +39,14 @@ using sim2real_fast_adapter::finite;
 using sim2real_fast_adapter::finitePoint;
 using sim2real_fast_adapter::finitePose;
 using sim2real_fast_adapter::finiteTrajectorySetpoint;
+using sim2real_fast_adapter::fitDominantGroundPlane;
+using sim2real_fast_adapter::goalAboveVirtualFloor;
 using sim2real_fast_adapter::goalInsideMapBounds;
 using sim2real_fast_adapter::measurementStampIsCurrent;
 using sim2real_fast_adapter::measuredStateSatisfiesGoal;
 using sim2real_fast_adapter::pointInsideBodyExclusionCylinder;
+using sim2real_fast_adapter::RealObstacleVisualizationMap;
+using sim2real_fast_adapter::removeGroundPlanePoints;
 
 bool finiteVector(const geometry_msgs::Vector3& value) {
   return finite(value.x) && finite(value.y) && finite(value.z);
@@ -70,6 +76,19 @@ class FastBackendAdapter {
     pnh_.param("adapter/self_filter_max_z", self_filter_max_z_, 0.20);
     pnh_.param("adapter/self_filter_pose_tolerance",
                self_filter_pose_tolerance_, 0.10);
+    pnh_.param("adapter/hide_observed_ground_plane",
+               hide_observed_ground_plane_, true);
+    pnh_.param("adapter/ground_plane_distance_tolerance",
+               ground_plane_distance_tolerance_, 0.03);
+    double ground_plane_max_tilt_deg = 15.0;
+    pnh_.param("adapter/ground_plane_max_tilt_deg",
+               ground_plane_max_tilt_deg, 15.0);
+    pnh_.param("adapter/ground_plane_min_points",
+               ground_plane_min_points_, 200);
+    pnh_.param("adapter/ground_plane_min_xy_span",
+               ground_plane_min_xy_span_, 2.0);
+    pnh_.param("adapter/ground_plane_ransac_iterations",
+               ground_plane_ransac_iterations_, 96);
     pnh_.param("adapter/heartbeat_timeout", heartbeat_timeout_, 0.25);
     pnh_.param("adapter/progress_timeout", progress_timeout_, 0.25);
     pnh_.param("adapter/planning_timeout", planning_timeout_, 10.0);
@@ -87,13 +106,19 @@ class FastBackendAdapter {
                reached_yaw_rate_tolerance_deg_s, 10.0);
     pnh_.param("adapter/reached_hold_time", reached_hold_time_, 0.5);
     pnh_.param("adapter/inject_virtual_floor", inject_virtual_floor_, false);
-    pnh_.param("adapter/virtual_floor_height", virtual_floor_height_, 0.2);
+    pnh_.param("adapter/virtual_floor_height", virtual_floor_height_, 0.0);
     const double radians_per_degree = std::acos(-1.0) / 180.0;
+    ground_plane_max_tilt_ =
+        ground_plane_max_tilt_deg * radians_per_degree;
     reached_yaw_tolerance_ = reached_yaw_tolerance_deg * radians_per_degree;
     reached_yaw_rate_tolerance_ =
         reached_yaw_rate_tolerance_deg_s * radians_per_degree;
     pnh_.param("manager/max_vel", max_velocity_, 0.5);
     pnh_.param("manager/max_acc", max_acceleration_, 0.8);
+    pnh_.param("manager/clearance_threshold",
+               manager_clearance_threshold_, 0.25);
+    pnh_.param("topo_prm/clearance", topo_clearance_, 0.3);
+    goal_clearance_ = manager_clearance_threshold_;
     pnh_.param("sdf_map/origin_x", map_origin_.x(), 0.0);
     pnh_.param("sdf_map/origin_y", map_origin_.y(), 0.0);
     pnh_.param("sdf_map/origin_z", map_origin_.z(), 0.0);
@@ -103,8 +128,10 @@ class FastBackendAdapter {
     pnh_.param("sdf_map/local_update_range_x", local_update_range_.x(), -1.0);
     pnh_.param("sdf_map/local_update_range_y", local_update_range_.y(), -1.0);
     pnh_.param("sdf_map/local_update_range_z", local_update_range_.z(), -1.0);
-    pnh_.param("sdf_map/obstacles_inflation", inflation_, 0.1);
     pnh_.param("sdf_map/resolution", map_resolution_, -1.0);
+    pnh_.param("sdf_map/obstacles_inflation", inflation_, 0.1);
+    pnh_.param("sdf_map/obstacles_inflation_z", inflation_z_, map_resolution_);
+    pnh_.param("sdf_map/accumulate_cloud", accumulate_cloud_, false);
 
     const char* environment_mode_value = std::getenv("SIM2REAL_RUNTIME_MODE");
     const std::string environment_mode =
@@ -122,6 +149,9 @@ class FastBackendAdapter {
         !finite(self_filter_radius_) || !finite(self_filter_min_z_) ||
         !finite(self_filter_max_z_) ||
         !finite(self_filter_pose_tolerance_) ||
+        !finite(ground_plane_distance_tolerance_) ||
+        !finite(ground_plane_max_tilt_) ||
+        !finite(ground_plane_min_xy_span_) ||
         !finite(map_settle_time_) || !finite(heartbeat_timeout_) ||
         !finite(progress_timeout_) ||
         !finite(planning_timeout_) ||
@@ -132,13 +162,24 @@ class FastBackendAdapter {
         !finite(reached_hold_time_) ||
         !finite(virtual_floor_height_) ||
         !finite(max_velocity_) ||
-        !finite(max_acceleration_) || !finite(inflation_) ||
+        !finite(max_acceleration_) ||
+        !finite(manager_clearance_threshold_) ||
+        !finite(topo_clearance_) || !finite(goal_clearance_) ||
+        !finite(inflation_) ||
+        !finite(inflation_z_) ||
         command_rate_ <= 0.0 || status_rate_ <= 0.0 ||
         odom_timeout_ <= 0.0 || cloud_timeout_ <= 0.0 ||
         (self_filter_enabled_ &&
          (self_filter_radius_ <= 0.0 ||
           self_filter_min_z_ >= self_filter_max_z_ ||
           self_filter_pose_tolerance_ <= 0.0)) ||
+        (hide_observed_ground_plane_ &&
+         (ground_plane_distance_tolerance_ <= 0.0 ||
+          ground_plane_max_tilt_ <= 0.0 ||
+          ground_plane_max_tilt_ >= 0.5 * std::acos(-1.0) ||
+          ground_plane_min_points_ < 3 ||
+          ground_plane_min_xy_span_ <= 0.0 ||
+          ground_plane_ransac_iterations_ <= 0)) ||
         heartbeat_timeout_ <= 0.0 || map_settle_time_ < 0.0 ||
         progress_timeout_ <= 0.0 ||
         planning_timeout_ <= 0.0 ||
@@ -148,7 +189,11 @@ class FastBackendAdapter {
         reached_yaw_rate_tolerance_ <= 0.0 ||
         reached_hold_time_ <= 0.0 ||
         max_velocity_ <= 0.0 ||
-        max_acceleration_ <= 0.0 || inflation_ < 0.0 ||
+        max_acceleration_ <= 0.0 ||
+        manager_clearance_threshold_ <= 0.0 ||
+        topo_clearance_ <= 0.0 || goal_clearance_ <= 0.0 ||
+        inflation_ < 0.0 ||
+        inflation_z_ < 0.0 ||
         !finite(map_resolution_) || map_resolution_ <= 0.0 ||
         !map_origin_.allFinite() || !map_size_.allFinite() ||
         !local_update_range_.allFinite() || (map_size_.array() <= 0.0).any() ||
@@ -160,11 +205,18 @@ class FastBackendAdapter {
       throw std::invalid_argument("invalid Fast planner adapter identity or timing parameters");
     }
 
+    visualization_map_.reset(new RealObstacleVisualizationMap(
+        map_origin_, map_size_, local_update_range_, map_resolution_,
+        inflation_, inflation_z_, accumulate_cloud_));
+
     native_goal_pub_ = nh_.advertise<plan_manage::FastPlannerGoal>("native/goal", 2);
     native_odom_pub_ = nh_.advertise<nav_msgs::Odometry>("native/odom_world", 10);
     native_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("native/cloud_world", 2);
     visualization_occupancy_pub_ =
         nh_.advertise<sensor_msgs::PointCloud2>("viz/occupancy", 1);
+    visualization_inflated_occupancy_pub_ =
+        nh_.advertise<sensor_msgs::PointCloud2>(
+            "viz/inflated_occupancy", 1);
     command_pub_ = nh_.advertise<sim2real_planning_msgs::PlannerCommand>("command", 10);
     status_pub_ = nh_.advertise<sim2real_planning_msgs::PlannerStatus>("status", 10, true);
     capabilities_pub_ =
@@ -203,7 +255,6 @@ class FastBackendAdapter {
     capabilities.backend_id = backend_id_;
     capabilities.variant = planner_ == 1 ? "kinodynamic" : "topological";
     capabilities.simulation = true;
-    capabilities.real_flight = false;
     capabilities.yaw = true;
     capabilities.cancel = true;
     capabilities.goal_validation = true;
@@ -240,8 +291,25 @@ class FastBackendAdapter {
       return false;
     }
     if (inject_virtual_floor_ &&
-        goal.goal.pose.position.z <= virtual_floor_height_ + map_resolution_) {
-      if (reason) *reason = "goal is below the Fast virtual floor";
+        !goalAboveVirtualFloor(
+            goal.goal.pose.position.z, virtual_floor_height_, inflation_z_,
+            goal_clearance_, map_resolution_, reason)) {
+      return false;
+    }
+    if (!obstacle_validation_ready_ || visualization_map_ == nullptr) {
+      if (reason) *reason = "Fast obstacle map is not ready for goal validation";
+      return false;
+    }
+    const Eigen::Vector3d goal_position(
+        goal.goal.pose.position.x, goal.goal.pose.position.y,
+        goal.goal.pose.position.z);
+    double nearest_obstacle = std::numeric_limits<double>::infinity();
+    if (visualization_map_->inflatedObstacleWithin(
+            goal_position, goal_clearance_, &nearest_obstacle)) {
+      if (reason) {
+        *reason =
+            "goal is inside the required clearance around an observed Fast obstacle";
+      }
       return false;
     }
     return true;
@@ -493,29 +561,19 @@ class FastBackendAdapter {
     return output;
   }
 
-  void publishVisualizationOccupancy(
-      const std_msgs::Header& header,
-      const std::vector<Eigen::Vector3d>& planning_points) {
-    if (visualization_occupancy_pub_.getNumSubscribers() == 0 ||
-        !latest_odom_valid_) {
-      return;
+  void publishVisualizationMaps(const std_msgs::Header& header) {
+    if (!latest_odom_valid_ || visualization_map_ == nullptr) return;
+    if (visualization_occupancy_pub_.getNumSubscribers() > 0) {
+      visualization_occupancy_pub_.publish(makeXyzCloud(
+          header,
+          visualization_map_->occupancyPoints(latest_odom_position_)));
     }
-
-    const Eigen::Vector3d map_max = map_origin_ + map_size_;
-    std::vector<Eigen::Vector3d> visible_points;
-    visible_points.reserve(planning_points.size());
-    for (const Eigen::Vector3d& point : planning_points) {
-      const Eigen::Vector3d offset = point - latest_odom_position_;
-      if ((point.array() < map_origin_.array()).any() ||
-          (point.array() >= map_max.array()).any() ||
-          (offset.array().abs() >= local_update_range_.array()).any()) {
-        continue;
-      }
-      visible_points.push_back(point);
+    if (visualization_inflated_occupancy_pub_.getNumSubscribers() > 0) {
+      visualization_inflated_occupancy_pub_.publish(makeXyzCloud(
+          header,
+          visualization_map_->inflatedOccupancyPoints(
+              latest_odom_position_)));
     }
-
-    visualization_occupancy_pub_.publish(
-        makeXyzCloud(header, visible_points));
   }
 
   void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& message) {
@@ -565,10 +623,60 @@ class FastBackendAdapter {
           removed_self_points);
     }
 
-    // The public visualization must never see the adapter-private virtual
-    // floor. It shows the same self-filtered external obstacles that Fast
-    // receives, restricted to the active local map window.
-    publishVisualizationOccupancy(message->header, planning_points);
+    // Build both public map layers exclusively from external sensor points.
+    // The simulated ground is recognized as a geometric plane instead of
+    // deleting every point below a fixed z threshold, so low obstacles remain
+    // visible. The private virtual floor is appended only afterwards.
+    std::vector<Eigen::Vector3d> visualization_points = planning_points;
+    bool visualization_points_ready = true;
+    if (hide_observed_ground_plane_) {
+      Eigen::Vector4d fitted_plane;
+      const double candidate_minimum_z = std::max(
+          map_origin_.z(), virtual_floor_height_ - 0.8);
+      const double candidate_maximum_z = std::min(
+          map_origin_.z() + map_size_.z(),
+          virtual_floor_height_ + map_resolution_);
+      if (fitDominantGroundPlane(
+              planning_points, candidate_minimum_z, candidate_maximum_z,
+              ground_plane_distance_tolerance_,
+              ground_plane_max_tilt_,
+              static_cast<size_t>(ground_plane_min_points_),
+              ground_plane_min_xy_span_,
+              ground_plane_ransac_iterations_, &fitted_plane)) {
+        visualization_ground_plane_ = fitted_plane;
+        visualization_ground_plane_valid_ = true;
+      }
+      if (visualization_ground_plane_valid_) {
+        size_t removed_ground_points = 0U;
+        visualization_points = removeGroundPlanePoints(
+            planning_points, visualization_ground_plane_,
+            ground_plane_distance_tolerance_, &removed_ground_points);
+        ROS_INFO_THROTTLE(
+            5.0,
+            "Fast RViz ground-plane classifier removed %zu of %zu "
+            "external point(s)",
+            removed_ground_points, planning_points.size());
+      } else {
+        visualization_points_ready = false;
+        ROS_WARN_THROTTLE(
+            5.0,
+            "Fast RViz map is waiting for a reliable observed ground plane");
+      }
+    }
+    if (visualization_points_ready) {
+      std::string visualization_reason;
+      if (!visualization_map_->update(
+              visualization_points, latest_odom_position_,
+              &visualization_reason)) {
+        last_cloud_receipt_ = ros::Time();
+        setFault(
+            "failed to update Fast real-obstacle visualization: " +
+            visualization_reason);
+        return;
+      }
+      obstacle_validation_ready_ = true;
+      publishVisualizationMaps(message->header);
+    }
     if (inject_virtual_floor_) {
       std::vector<Eigen::Vector3d> floor_points;
       std::string floor_reason;
@@ -798,7 +906,9 @@ class FastBackendAdapter {
       return;
     }
     if (inject_virtual_floor_ &&
-        position.z() <= virtual_floor_height_ + map_resolution_) {
+        !goalAboveVirtualFloor(
+            position.z(), virtual_floor_height_, inflation_z_, 0.0,
+            map_resolution_, nullptr)) {
       setFault("native trajectory crossed the Fast virtual floor");
       plan_manage::FastPlannerGoal cancel;
       cancel.header.stamp = now;
@@ -882,6 +992,7 @@ class FastBackendAdapter {
     status_.odom_ready =
         !last_odom_receipt_.isZero() && (now - last_odom_receipt_).toSec() <= odom_timeout_;
     status_.map_ready = !last_cloud_receipt_.isZero() && !first_cloud_receipt_.isZero() &&
+        obstacle_validation_ready_ &&
         (now - last_cloud_receipt_).toSec() <= cloud_timeout_ &&
         (now - first_cloud_receipt_).toSec() >= map_settle_time_;
   }
@@ -970,6 +1081,7 @@ class FastBackendAdapter {
   ros::Publisher native_odom_pub_;
   ros::Publisher native_cloud_pub_;
   ros::Publisher visualization_occupancy_pub_;
+  ros::Publisher visualization_inflated_occupancy_pub_;
   ros::Publisher command_pub_;
   ros::Publisher status_pub_;
   ros::Publisher capabilities_pub_;
@@ -998,6 +1110,12 @@ class FastBackendAdapter {
   double self_filter_min_z_ = -0.20;
   double self_filter_max_z_ = 0.20;
   double self_filter_pose_tolerance_ = 0.10;
+  bool hide_observed_ground_plane_ = true;
+  double ground_plane_distance_tolerance_ = 0.03;
+  double ground_plane_max_tilt_ = 15.0 * std::acos(-1.0) / 180.0;
+  int ground_plane_min_points_ = 200;
+  double ground_plane_min_xy_span_ = 2.0;
+  int ground_plane_ransac_iterations_ = 96;
   double heartbeat_timeout_ = 0.25;
   double progress_timeout_ = 0.25;
   double planning_timeout_ = 10.0;
@@ -1010,10 +1128,15 @@ class FastBackendAdapter {
   double reached_yaw_rate_tolerance_ = 10.0 * std::acos(-1.0) / 180.0;
   double reached_hold_time_ = 0.5;
   bool inject_virtual_floor_ = false;
-  double virtual_floor_height_ = 0.2;
+  double virtual_floor_height_ = 0.0;
   double max_velocity_ = 0.5;
   double max_acceleration_ = 0.8;
+  double manager_clearance_threshold_ = 0.25;
+  double topo_clearance_ = 0.3;
+  double goal_clearance_ = 0.25;
   double inflation_ = 0.1;
+  double inflation_z_ = 0.1;
+  bool accumulate_cloud_ = false;
   double map_resolution_ = -1.0;
   Eigen::Vector3d map_origin_ = Eigen::Vector3d::Zero();
   Eigen::Vector3d map_size_ = Eigen::Vector3d::Constant(-1.0);
@@ -1044,14 +1167,19 @@ class FastBackendAdapter {
   bool runtime_ready_ = false;
   bool core_planning_busy_ = false;
   bool latest_odom_valid_ = false;
+  bool obstacle_validation_ready_ = false;
   Eigen::Vector3d latest_odom_position_ = Eigen::Vector3d::Zero();
   Eigen::Vector3d latest_odom_world_velocity_ = Eigen::Vector3d::Zero();
   Eigen::Quaterniond latest_odom_body_in_world_ = Eigen::Quaterniond::Identity();
   Eigen::Vector3d latest_odom_world_angular_velocity_ = Eigen::Vector3d::Zero();
   Eigen::Vector3d braking_hold_position_ = Eigen::Vector3d::Zero();
   double braking_hold_yaw_ = 0.0;
+  bool visualization_ground_plane_valid_ = false;
+  Eigen::Vector4d visualization_ground_plane_ =
+      Eigen::Vector4d::Zero();
   std::deque<StampedBodyPose> odom_history_;
   std::vector<NonUniformBspline> trajectory_;
+  std::unique_ptr<RealObstacleVisualizationMap> visualization_map_;
 };
 
 }  // namespace

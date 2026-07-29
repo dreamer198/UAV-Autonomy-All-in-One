@@ -43,7 +43,7 @@ _LAUNCH_KEYS = frozenset({"package", "file", "arguments"})
 _TIMEOUT_KEYS = frozenset({"startup_sec", "status_sec", "command_sec"})
 _RATE_KEYS = frozenset({"status_min_hz", "command_min_hz"})
 _CAPABILITY_KEYS = frozenset(
-    {"simulation", "real_flight", "yaw", "cancel", "goal_validation", "rviz"}
+    {"simulation", "yaw", "cancel", "goal_validation", "rviz"}
 )
 
 
@@ -93,7 +93,6 @@ class RateSpec:
 @dataclass(frozen=True)
 class CapabilitySpec:
     simulation: bool
-    real_flight: bool
     yaw: bool
     cancel: bool
     goal_validation: bool
@@ -135,7 +134,7 @@ class PluginManifest:
         if runtime_mode == "simulation":
             return self.capabilities.simulation
         if runtime_mode == "real":
-            return self.capabilities.real_flight
+            return True
         raise ManifestError(
             "runtime mode must be 'simulation' or 'real', got {!r}".format(
                 runtime_mode
@@ -490,9 +489,6 @@ def load_manifest(path: Path) -> PluginManifest:
     capabilities = CapabilitySpec(
         simulation=_boolean(
             capability_raw["simulation"], "capabilities.simulation"
-        ),
-        real_flight=_boolean(
-            capability_raw["real_flight"], "capabilities.real_flight"
         ),
         yaw=_boolean(capability_raw["yaw"], "capabilities.yaw"),
         cancel=_boolean(capability_raw["cancel"], "capabilities.cancel"),

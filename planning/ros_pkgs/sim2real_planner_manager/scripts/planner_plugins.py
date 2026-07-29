@@ -91,13 +91,10 @@ def main(argv=None):
             else:
                 for manifest in manifests.values():
                     print(
-                        "{}\t{}\t{}\t{}".format(
+                        "{}\t{}\t{}".format(
                             manifest.id,
                             manifest.variant,
                             ",".join(manifest.profiles),
-                            "real"
-                            if manifest.capabilities.real_flight
-                            else "simulation-only",
                         )
                     )
             return 0
