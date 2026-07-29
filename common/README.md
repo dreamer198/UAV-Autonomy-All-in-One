@@ -1,88 +1,88 @@
-# 公共自主飞行链路
+# 公共自主飞行接口
 
-`common/` 保存仿真与真机共同使用的接口、launch、参数和飞行命令执行器。环境专用
-的传感器、定位适配和载体参数分别位于 `simulation/` 与 `deployment/`。
+`common/` 提供仿真与真机共用的飞行命令、Mission、定位保护和 SE3 入口。
+规划器插件由 [`planning/`](../planning/README.md) 管理；传感器与定位适配分别位于
+`simulation/` 和 `deployment/`。
 
-## 定位输入契约
+## 定位契约
+
+所有规划器只依赖以下输入，内部地图不受公共框架约束。
 
 | Topic | 类型 | 约定 |
 |---|---|---|
-| `/localization/odom` | `nav_msgs/Odometry` | pose 在 `world`；twist 按消息规范表达在 `base_link`；`child_frame_id=base_link` |
-| `/localization/cloud_registered` | `sensor_msgs/PointCloud2` | 点已转换到 `world`；`header.frame_id=world` |
+| `/localization/odom` | `nav_msgs/Odometry` | 非零测量时间戳；`frame_id=world`；`child_frame_id=base_link`；pose 在 `world`，twist 在 `base_link` |
+| `/localization/cloud_registered` | `sensor_msgs/PointCloud2` | 非零采集时间戳；点坐标和 `frame_id` 均为 `world`；包含有效 XYZ 字段 |
 
-仿真由 `sim2real_simulation/localization.launch` 生成这两个 topic。真机由 `odom_to_base.py` 和 `cloud_relay.py` 适配 FAST-LIO 输出。
+仿真适配 MAVROS 与模拟 MID-360；真机适配 FAST-LIO。需要改变坐标系时必须使用采集
+时刻的 TF 变换数值，不能只改 `frame_id`。Diff 保留 rolling GridMap，Fast
+Kino/Topo 保留固定范围 SDFMap。
 
-Diff-Planner 会把 `base_link` 线速度旋转到 `world` 后用于规划。适配器不能提前把 twist 标记成 world-frame 数据。
-
-里程计必须携带有效、持续递增的测量时间戳。真机点云由 `cloud_relay.py` 使用其
-测量时刻的 TF 变换到 `world`；需要跨坐标系时，时间戳为空或对应 TF 不可用便
-丢弃，禁止只改 `frame_id`。仿真把 MAVROS `map` 显式声明为与 Gazebo `world`
-数值重合；该 identity 别名不做数值变换，输入父/子坐标系不匹配时直接丢弃。
-
-## 公共链路
+## 数据流
 
 ```text
-/localization/odom ───────────────┐
-/localization/cloud_registered ───┴─> diff_planner_node
-                                      → /drone_0_planning/trajectory
-                                      → traj_server
-                                      → /drone_0_planning/pos_cmd
-                                      → trajectory_msg_converter
-                                      → /command/trajectory
-                                      → se3_controller_node
-                                      → /mavros/setpoint_raw/attitude
+/localization/odom ────────────────→ selected planner adapter
+/localization/cloud_registered ────→ selected planner adapter
+/goal ─────────────────────────────→ planner_gateway ─→ selected planner adapter
+                                           ▲                    │
+                                           └─ status / command ─┘
+                                           │
+                                           └─→ /command/trajectory
+                                                           │
+                                                           ▼
+                                                   SE3 → MAVROS → PX4
 ```
 
-SE3 状态反馈来自 MAVROS 的 `/mavros/local_position/odom` 与 `/mavros/imu/data`。真机把公共里程计回灌到 `/mavros/vision_pose/pose`，再由 PX4 EKF 和 MAVROS 提供控制反馈；仿真直接使用 SITL 状态。
+`planner_gateway` 是 `/command/trajectory` 的唯一发布者。原生 `PolyTraj`、
+`Bspline` 和 `PositionCommand` 只存在于插件私有命名空间。
 
-## 内容
+## 公共规划接口
 
-| 路径 | 作用 |
-|---|---|
-| `launch/planner.launch` | Diff-Planner 与 `traj_server` |
-| `launch/trajectory_converter.launch` | `PositionCommand` 转 `/command/trajectory` |
-| `launch/controller.launch` | 加载公共与载体专用配置后启动 SE3 |
-| `launch/planning_control.launch` | 组合上述规划与控制节点 |
-| `scripts/arm_executor.py` | 两端共享的原生起飞与 OFFBOARD 交接 |
-| `scripts/goal_executor.py` | 单目标飞前检查与发布 |
-| `scripts/mission_executor.py` | Mission 飞行状态机 |
-| `scripts/waypoint_mission.py` | Mission JSON 校验、航点规划确认与到达监测 |
-| `scripts/localization_guard.py` | 定位失效保护 |
-| `scripts/rviz_goal_to_diff_planner.py` | 真机远程 RViz 目标桥 |
+| 名称 | 类型 | 作用 |
+|---|---|---|
+| `/goal` | `geometry_msgs/PoseStamped` | `world` 目标；零四元数表示不约束终点 yaw |
+| `/planning/goal` | `PlannerGoal` | 网关分配 session 和 goal ID 后的目标 |
+| `/planning/status` | `PlannerStatus` | 后端状态、目标/轨迹 ID、readiness 和实际目标 |
+| `/planning/capabilities` | `PlannerCapabilities` | 能力、动力学上限和可选固定地图边界 |
+| `/planning/validate_goal` | `ValidateGoal` | 调用当前插件验证目标 |
+| `/planning/cancel` | `std_srvs/Trigger` | 取消当前目标 |
+| `/planning/command` | `PlannerCommand` | 网关接受的插件命令观测流 |
+| `/command/trajectory` | `MultiDOFJointTrajectory` | SE3 控制输入 |
+| `/planning/viz/occupancy` | `PointCloud2` | 当前插件的统一占据显示 |
+| `/planning/viz/inflated_occupancy` | `PointCloud2` | 当前插件的统一膨胀显示 |
+| `/planning/viz/planning_bounds` | `Marker` | 插件声明的固定地图边界；无固定边界时删除 |
 
-`localization_guard.py` 使用系统单调时钟监测接收间隔，并检查里程计时间戳、数值、
-跳变和速度。流停止、时间戳不前进或仿真 `/clock` 冻结都会锁存故障；自主模式下
-请求 `AUTO.LAND`，完整栈重启前不再接受自主命令。
+## 安全语义
 
-`arm_executor.py`、`mission_executor.py` 和 `waypoint_mission.py` 还会独立检查
-MAVROS 状态、高度与定位的新鲜度。定位失效直接请求 `AUTO.LAND`；其他自主执行
-故障优先确认 `AUTO.LOITER`，其中起飞或 OFFBOARD 交接失败时还会以
-`AUTO.LAND` 兜底。飞手已切换模式时不会覆盖；若 MAVROS 状态本身失联，则无法
-确认恢复模式，必须由飞手接管。
+- 插件只能在整栈启动时选择，不支持空中切换或自动 fallback。
+- 新目标会撤销旧命令授权。运动命令必须匹配当前 backend、session、goal 和
+  trajectory ID，并满足 `ACTIVE + armable`、armed/OFFBOARD、readiness、频率和
+  超时检查。
+- 错误来源、旧 ID、非法数值、状态/命令超时、后端故障、离开 OFFBOARD 或第二个
+  `/command/trajectory` 发布者都会关闭命令门。
+- `localization_guard.py` 检查时间戳、停更、有限值和位置跳变。速度上限默认关闭；
+  定位故障会锁存，并在自主飞行中请求 `AUTO.LAND`。
+- `goal` 和 Mission 在发布前调用当前插件的目标验证服务；Mission 在起飞前校验全部
+  航点。
 
-真机与仿真的 RViz 目标桥均使用非锁存 `/goal`，只转发有限数值、`world` 坐标系、
-当前 Planner 高度范围内，且飞机已解锁并处于 OFFBOARD、定位保护正常的目标。
-不满足条件的点击不会排队。
-
-仓库根目录的 `launch/` 只负责编排容器和整条链路；ROS XML launch 保留在对应 ROS 包内。
+人工切出 OFFBOARD 后不会自动恢复旧目标。定位故障锁存后必须重启完整栈。
 
 ## 参数归属
 
-| 文件 | 归属 |
+| 文件 | 内容 |
 |---|---|
-| `config/planner.yaml` | 两端共享的地图、规划、优化和目标参数 |
-| `config/trajectory_server.yaml` | 两端共享的轨迹采样与 yaw 参数 |
-| `config/controller.yaml` | 两端共享的控制算法与安全默认值 |
-| `simulation/config/controller.yaml` | 仿真载体的悬停推力、推力限制和围栏 |
-| `deployment/config/controller.yaml` | 真机的悬停推力、积分、推力限制和围栏 |
+| [`common/config/controller.yaml`](config/controller.yaml) | 公共 SE3、输入超时和命令来源 |
+| [`simulation/config/controller.yaml`](../simulation/config/controller.yaml) | 仿真载体推力、积分和围栏 |
+| [`deployment/config/controller.yaml`](../deployment/config/controller.yaml) | 真机推力、积分和围栏 |
+| [`planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml`](../planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml) | Diff 全部参数 |
+| [`planning/ros_pkgs/sim2real_fast_adapter/config/planner.yaml`](../planning/ros_pkgs/sim2real_fast_adapter/config/planner.yaml) | Fast Kino/Topo 共用参数 |
+| [`planning/ros_pkgs/sim2real_fast_adapter/config/scenes/forest.yaml`](../planning/ros_pkgs/sim2real_fast_adapter/config/scenes/forest.yaml) | `forest` 仿真的 Fast 地图覆盖 |
+| `planning/plugins/*/planner.plugin.yaml` | 插件身份、workspace、launch、超时、频率与能力 |
 
-不要在 `simulation/` 或 `deployment/` 复制 Planner 参数。临时实验可通过 `SIM_PLANNER_CONFIG` 或 `PLANNER_CONFIG` 加载完整 YAML；需要两端长期一致的修改应合并回 `common/config/planner.yaml`。
+`SIM_PLANNER_CONFIG` 和 `PLANNER_CONFIG` 只覆盖 Diff 配置。
 
-Planner 的 `resolution` 与 `obstacles_inflation` 必须按机体完整碰撞包络、定位误差和安全余量验证。载体专用悬停推力、推力限制与围栏只修改对应 controller YAML。
+## 修改边界
 
-## 修改原则
-
-- 规划算法、地图或飞行包络：修改公共 Planner，并先通过仿真验证；
-- 悬停推力、推力上限或载体围栏：修改对应载体配置；
-- 新定位或传感器：在环境目录实现适配器，输出两个公共 localization topic；
-- Planner 不直接订阅 `/mavros/local_position/odom`、`/Odometry`、`/cloud_registered` 或 `/livox/lidar`。
+- 新传感器或定位源：在环境目录适配为两个公共 localization topic。
+- 新规划器：使用独立 workspace 和 adapter，不修改 Mission、SE3 或公共消息语义。
+- 规划器参数只放在对应插件配置；载体控制参数只放在对应环境配置。
+- 原生规划器不得直接依赖 `/Odometry`、`/cloud_registered` 或 `/livox/lidar`。

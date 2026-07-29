@@ -23,7 +23,6 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     odom_sub_ = nh_.subscribe<nav_msgs::Odometry>("/mavros/local_position/odom", 10, &se3Ctrl::OdomCallback, this);
     imu_sub_ = nh_.subscribe<sensor_msgs::Imu>("/mavros/imu/data", 10, &se3Ctrl::IMUCallback, this);
     state_sub_ = nh_.subscribe<mavros_msgs::State>("/mavros/state", 10, &se3Ctrl::StateCallback, this);
-    desire_odom_sub_ = nh_.subscribe<nav_msgs::Odometry>("/desire_odom", 10, &se3Ctrl::DesireOdomCallback, this);
     multiDOFJoint_sub_ = nh_.subscribe("/command/trajectory", 10, &se3Ctrl::multiDOFJointCallback, this);
 
     exec_timer_ = nh_.createTimer(ros::Duration(0.01), &se3Ctrl::execFSMCallback, this);
@@ -39,6 +38,11 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     nh_.param<double>("odom_timeout", odom_timeout_, 0.2);
     nh_.param<double>("imu_timeout", imu_timeout_, 0.2);
     nh_.param<double>("state_timeout", state_timeout_, 2.0);
+    nh_.param<double>(
+        "trajectory_command_timeout", trajectory_command_timeout_, 0.08);
+    nh_.param<std::string>(
+        "command_publisher_node", command_publisher_node_,
+        "/planner_gateway");
     nh_.param<double>("land_retry_interval", land_retry_interval_, 1.0);
     nh_.param<double>(
         "safety_hold_retry_interval", safety_hold_retry_interval_, 1.0);
@@ -63,6 +67,22 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     if (!std::isfinite(state_timeout_) || state_timeout_ <= 0.0) {
         ROS_WARN("[se3_controller] Invalid state_timeout=%.3f; using 2.0 s.", state_timeout_);
         state_timeout_ = 2.0;
+    }
+    if (!std::isfinite(trajectory_command_timeout_) ||
+        trajectory_command_timeout_ <= 0.0) {
+        ROS_WARN(
+            "[se3_controller] Invalid trajectory_command_timeout=%.3f; "
+            "using 0.08 s.",
+            trajectory_command_timeout_);
+        trajectory_command_timeout_ = 0.08;
+    }
+    if (command_publisher_node_.empty() ||
+        command_publisher_node_.front() != '/') {
+        ROS_WARN(
+            "[se3_controller] Invalid command_publisher_node='%s'; "
+            "using /planner_gateway.",
+            command_publisher_node_.c_str());
+        command_publisher_node_ = "/planner_gateway";
     }
     if (!std::isfinite(land_retry_interval_) || land_retry_interval_ <= 0.0) {
         ROS_WARN("[se3_controller] Invalid land_retry_interval=%.3f; using 1.0 s.",
@@ -154,8 +174,11 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
              use_acceleration_feedforward_ ? "true" : "false",
              use_yaw_rate_feedforward_ ? "true" : "false",
              max_feedforward_acc_);
-    ROS_INFO("[se3_controller] input timeouts: state=%.3f odom=%.3f imu=%.3f s",
-             state_timeout_, odom_timeout_, imu_timeout_);
+    ROS_INFO(
+        "[se3_controller] input timeouts: state=%.3f odom=%.3f imu=%.3f "
+        "trajectory=%.3f s",
+        state_timeout_, odom_timeout_, imu_timeout_,
+        trajectory_command_timeout_);
 
     se3_controller_.init(hover_percent_, max_hover_percent_, min_output_thrust_, max_output_thrust_, enu_frame_, vel_in_body_);
     if (!se3_controller_.setup(kp_p_, kp_v_, kp_a_, kp_q_, kp_w_,
@@ -229,6 +252,19 @@ void se3Ctrl::execFSMCallback(const ros::TimerEvent &e){
                 1.0,
                 "[se3_controller] MAVROS state is stale; suppressing attitude/thrust output and relying on PX4 OFFBOARD-loss failsafe.");
             return;
+        }
+
+        if (has_trajectory_after_offboard_ &&
+            !last_trajectory_command_wall_time_.isZero() &&
+            (ros::WallTime::now() - last_trajectory_command_wall_time_).toSec()
+                > trajectory_command_timeout_) {
+            has_trajectory_after_offboard_ = false;
+            setDesiredStateToCurrentOdom();
+            ROS_ERROR_THROTTLE(
+                1.0,
+                "[se3_controller] Planner command stream timed out; replacing "
+                "the moving setpoint with a zero-velocity current-pose hold. "
+                "A later fresh gateway command may resume OFFBOARD.");
         }
         if(currState_.mode != "OFFBOARD" || !currState_.armed){
             has_trajectory_after_offboard_ = false;
@@ -445,6 +481,7 @@ void se3Ctrl::resetForDisarmedState()
     last_safety_hold_request_ = ros::Time(0);
     last_offboard_request_ = ros::Time(0);
     last_arm_request_ = ros::Time(0);
+    last_trajectory_command_wall_time_ = ros::WallTime();
     se3_controller_.resetIntegral();
     if (hasFreshOdom()) {
         setDesiredStateToCurrentOdom();
@@ -616,58 +653,37 @@ void se3Ctrl::StateCallback(const mavros_msgs::State::ConstPtr &msg){
     }
 }
 
-void se3Ctrl::DesireOdomCallback(const nav_msgs::Odometry::ConstPtr &msg){
-    if (!hasFreshState() || currState_.mode != "OFFBOARD" ||
-        !currState_.armed || !hasFreshOdom() || !hasFreshImu()) {
-        ROS_WARN_THROTTLE(
-            1.0,
-            "[se3_controller] Ignoring desired odometry because the vehicle/input safety gate is not ready.");
-        return;
-    }
-    if (!msg) {
-        return;
-    }
-
-    Desired_State_t candidate;
-    candidate.p = Eigen::Vector3d(
-        msg->pose.pose.position.x,
-        msg->pose.pose.position.y,
-        msg->pose.pose.position.z);
-    candidate.v = Eigen::Vector3d(
-        msg->twist.twist.linear.x,
-        msg->twist.twist.linear.y,
-        msg->twist.twist.linear.z);
-    candidate.a.setZero();
-    candidate.j.setZero();
-    candidate.q = Eigen::Quaterniond(
-        msg->pose.pose.orientation.w,
-        msg->pose.pose.orientation.x,
-        msg->pose.pose.orientation.y,
-        msg->pose.pose.orientation.z);
-    if (!candidate.p.allFinite() || !candidate.v.allFinite() ||
-        !se3_safety::isQuaternionValid(candidate.q)) {
-        ROS_ERROR_THROTTLE(
-            1.0,
-            "[se3_controller] Ignoring non-finite desired odometry or invalid orientation.");
-        return;
-    }
-    candidate.q.normalize();
-    candidate.yaw = utils::fromQuaternion2yaw(candidate.q);
-    candidate.yaw_rate = 0.0;
-    if (!candidate.isValid()) {
-        ROS_ERROR_THROTTLE(
-            1.0,
-            "[se3_controller] Ignoring invalid desired odometry.");
-        return;
-    }
-
-    desired_state_ = candidate;
-    has_trajectory_after_offboard_ = true;
-    syncDesiredOdomMessage(msg->header.stamp);
-}
-
-void se3Ctrl::multiDOFJointCallback(const trajectory_msgs::MultiDOFJointTrajectory &msg) 
+void se3Ctrl::multiDOFJointCallback(
+    const ros::MessageEvent<
+        trajectory_msgs::MultiDOFJointTrajectory const> &event)
 {
+    const auto connection_header = event.getConnectionHeaderPtr();
+    if (!connection_header) {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[se3_controller] Rejecting /command/trajectory from an "
+            "unauthorized ROS publisher.");
+        return;
+    }
+    const auto caller = connection_header->find("callerid");
+    if (caller == connection_header->end() ||
+        caller->second != command_publisher_node_) {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[se3_controller] Rejecting /command/trajectory from ROS node "
+            "'%s'; expected '%s'.",
+            caller == connection_header->end() ? "<unknown>"
+                                                : caller->second.c_str(),
+            command_publisher_node_.c_str());
+        return;
+    }
+    const trajectory_msgs::MultiDOFJointTrajectory::ConstPtr message =
+        event.getMessage();
+    if (!message) {
+        return;
+    }
+    const trajectory_msgs::MultiDOFJointTrajectory &msg = *message;
+
     if (!hasFreshState() ||
         currState_.mode != "OFFBOARD" || !currState_.armed) {
         ROS_WARN_THROTTLE(1.0, "[se3_controller] Ignoring trajectory until vehicle is armed and in OFFBOARD.");
@@ -736,6 +752,7 @@ void se3Ctrl::multiDOFJointCallback(const trajectory_msgs::MultiDOFJointTrajecto
     }
 
     desired_state_ = candidate;
+    last_trajectory_command_wall_time_ = ros::WallTime::now();
     if (!has_trajectory_after_offboard_) {
         ROS_INFO("[se3_controller] Fresh trajectory accepted after OFFBOARD.");
         has_trajectory_after_offboard_ = true;

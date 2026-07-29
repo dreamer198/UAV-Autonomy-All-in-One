@@ -241,6 +241,49 @@ class MissionExecutorTest(unittest.TestCase):
         ):
             executor._wait_for_preflight_data()
 
+    def test_armed_preflight_waits_for_first_localization_callback(self):
+        executor = EXECUTOR.SharedMissionExecutor.__new__(
+            EXECUTOR.SharedMissionExecutor
+        )
+        executor.condition = threading.Condition()
+        executor.abort_requested = False
+        executor.rosnode = SimpleNamespace(
+            get_node_names=lambda: ["/se3_controller_node"]
+        )
+        executor.rospy = SimpleNamespace(
+            is_shutdown=lambda: False,
+            get_param=lambda *_args: "",
+        )
+        executor.args = SimpleNamespace(
+            preflight_timeout=0.5,
+            altitude_timeout=0.5,
+        )
+        executor.config = {"state_timeout": 3.0, "odom_timeout": 0.5}
+        now = time.monotonic()
+        executor.state = SimpleNamespace(
+            connected=True,
+            armed=True,
+            mode="OFFBOARD",
+            system_status=3,
+        )
+        executor.state_received_at = now
+        executor.relative_altitude = 1.0
+        executor.altitude_received_at = now
+        executor.odom_received_at = 0.0
+        executor.position_setpoint_count = 0
+        executor.position_setpoint_received_at = 0.0
+
+        def publish_first_odometry():
+            time.sleep(0.01)
+            with executor.condition:
+                executor.odom_received_at = time.monotonic()
+                executor.condition.notify_all()
+
+        publisher = threading.Thread(target=publish_first_odometry)
+        publisher.start()
+        executor._wait_for_preflight_data()
+        publisher.join()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,12 +4,18 @@ set -Eeuo pipefail
 CONTAINER_NAME="${CONTAINER_NAME:-diff_planner_px4_real}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PLANNER_ID="${REAL_PLANNER:-}"
+PLANNER_PROFILE="${REAL_PLANNER_PROFILE:-}"
+PLANNING_PROJECT_ROOT="${REAL_PROJECT_ROOT_CONTAINER:-/opt/uav-autonomy-aio}"
+PLANNER_MANIFEST_ROOT="$PLANNING_PROJECT_ROOT/planning/plugins"
+PLANNER_MANIFEST_TOOL_HOST="$PROJECT_ROOT/planning/scripts/planner_manifest.py"
+PLANNER_WORKSPACE_SETUP_REL=""
 PROJECT_SLUG="${PROJECT_SLUG:-uav-autonomy-aio}"
 SESSION_NAME="${SESSION_NAME:-real_px4_stack}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 LIVOX_LAUNCH="${LIVOX_LAUNCH:-msg_MID360s.launch}"
 FASTLIO_RVIZ="${FASTLIO_RVIZ:-false}"
-START_TIMEOUT="${START_TIMEOUT:-30}"
+START_TIMEOUT="${START_TIMEOUT:-45}"
 WAIT_INTERVAL="${WAIT_INTERVAL:-1}"
 ODOM_RAW_TOPIC="${ODOM_RAW_TOPIC:-/Odometry}"
 LOCALIZATION_ODOM_TOPIC="${LOCALIZATION_ODOM_TOPIC:-/localization/odom}"
@@ -30,14 +36,9 @@ REQUESTED_DRONE_ID="${DRONE_ID:-0}"
 # This deployment is deliberately single-vehicle. Every internal topic and
 # launch argument is pinned to drone_0.
 DRONE_ID=0
-START_DIFF_PLANNER="${START_DIFF_PLANNER:-true}"
-DIFF_PLANNER_POS_CMD_TOPIC="${DIFF_PLANNER_POS_CMD_TOPIC:-/drone_0_planning/pos_cmd}"
-DIFF_PLANNER_TRAJECTORY_TOPIC="${DIFF_PLANNER_TRAJECTORY_TOPIC:-/drone_0_planning/trajectory}"
-DIFF_PLANNER_DATA_DISPLAY_TOPIC="${DIFF_PLANNER_DATA_DISPLAY_TOPIC:-/drone_0_planning/data_display}"
-DIFF_PLANNER_INFLATED_MAP_TOPIC="${DIFF_PLANNER_INFLATED_MAP_TOPIC:-/drone_0_diff_planner_node/grid_map/occupancy_inflate}"
-START_TRAJ_CONVERTER="${START_TRAJ_CONVERTER:-$START_DIFF_PLANNER}"
+START_PLANNER="${START_PLANNER:-${START_DIFF_PLANNER:-true}}"
 TRAJ_CONVERTER_OUTPUT_TOPIC="${TRAJ_CONVERTER_OUTPUT_TOPIC:-/command/trajectory}"
-START_SE3_CONTROLLER="${START_SE3_CONTROLLER:-$START_DIFF_PLANNER}"
+START_SE3_CONTROLLER="${START_SE3_CONTROLLER:-$START_PLANNER}"
 PLANNER_CONFIG="${PLANNER_CONFIG:-}"
 PLANNER_RESOLUTION="${PLANNER_RESOLUTION:-}"
 PLANNER_OBSTACLES_INFLATION="${PLANNER_OBSTACLES_INFLATION:-}"
@@ -52,7 +53,7 @@ START_ROSBAG="${START_ROSBAG:-true}"
 ROSBAG_DIR="${ROSBAG_DIR:-/root/flight_bags}"
 ROSBAG_PREFIX="${ROSBAG_PREFIX:-se3_test}"
 ROSBAG_NODE_NAME="${ROSBAG_NODE_NAME:-/flight_recorder}"
-ROSBAG_TOPICS="${ROSBAG_TOPICS:-/tf /tf_static $ODOM_RAW_TOPIC $LOCALIZATION_ODOM_TOPIC $LOCALIZATION_CLOUD_TOPIC /cloud_registered_body /mavros/vision_pose/pose /livox/imu /mavros/local_position/odom /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/battery /mavros/altitude /mavros/rc/in $MAVROS_ATTITUDE_TOPIC /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local $TRAJ_CONVERTER_OUTPUT_TOPIC /desire_odom_pub $DIFF_PLANNER_POS_CMD_TOPIC $DIFF_PLANNER_TRAJECTORY_TOPIC $DIFF_PLANNER_DATA_DISPLAY_TOPIC $DIFF_PLANNER_INFLATED_MAP_TOPIC /goal}"
+ROSBAG_TOPICS="${ROSBAG_TOPICS:-/tf /tf_static $ODOM_RAW_TOPIC $LOCALIZATION_ODOM_TOPIC $LOCALIZATION_CLOUD_TOPIC /cloud_registered_body /mavros/vision_pose/pose /livox/imu /mavros/local_position/odom /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/battery /mavros/altitude /mavros/rc/in $MAVROS_ATTITUDE_TOPIC /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local $TRAJ_CONVERTER_OUTPUT_TOPIC /desire_odom_pub /goal /planning/goal /planning/command /planning/status /planning/capabilities /planning/viz/occupancy /planning/viz/inflated_occupancy /planning/viz/planning_bounds}"
 ROSBAG_TOPICS_QUOTED=""
 ROSBAG_EXTRA_ARGS="${ROSBAG_EXTRA_ARGS:-}"
 ROSBAG_EXTRA_ARGS_QUOTED=""
@@ -81,7 +82,7 @@ ROS_MASTER_URI="${ROS_MASTER_URI:-http://127.0.0.1:11311}"
 ROS_IP="${ROS_IP:-}"
 HOST_LOG_DIR="${HOST_LOG_DIR:-$HOME/${PROJECT_SLUG}_logs/$RUN_ID}"
 CONTAINER_ROS_LOG_DIR="${CONTAINER_ROS_LOG_DIR:-/root/flight_bags/ros_logs/$RUN_ID}"
-PROCESS_GREP_PATTERN="roscore|rosmaster|roslaunch livox_ros_driver2|livox_ros_driver2_node|roslaunch fast_lio mapping_mid360.launch|fastlio_mapping|roslaunch mavros px4.launch|mavros_node|roslaunch sim2real_common|roslaunch sim2real_deployment frame_aliases.launch|static_transform_publisher.*real_world_|traj_server|diff_planner_node|plan_manage|trajectory_msg_converter.py|se3_controller_node|localization_guard.py|odom_to_base.py|odom_to_pose.py|cloud_relay.py"
+PROCESS_GREP_PATTERN="roscore|rosmaster|roslaunch livox_ros_driver2|livox_ros_driver2_node|roslaunch fast_lio mapping_mid360.launch|fastlio_mapping|roslaunch mavros px4.launch|mavros_node|roslaunch sim2real_common|roslaunch sim2real_planner_manager|roslaunch sim2real_deployment frame_aliases.launch|static_transform_publisher.*real_world_|planner_backend_runner.py|planner_manager.py|planner_gateway.py|planner_visualization.py|command_gateway.py|diff_backend_adapter.py|fast_backend_adapter|sim2real_diff_adapter|sim2real_fast_adapter|fast_planner_node|traj_server|diff_planner_node|plan_manage|se3_controller_node|localization_guard.py|odom_to_base.py|odom_to_pose.py|cloud_relay.py"
 LIFECYCLE_LOCK_DIR="/tmp/uav-autonomy-aio-${UID}"
 START_LOCK="$LIFECYCLE_LOCK_DIR/real.lifecycle.lock"
 START_LOCK_FD=""
@@ -89,7 +90,10 @@ START_LOCK_DEPTH=0
 
 usage() {
   cat <<'EOF'
-Usage: real.sh {start|stop [--force]|restart [--force]|status|attach|arm|land|goal X Y Z [YAW_DEG]|mission FILE}
+Usage: real.sh [--planner ID] [--planner-profile NAME] ACTION
+
+Planner selection:
+  start and restart require --planner ID or REAL_PLANNER.
 
 Default assumptions for UAV Autonomy All-in-One:
   - compatibility container name: diff_planner_px4_real
@@ -104,6 +108,7 @@ Flight commands:
                         native takeoff and automatic OFFBOARD first; obey
                         land_after_mission after success. RC mode change aborts.
   land                  Request PX4 AUTO.LAND; never force-disarms.
+  planners              List discovered plugins; does not require a build.
 
 Safety:
   stop/restart refuse while PX4 is armed, or while an active stack's MAVROS
@@ -112,6 +117,7 @@ Safety:
 
 Example:
   REAL_TAKEOFF_HEIGHT=1.5 ./launch/real.sh arm
+  ./launch/real.sh --planner diff start
 EOF
 }
 
@@ -122,9 +128,45 @@ need_cmd() {
   fi
 }
 
+require_planner_selection() {
+  if [ -z "$PLANNER_ID" ]; then
+    echo "[ERROR] No planner selected. Pass --planner ID or set REAL_PLANNER. Run '$0 planners' to list available plugins." >&2
+    return 1
+  fi
+}
+
 ensure_prereqs() {
   need_cmd tmux
   need_cmd docker
+}
+
+list_planners() {
+  [ -x "$PLANNER_MANIFEST_TOOL_HOST" ] || {
+    echo "[ERROR] Planner manifest tool is missing: $PLANNER_MANIFEST_TOOL_HOST" >&2
+    return 1
+  }
+  python3 "$PLANNER_MANIFEST_TOOL_HOST" \
+    --project-root "$PROJECT_ROOT" \
+    --manifest-root "$PROJECT_ROOT/planning/plugins" \
+    list
+}
+
+resolve_selected_planner() {
+  require_planner_selection
+  local -a args=(
+    "$PLANNER_MANIFEST_TOOL_HOST"
+    --project-root "$PROJECT_ROOT"
+    --manifest-root "$PROJECT_ROOT/planning/plugins"
+    resolve "$PLANNER_ID"
+    --mode real
+  )
+  [ -z "$PLANNER_PROFILE" ] || args+=(--profile "$PLANNER_PROFILE")
+  PLANNER_PROFILE="$(python3 "${args[@]}" --field profile)" || {
+    echo "[ERROR] Planner selection failed. Run '$0 planners' to inspect available plugins." >&2
+    return 1
+  }
+  PLANNER_WORKSPACE_SETUP_REL="$(python3 "${args[@]}" --field workspace_setup_relative)" ||
+    return 1
 }
 
 require_bool() {
@@ -148,8 +190,7 @@ validate_single_vehicle_mode() {
 validate_start_settings() {
   validate_single_vehicle_mode
   require_bool FASTLIO_RVIZ "$FASTLIO_RVIZ"
-  require_bool START_DIFF_PLANNER "$START_DIFF_PLANNER"
-  require_bool START_TRAJ_CONVERTER "$START_TRAJ_CONVERTER"
+  require_bool START_PLANNER "$START_PLANNER"
   require_bool START_SE3_CONTROLLER "$START_SE3_CONTROLLER"
   require_bool START_ROSBAG "$START_ROSBAG"
   require_bool ROSBAG_RECORD_RAW_LIDAR "$ROSBAG_RECORD_RAW_LIDAR"
@@ -326,10 +367,11 @@ docker_exec_shell() {
 
 docker_tmux_cmd() {
   local inner_cmd="$1"
-  printf "docker exec -it -e ROS_MASTER_URI=%q -e ROS_IP=%q -e ROS_LOG_DIR=%q %q bash -lc %q" \
+  printf "docker exec -it -e ROS_MASTER_URI=%q -e ROS_IP=%q -e ROS_LOG_DIR=%q -e SIM2REAL_DIFF_PLANNER_CONFIG=%q %q bash -lc %q" \
     "$ROS_MASTER_URI" \
     "$ROS_IP" \
     "$CONTAINER_ROS_LOG_DIR" \
+    "$PLANNER_CONFIG" \
     "$CONTAINER_NAME" \
     "unset ROS_HOSTNAME && source ~/.bashrc && mkdir -p \"\$ROS_LOG_DIR\" && $inner_cmd"
 }
@@ -570,6 +612,7 @@ cleanup_container_processes() {
       "roslaunch fast_lio mapping_mid360.launch" \
       "roslaunch mavros px4.launch" \
       "roslaunch sim2real_common" \
+      "roslaunch sim2real_planner_manager" \
       "roslaunch sim2real_deployment frame_aliases.launch" \
       "static_transform_publisher.*real_world_" \
       "livox_ros_driver2_node" \
@@ -577,7 +620,16 @@ cleanup_container_processes() {
       "mavros_node" \
       "traj_server" \
       "diff_planner_node" \
-      "trajectory_msg_converter.py" \
+      "fast_planner_node" \
+      "planner_backend_runner.py" \
+      "planner_manager.py" \
+      "planner_gateway.py" \
+      "planner_visualization.py" \
+      "command_gateway.py" \
+      "sim2real_diff_adapter" \
+      "sim2real_fast_adapter" \
+      "diff_backend_adapter.py" \
+      "fast_backend_adapter" \
       "se3_controller_node" \
       "localization_guard.py" \
       "odom_to_base.py" \
@@ -598,7 +650,16 @@ cleanup_container_processes() {
       "ego_planner" \
       "plan_manage" \
       "diff_planner_node" \
-      "trajectory_msg_converter.py" \
+      "fast_planner_node" \
+      "planner_backend_runner.py" \
+      "planner_manager.py" \
+      "planner_gateway.py" \
+      "planner_visualization.py" \
+      "command_gateway.py" \
+      "sim2real_diff_adapter" \
+      "sim2real_fast_adapter" \
+      "diff_backend_adapter.py" \
+      "fast_backend_adapter" \
       "se3_controller_node" \
       "localization_guard.py" \
       "odom_to_base.py" \
@@ -608,6 +669,7 @@ cleanup_container_processes() {
       "roslaunch fast_lio mapping_mid360.launch" \
       "roslaunch mavros px4.launch" \
       "roslaunch sim2real_common" \
+      "roslaunch sim2real_planner_manager" \
       "roslaunch sim2real_deployment frame_aliases.launch" \
       "static_transform_publisher.*real_world_"; do
       kill_matching TERM "$pattern"
@@ -625,7 +687,16 @@ cleanup_container_processes() {
       "ego_planner" \
       "plan_manage" \
       "diff_planner_node" \
-      "trajectory_msg_converter.py" \
+      "fast_planner_node" \
+      "planner_backend_runner.py" \
+      "planner_manager.py" \
+      "planner_gateway.py" \
+      "planner_visualization.py" \
+      "command_gateway.py" \
+      "sim2real_diff_adapter" \
+      "sim2real_fast_adapter" \
+      "diff_backend_adapter.py" \
+      "fast_backend_adapter" \
       "se3_controller_node" \
       "localization_guard.py" \
       "odom_to_base.py" \
@@ -635,6 +706,7 @@ cleanup_container_processes() {
       "roslaunch fast_lio mapping_mid360.launch" \
       "roslaunch mavros px4.launch" \
       "roslaunch sim2real_common" \
+      "roslaunch sim2real_planner_manager" \
       "roslaunch sim2real_deployment frame_aliases.launch" \
       "static_transform_publisher.*real_world_"; do
       kill_matching KILL "$pattern"
@@ -741,7 +813,7 @@ prepare_runtime_planner_config() {
     fi
   done
 
-  local source_config="$PROJECT_ROOT/common/config/planner.yaml"
+  local source_config="$PROJECT_ROOT/planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml"
   local runtime_tmp_dir="$PROJECT_ROOT/runtime/tmp"
   local generated_name="planner_runtime_${RUN_ID}.yaml"
   local generated_host="$runtime_tmp_dir/$generated_name"
@@ -751,13 +823,13 @@ prepare_runtime_planner_config() {
   if ! awk \
     -v resolution="$PLANNER_RESOLUTION" \
     -v inflation="$PLANNER_OBSTACLES_INFLATION" '
-      resolution != "" && /^  resolution:[[:space:]]*/ {
-        print "  resolution: " resolution
+      resolution != "" && /^    resolution:[[:space:]]*/ {
+        print "    resolution: " resolution
         resolution_replaced = 1
         next
       }
-      inflation != "" && /^  obstacles_inflation:[[:space:]]*/ {
-        print "  obstacles_inflation: " inflation
+      inflation != "" && /^    obstacles_inflation:[[:space:]]*/ {
+        print "    obstacles_inflation: " inflation
         inflation_replaced = 1
         next
       }
@@ -775,8 +847,8 @@ prepare_runtime_planner_config() {
   PLANNER_CONFIG="/root/tmp/$generated_name"
 
   local effective_resolution effective_inflation inflation_summary
-  effective_resolution="${PLANNER_RESOLUTION:-$(awk '/^  resolution:/ {print $2; exit}' "$source_config")}"
-  effective_inflation="${PLANNER_OBSTACLES_INFLATION:-$(awk '/^  obstacles_inflation:/ {print $2; exit}' "$source_config")}"
+  effective_resolution="${PLANNER_RESOLUTION:-$(awk '/^    resolution:/ {print $2; exit}' "$source_config")}"
+  effective_inflation="${PLANNER_OBSTACLES_INFLATION:-$(awk '/^    obstacles_inflation:/ {print $2; exit}' "$source_config")}"
   inflation_summary="$(python3 -c \
     'import math,sys; r,i=map(float,sys.argv[1:]); layers=max(0,math.ceil((i-1e-5)/r)); print("{} layer(s), approximately {:.3f} m".format(layers,layers*r))' \
     "$effective_resolution" "$effective_inflation")"
@@ -1075,12 +1147,28 @@ cleanup_failed_start() {
 }
 
 start_stack() {
+  resolve_selected_planner
   ensure_prereqs
   acquire_start_lock
   validate_start_settings
-  prepare_runtime_planner_config
+  if [ "$PLANNER_ID" = "diff" ]; then
+    prepare_runtime_planner_config
+  elif [ -n "$PLANNER_CONFIG$PLANNER_RESOLUTION$PLANNER_OBSTACLES_INFLATION" ]; then
+    echo "[ERROR] Diff map overrides are only valid with --planner diff." >&2
+    return 1
+  fi
   resolve_ros_ip
   ensure_container_running
+  local container_setup="$PLANNER_WORKSPACE_SETUP_REL"
+  if [[ "$container_setup" != /* ]]; then
+    container_setup="$PLANNING_PROJECT_ROOT/$container_setup"
+  fi
+  if ! docker exec -i "$CONTAINER_NAME" \
+    test -f "$container_setup"; then
+    echo "[ERROR] Selected planner workspace is missing in the image: $PLANNER_WORKSPACE_SETUP_REL" >&2
+    echo "[ERROR] Rebuild it with '$SCRIPT_DIR/real_container.sh build'." >&2
+    return 1
+  fi
 
   if tmux_has_session; then
     echo "[ERROR] tmux session '$SESSION_NAME' already exists." >&2
@@ -1104,6 +1192,7 @@ start_stack() {
   echo "[INFO] ROS_IP=$ROS_IP"
   echo "[INFO] Host tmux logs: $HOST_LOG_DIR"
   echo "[INFO] Container ROS logs: $CONTAINER_ROS_LOG_DIR"
+  echo "[INFO] Planner plugin: $PLANNER_ID (profile=$PLANNER_PROFILE)"
 
   trap 'cleanup_failed_start "$?"' ERR
   tmux new-session -d -s "$SESSION_NAME" -n roscore "$(docker_tmux_cmd "roscore")"
@@ -1164,28 +1253,20 @@ start_stack() {
   wait_for_condition "localization safety guard" \
     "rosnode list | grep -qx '/localization_guard'"
 
-  if [ "$START_DIFF_PLANNER" = "true" ]; then
+  if [ "$START_PLANNER" = "true" ]; then
     local planner_cmd
-    planner_cmd="source ~/.bashrc && roslaunch sim2real_common planner.launch drone_id:=0 odom_topic:=$LOCALIZATION_ODOM_TOPIC cloud_topic:=$LOCALIZATION_CLOUD_TOPIC"
-    if [ -n "$PLANNER_CONFIG" ]; then
-      planner_cmd+=" planner_config:=$PLANNER_CONFIG"
-    fi
-    create_window "diff_planner" \
+    printf -v planner_cmd \
+      'source ~/.bashrc && exec roslaunch sim2real_planner_manager planner_gateway.launch planner_id:=%q planner_profile:=%q runtime_mode:=real manifest_root:=%q repository_root:=%q require_offboard:=true goal_topic:=/goal mavros_state_topic:=/mavros/state output_topic:=%q' \
+      "$PLANNER_ID" "$PLANNER_PROFILE" "$PLANNER_MANIFEST_ROOT" "$PLANNING_PROJECT_ROOT" "$TRAJ_CONVERTER_OUTPUT_TOPIC"
+    create_window "planner" \
       "$planner_cmd"
 
-    wait_for_condition "Diff-Planner" \
-      "rosnode list | grep -qx '/drone_0_diff_planner_node' && rosnode list | grep -qx '/drone_0_traj_server' && rostopic list | grep -qx '$DIFF_PLANNER_POS_CMD_TOPIC'"
+    wait_for_condition "$PLANNER_ID planner gateway" \
+      "rostopic list | grep -qx '/planning/status' && rostopic list | grep -qx '/planning/capabilities' && rosnode list | grep -qx '/planner_gateway' && rosnode list | grep -qx '/planner_visualization'"
+    wait_for_condition "$PLANNER_ID READY state" \
+      "status=\$(timeout 5 rostopic echo -n 1 /planning/status 2>/dev/null) && grep -Eq '^state: 1$' <<<\"\$status\" && grep -Eq '^odom_ready: True$' <<<\"\$status\" && grep -Eq '^map_ready: True$' <<<\"\$status\""
   else
-    echo "[INFO] Diff-Planner startup skipped because START_DIFF_PLANNER=false."
-  fi
-
-  if [ "$START_TRAJ_CONVERTER" = "true" ]; then
-    create_window "traj_converter" \
-      "source ~/.bashrc && roslaunch sim2real_common trajectory_converter.launch drone_id:=0 output_topic:=$TRAJ_CONVERTER_OUTPUT_TOPIC replay_cached_goal_on_offboard:=false"
-
-    wait_for_condition "trajectory converter" "rosnode list | grep -qx '/trajectory_msg_converter' && rostopic list | grep -qx '$TRAJ_CONVERTER_OUTPUT_TOPIC'"
-  else
-    echo "[INFO] trajectory converter startup skipped because START_TRAJ_CONVERTER=false."
+    echo "[INFO] Planner startup skipped because START_PLANNER=false."
   fi
 
   if [ "$START_SE3_CONTROLLER" = "true" ]; then
@@ -1260,7 +1341,7 @@ stop_stack() {
   fi
 
   if tmux_has_session; then
-    for window_name in se3_controller traj_converter diff_planner localization_guard odom_to_pose mavros cloud_adapter odom_to_base fast_lio mid360 frame_aliases roscore; do
+    for window_name in se3_controller planner localization_guard odom_to_pose mavros cloud_adapter odom_to_base fast_lio mid360 frame_aliases roscore; do
       if tmux_has_window "$window_name"; then
         tmux send-keys -t "$SESSION_NAME:$window_name" C-c
       fi
@@ -1328,6 +1409,10 @@ status_stack() {
       echo "[ERROR] /mavros/state is unavailable." >&2
       healthy=false
     fi
+    echo
+    echo "[INFO] Planner status:"
+    docker_exec_shell \
+      "timeout 4 rostopic echo -n 1 /planning/status 2>/dev/null || true"
   else
     echo
     echo "[INFO] tmux session '$SESSION_NAME' is not running."
@@ -1354,10 +1439,62 @@ attach_stack() {
 }
 
 main() {
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --planner)
+        [ "$#" -ge 2 ] || {
+          echo "[ERROR] --planner requires a value." >&2
+          return 1
+        }
+        PLANNER_ID="$2"
+        if [ -z "$PLANNER_ID" ]; then
+          echo "[ERROR] --planner requires a non-empty plugin ID." >&2
+          return 1
+        fi
+        shift 2
+        ;;
+      --planner=*)
+        PLANNER_ID="${1#--planner=}"
+        if [ -z "$PLANNER_ID" ]; then
+          echo "[ERROR] --planner requires a non-empty plugin ID." >&2
+          return 1
+        fi
+        shift
+        ;;
+      --planner-profile)
+        [ "$#" -ge 2 ] || {
+          echo "[ERROR] --planner-profile requires a value." >&2
+          return 1
+        }
+        PLANNER_PROFILE="$2"
+        shift 2
+        ;;
+      --planner-profile=*)
+        PLANNER_PROFILE="${1#--planner-profile=}"
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo "[ERROR] Unknown global option: $1" >&2
+        return 1
+        ;;
+    esac
+  done
+
   local action="${1:-}"
   shift || true
 
   case "$action" in
+    planners)
+      [ "$#" -eq 0 ] || {
+        echo "[ERROR] Usage: $0 planners" >&2
+        return 1
+      }
+      list_planners
+      ;;
     start)
       [ "$#" -eq 0 ] || {
         echo "[ERROR] Usage: $0 start" >&2
@@ -1397,6 +1534,7 @@ main() {
           return 1
           ;;
       esac
+      resolve_selected_planner
       if [ "$force" = "true" ]; then
         stop_stack true
         start_stack

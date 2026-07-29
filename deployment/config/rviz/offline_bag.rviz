@@ -113,7 +113,7 @@ Visualization Manager:
           Color: 130; 190; 220
           Color Transformer: AxisColor
           Decay Time: 3600
-          Enabled: true
+          Enabled: false
           Invert Rainbow: false
           Max Color: 255; 175; 55
           Min Color: 55; 170; 220
@@ -128,7 +128,7 @@ Visualization Manager:
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
-          Value: true
+          Value: false
         - Angle Tolerance: 0.1
           Class: rviz/Odometry
           Covariance:
@@ -177,10 +177,18 @@ Visualization Manager:
       Name: Localization
     - Class: rviz/Group
       Displays:
-        - Alpha: 0.28
+        - Class: rviz/Marker
+          Enabled: true
+          Marker Topic: /planning/viz/planning_bounds
+          Name: Fixed planning bounds
+          Namespaces:
+            fixed_planning_bounds: true
+          Queue Size: 2
+          Value: true
+        - Alpha: 0.95
           Autocompute Value Bounds:
-            Max Value: 3
-            Min Value: 0
+            Max Value: 3.2
+            Min Value: 0.36
             Value: false
           Axis: Z
           Channel Name: intensity
@@ -190,19 +198,19 @@ Visualization Manager:
           Decay Time: 0
           Enabled: true
           Invert Rainbow: false
-          Max Color: 255; 175; 55
-          Min Color: 55; 170; 220
-          Name: Inflated occupancy
+          Max Color: 255; 70; 45
+          Min Color: 45; 105; 255
+          Name: Safety clearance
           Position Transformer: XYZ
           Queue Size: 5
           Selectable: false
-          Size (Pixels): 2
-          Size (m): 0.15
-          Style: Boxes
-          Topic: /drone_0_diff_planner_node/grid_map/occupancy_inflate
+          Size (Pixels): 4
+          Size (m): 0.06
+          Style: Points
+          Topic: /planning/viz/inflated_occupancy
           Unreliable: false
           Use Fixed Frame: true
-          Use rainbow: false
+          Use rainbow: true
           Value: true
       Enabled: true
       Name: Planning

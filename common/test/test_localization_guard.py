@@ -56,6 +56,17 @@ class LocalizationGuardTest(unittest.TestCase):
             "",
         )
 
+    def test_default_policy_accepts_any_finite_vehicle_speed(self):
+        self.assertEqual(
+            GUARD.odometry_sanity_reason(
+                odometry(velocity=(30.0, -20.0, 10.0)),
+                None,
+                max_speed=0.0,
+                max_jump=2.0,
+            ),
+            "",
+        )
+
     def test_rejects_nonfinite_odometry(self):
         reason = GUARD.odometry_sanity_reason(
             odometry(position=(math.nan, 0.0, 0.0)),
@@ -65,7 +76,7 @@ class LocalizationGuardTest(unittest.TestCase):
         )
         self.assertIn("non-finite", reason)
 
-    def test_rejects_fast_or_discontinuous_odometry(self):
+    def test_optional_speed_ceiling_and_position_jump_remain_configurable(self):
         speed_reason = GUARD.odometry_sanity_reason(
             odometry(velocity=(4.0, 0.0, 0.0)),
             None,

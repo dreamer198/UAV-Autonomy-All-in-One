@@ -1,261 +1,169 @@
 # PX4 / Gazebo 仿真
 
-仿真栈包含 PX4 SITL、Gazebo Classic、模拟 MID-360 和仿真适配节点。Planner、轨迹转换与 SE3 控制器来自公共链路；仿真不运行 FAST-LIO。
+仿真栈包含 PX4 SITL、Gazebo Classic、模拟 MID-360、所选规划器、SE3 和 RViz。
+MAVROS `map` 与 Gazebo `world` 由显式配置设为数值重合；点云使用采集时刻的 TF
+转换到 `world`。
 
-```text
-PX4 SITL + Gazebo + iris_mid360
-  ├─ MAVROS odom ────────┐
-  └─ 模拟点云 + TF ──────┴─> /localization/*
-                              → Diff-Planner → SE3 → PX4 SITL
-```
+## 启动与飞行
 
-适配器只在显式配置下把 MAVROS `map` 视为与 Gazebo `world` 数值重合，不做坐标
-数值变换；收到其他父/子坐标系的里程计会直接丢弃。点云严格使用测量时刻的 TF，
-不回退到最新 TF。
-
-所有命令均在仓库根目录执行。
-
-## 快速开始
-
-默认场景：
+`start` 和 `restart` 必须同时提供场景和规划器。内置场景为 `room`、`forest`，
+规划器为 `diff`、`fast-kino`、`fast-topo`。
 
 ```bash
-./launch/sim.sh start
-```
+# 构建改动并启动 room + Diff；飞机保持未解锁
+./launch/sim.sh --scene room --planner diff start
 
-内置室外场景：
-
-```bash
-./launch/sim.sh --scene outdoor_rectangular_forest restart
-```
-
-场景来源和重新生成方法见[室外重建场景](outdoor_bag_gazebo.md)。
-
-启动完成后飞机保持未解锁。一次单目标流程为：
-
-```bash
+# PX4 原生起飞到相对 Home 1.5 m，稳定后进入 OFFBOARD
 SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
+
+# 发送 world 目标；YAW_DEG 可省略，单位为度
+./launch/sim.sh goal X Y Z [YAW_DEG]
 ./launch/sim.sh goal 1.0 0.0 1.5
+./launch/sim.sh goal 1.0 1.0 1.5 90
+
+# 请求 AUTO.LAND；落地后停止进程、容器并完成 rosbag 索引
 ./launch/sim.sh land
 ./launch/sim.sh stop
 ```
 
-`SIM_TAKEOFF_HEIGHT` 指定相对 PX4 Home 的起飞高度，省略时默认为 `1.0 m`。`arm` 会解锁、执行 PX4 原生 `AUTO.TAKEOFF`，在高度和垂直速度稳定后自动进入 OFFBOARD 悬停。
+`SIM_TAKEOFF_HEIGHT` 默认为相对 PX4 Home `1.0 m`。`arm` 完成前发送的目标不会排队。
+目标命令成功只表示目标已发布；插件仍可能因边界、障碍或规划失败而拒绝执行。
 
-起飞过程会持续检查 MAVROS 状态、高度和定位。定位失效时请求 `AUTO.LAND`；其他
-自主执行故障先确认 `AUTO.LOITER`，无法确认时再尝试 `AUTO.LAND`。状态本身失联
-时无法确认恢复模式。
-
-## 场景
-
-场景配置位于 `simulation/config/scenes/NAME.env`，统一保存 Gazebo world 的容器内
-路径和出生位姿。推荐通过 `--scene NAME` 选择；自动化脚本也可设置等价的
-`SIM_SCENE=NAME`。
-
-新增场景时添加配置文件，不要通过临时 `SIM_WORLD` 或 `SIM_SPAWN_*` 参数启动。启动器会先检查场景引用的 world 是否存在。
-
-切换场景只改变 world 和出生位姿，不改变 Planner、控制器或飞行状态机。
-
-## 单目标飞行
-
-```text
-./launch/sim.sh goal X Y Z [YAW_DEG]
-```
-
-例如：
+切换场景或规划器：
 
 ```bash
-./launch/sim.sh goal 1.0 0.0 1.5
-./launch/sim.sh goal 1.0 1.0 1.5 90
+./launch/sim.sh --scene forest --planner fast-kino restart
+./launch/sim.sh --scene forest --planner fast-topo restart
 ```
 
-目标规则：
-
-- `X/Y/Z` 是 `world` 中的绝对坐标；
-- 省略 yaw 时不限定终点朝向，提供时单位为度；
-- 高度必须满足当前 Planner 围栏，并为 `obstacles_inflation` 留出余量；
-- 飞机必须已解锁且处于 OFFBOARD；
-- `arm` 完成前发布的 RViz 目标不会排队，进入 OFFBOARD 后需要重新发布。
-
-CLI 会先检查飞行状态、定位、SE3 输出、Planner 和目标订阅者。命令成功只表示目标已经发布，不表示 Planner 一定接受或飞机已经到达。
-
-目标没有距离硬限制，但 Diff-Planner 使用滚动局部地图。RViz 中的长距离曲线是局部规划参考线，不是基于全局地图得到的无碰撞路线。墙体、死胡同或未知区域可能使任意距离的目标失败；复杂路线应拆成经过确认的 Mission 航点。
-
-RViz 的 `2D Nav Goal` 使用 `/sim2real/rviz_goal`，由目标桥转发到 `/goal`，避免与
-MAVROS 使用的 `/move_base_simple/goal` 混淆。目标桥非锁存，并在每次点击时检查
-有限数值、`world` 坐标系、armed/OFFBOARD、MAVROS 状态新鲜度、定位保护和当前
-Planner 高度范围；不合格目标直接丢弃，不会排队。
+自动化脚本可用 `SIM_SCENE`、`SIM_PLANNER` 代替对应选项。场景配置位于
+`simulation/config/scenes/NAME.env`，负责 world 和出生位姿，不修改控制器或飞行状态机。
 
 ## Mission
 
-核对任务文件后执行；根目录的 `mission_*.json` 可作为格式参考：
+```bash
+# room 航点
+./launch/sim.sh mission mission_indoor.json
+
+# forest 航点
+./launch/sim.sh mission mission_forest.json
+```
+
+Mission 在起飞前调用当前插件校验全部航点；未解锁时自动起飞并进入 OFFBOARD。
+缺省 yaw 按有效航段生成，显式 `yaw` 覆盖自动值。`fly_through` 控制中间点是否停稳，
+`land_after_mission` 控制完成后是否降落。
+
+人工切出 OFFBOARD、解除武装、状态/定位失联或规划失败会终止后续航点。定位故障请求
+`AUTO.LAND`；其他任务故障优先请求 `AUTO.LOITER`。
+
+## RViz
+
+RViz `2D Nav Goal` 使用固定高度 `SIM_RVIZ_GOAL_Z`，默认 `1.0 m`，箭头方向作为
+终点 yaw。桥接器只在 armed/OFFBOARD、定位和规划器就绪且目标通过插件验证时发布
+`/goal`。
+
+| 显示 | Topic | 含义 |
+|---|---|---|
+| `Persistent obstacles` | `/planning/viz/environment` | 公共点云形成的显示专用累积环境 |
+| `Observed obstacles` | `/planning/viz/occupancy` | 当前插件的统一占据显示 |
+| `Safety clearance` | `/planning/viz/inflated_occupancy` | 当前插件的膨胀占据，按高度着色 |
+| `Fixed planning bounds` | `/planning/viz/planning_bounds` | Fast 固定地图边界；Diff 不发布固定边界 |
+| `Active planner goal` | `/planning/viz/active_goal` | 当前插件实际接受的目标 |
+| `Actual flight path` | `/planning/viz/executed_path` | armed 期间的实测里程计路径 |
+| `Backend initial path` | `/planning/viz/backend/global_trajectory` | Diff 初始路径；Fast 当前不发布 |
+| `Backend trajectory` | `/planning/viz/backend/trajectory` | 当前插件的原生执行轨迹 |
+
+`Persistent obstacles` 会排除无回波远端、地面和单次噪点。Fast 的公共占据显示使用
+几何平面识别隐藏实测地面，不按固定 z 阈值删除低矮物体；注入 Fast 私有地图的虚拟
+地面不会进入公共 RViz。上述处理只影响显示，不改变规划地图或碰撞检查。原始单帧
+MID-360 点云默认关闭。
+
+## 状态与日志
 
 ```bash
-./launch/sim.sh mission MISSION_FILE.json
+./launch/sim.sh status   # 汇总容器、tmux、ROS、规划器和 MAVROS 状态
+./launch/sim.sh attach   # 查看 tmux 实时日志；Ctrl-b d 退出
+./launch/sim.sh shell    # 进入仿真容器
 ```
 
-关键行为：
-
-- `waypoints` 按顺序执行，坐标是 `world` 绝对坐标；
-- 未解锁时根据 `takeoff_height` 原生起飞并自动进入 OFFBOARD；已解锁且处于
-  OFFBOARD 时直接执行；
-- 省略航点 yaw 时按有效航段自动生成朝向；
-- `fly_through=true` 允许连续通过中间航点，单个航点可覆盖；
-- `land_after_mission=true` 时成功后请求 `AUTO.LAND`，否则在最终点保持 OFFBOARD；
-- 切出 OFFBOARD、解除锁定或人工接管会中止任务，不会恢复旧目标；
-- Planner 临时急停时会按 JSON 中的恢复超时和重试次数处理；
-- 状态或定位失联、规划失败会中止任务。定位失效请求 `AUTO.LAND`，规划等其他
-  任务故障请求 `AUTO.LOITER`；起飞或 OFFBOARD 交接失败时，无法确认
-  `AUTO.LOITER` 才继续尝试 `AUTO.LAND`。
-
-字段格式可参考根目录的 `mission_*.json`；其中坐标和高度属于具体场地，执行前必须
-重新核对。
-
-## 常用命令
-
-| 命令 | 作用 |
-|---|---|
-| `./launch/sim.sh start` | 构建变更并启动完整仿真 |
-| `./launch/sim.sh restart` | 尝试降落，停止后重新启动 |
-| `./launch/sim.sh stop` | 尝试降落并停止仿真进程 |
-| `./launch/sim.sh build` | 只构建 ROS overlay |
-| `./launch/sim.sh test` | 构建并运行测试与 launch 校验 |
-| `./launch/sim.sh status` | 查看容器、tmux、ROS 和飞行状态 |
-| `./launch/sim.sh attach` | 打开 tmux 日志 |
-| `./launch/sim.sh shell` | 进入仿真容器 |
-| `./launch/sim.sh arm` | 原生起飞并自动进入 OFFBOARD |
-| `./launch/sim.sh land` | 请求降落并等待解除锁定 |
-| `./launch/sim.sh goal ...` | 发布一个目标 |
-| `./launch/sim.sh mission FILE` | 执行 JSON 航点任务 |
-
-tmux 中使用 `Ctrl-b n/p` 切换窗口，`Ctrl-b d` 退出查看。
-
-## rosbag 与日志
-
-启动栈时默认创建 `/flight_recorder`。rosbag 使用 LZ4、1 GiB 分卷和较低 CPU 优先级，并为当前一次运行保留最新 10 个分卷，约 10 GiB：
-
-```text
-runtime/simulation/flight_bags/se3_test_<run-id>_*.bag
-```
-
-默认记录定位、点云、规划、控制、MAVROS 状态、膨胀地图，以及仿真的 `/clock` 和 `/gazebo/model_states`。常用设置：
-
-```bash
-SIM_START_ROSBAG=false ./launch/sim.sh restart
-SIM_ROSBAG_RECORD_RAW_LIDAR=false ./launch/sim.sh restart
-
-SIM_ROSBAG_SPLIT_SIZE_MB=512 SIM_ROSBAG_MAX_SPLITS=8 \
-./launch/sim.sh restart
-```
-
-`stop/restart` 会先向 rosbag 发送 `SIGINT`，默认最多等待 60 秒完成索引。容量上限
-只作用于当前运行；历史 bag 不会自动删除。启动前空间已经低于保留阈值时，整个栈
-会拒绝启动；录制过程中跌破阈值时，只有 rosbag 停止，规划和控制继续运行。
-
-tmux 与 ROS 日志位于：
+每次运行的数据位于：
 
 ```text
 runtime/simulation/runs/<run-id>/
+runtime/simulation/flight_bags/se3_test_<run-id>_*.bag
 ```
 
-## 无界面与 GPU
+rosbag 默认使用 LZ4、1 GiB 分卷，当前运行最多保留 10 卷。`stop/restart` 先发送
+`SIGINT` 并等待索引；历史运行不会自动删除。
 
 ```bash
-SIM_GAZEBO_GUI=false SIM_START_RVIZ=false ./launch/sim.sh restart
+# 禁用录包
+SIM_START_ROSBAG=false \
+./launch/sim.sh --scene room --planner diff restart
+
+# 不记录原始 MID-360 点云
+SIM_ROSBAG_RECORD_RAW_LIDAR=false \
+./launch/sim.sh --scene room --planner diff restart
+
+# 修改分卷大小和数量
+SIM_ROSBAG_SPLIT_SIZE_MB=512 SIM_ROSBAG_MAX_SPLITS=8 \
+./launch/sim.sh --scene room --planner diff restart
 ```
 
-`SIM_GPU_MODE=auto` 会依次选择 NVIDIA、DRI 或软件渲染。需要强制软件渲染时：
+## 无界面与渲染
 
 ```bash
+# 关闭 Gazebo GUI 和 RViz
+SIM_GAZEBO_GUI=false SIM_START_RVIZ=false \
+./launch/sim.sh --scene room --planner diff restart
+
+# 强制软件渲染
 ./launch/sim.sh stop
 SIM_GPU_MODE=none ./launch/sim_container.sh recreate
-SIM_GPU_MODE=none ./launch/sim.sh start
+SIM_GPU_MODE=none ./launch/sim.sh --scene room --planner diff start
 ```
 
-后续重建或重启容器时继续传入相同的 `SIM_GPU_MODE`。
+## 配置与生效
 
-## 配置与开发
-
-| 内容 | 配置来源 |
+| 内容 | 文件 |
 |---|---|
-| 启动、起飞、界面和录包 | [`launch/sim.sh`](../launch/sim.sh) |
-| 场景 world 与出生位姿 | [`simulation/config/scenes`](../simulation/config/scenes) |
-| Planner、地图和优化器 | [`common/config/planner.yaml`](../common/config/planner.yaml) |
-| 轨迹预瞄与 yaw | [`common/config/trajectory_server.yaml`](../common/config/trajectory_server.yaml) |
-| 公共控制与安全开关 | [`common/config/controller.yaml`](../common/config/controller.yaml) |
-| 仿真载体控制参数 | [`simulation/config/controller.yaml`](../simulation/config/controller.yaml) |
-| 镜像资产与固定版本 | [`simulation/assets`](../simulation/assets)、[`simulation/versions.env`](../simulation/versions.env) |
+| 场景 | [`simulation/config/scenes`](../simulation/config/scenes) |
+| Diff | [`planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml`](../planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml) |
+| Fast Kino/Topo | [`planning/ros_pkgs/sim2real_fast_adapter/config/planner.yaml`](../planning/ros_pkgs/sim2real_fast_adapter/config/planner.yaml) |
+| `forest` Fast 覆盖 | [`planning/ros_pkgs/sim2real_fast_adapter/config/scenes/forest.yaml`](../planning/ros_pkgs/sim2real_fast_adapter/config/scenes/forest.yaml) |
+| 公共控制 | [`common/config/controller.yaml`](../common/config/controller.yaml) |
+| 仿真载体控制 | [`simulation/config/controller.yaml`](../simulation/config/controller.yaml) |
 
-控制器先加载公共配置，再由仿真载体配置覆盖同名值。载体配置只包含 SE3 控制和
-安全参数；质量、惯量、电机、桨叶及 PX4 内环参数来自 Gazebo 模型和 PX4 airframe。
-控制器细节见 [SE3 控制器](se3_controller.md)。
-
-### Planner 高度与地图过滤
-
-Planner 配置由仿真和真机共享。启用虚拟墙时，CLI、RViz 和 Mission 目标必须满足：
-
-```text
-virtual_ground + obstacles_inflation
-  < goal.z <
-virtual_ceil - obstacles_inflation
-```
-
-这些参数使用 `world` 坐标系，边界本身不允许。`grid_map/min_ray_length` 是传感器
-原点到射线端点的最短地图更新距离，可过滤机体附近回波和零长度射线；它不是雷达
-最小量程，也不限制最大感知距离。
-
-长期修改应直接编辑 `common/config/planner.yaml`。临时测试完整配置时：
-
-```bash
-cp common/config/planner.yaml runtime/simulation/planner_override.yaml
-# 编辑 runtime/simulation/planner_override.yaml
-SIM_PLANNER_CONFIG=/root/simulation_runtime/planner_override.yaml \
-./launch/sim.sh restart
-```
-
-`SIM_PLANNER_CONFIG` 使用容器内路径，不能填写只存在于宿主机的绝对路径。
-
-### 修改后如何生效
-
-| 修改内容 | 操作 |
-|---|---|
-| `common/`、`simulation/config/` 或仿真 ROS 源码 | `./launch/sim.sh test`，然后 `restart` |
-| 场景 `.env` 或仓库内 world | `./launch/sim.sh restart` |
-| `simulation/assets/`、`simulation/versions.env` 或 Dockerfile | 停止并重建镜像和容器 |
-
-重建镜像：
+ROS 源码、参数、场景或 world 修改后执行 `restart`。Dockerfile、
+`simulation/assets/` 或 `simulation/versions.env` 修改后：
 
 ```bash
 ./launch/sim.sh stop
 ./launch/sim_container.sh build
 ./launch/sim_container.sh recreate
-./launch/sim.sh start
+./launch/sim.sh --scene room --planner diff start
 ```
 
-## 状态检查与排错
+## 排错
 
 ```bash
 ./launch/sim.sh status
+./launch/sim.sh attach
 ./launch/sim.sh shell
+```
 
-rosparam get /drone_0_diff_planner_node/grid_map
-rosparam get /drone_0_traj_server
-rosparam get /se3_controller_node
+进入容器后检查：
 
+```bash
 rostopic hz /localization/odom
 rostopic hz /localization/cloud_registered
+rostopic echo -n1 /planning/status
 rostopic echo -n1 /mavros/state
 rostopic hz /mavros/setpoint_raw/attitude
 ```
 
-常见问题：
-
-- 目标无响应：等待 `arm` 完成并确认 OFFBOARD，再发布新目标；
-- Planner 急停：检查目标参考线、膨胀地图、当前点是否落入膨胀障碍和 Planner 日志；
-- 定位保护触发：检查未启动、停更、重复/乱序/过期时间戳、跳变或异常速度；
-  watchdog 使用系统单调时钟，`/clock` 冻结也会触发，故障锁存后需重启完整栈；
-- Gazebo/RViz 无法显示：使用无界面模式确认核心链路；
-- 容器或 GPU 配置过期：运行 `./launch/sim_container.sh verify`，必要时重建容器；
-- 修改未生效：普通源码运行 `sim.sh restart`，镜像内容则重新 build 和 recreate。
-
-镜像版本固定在 `simulation/versions.env`；构建完成后，日常启动不需要联网。
+- 目标无响应：确认 `arm` 已完成、PX4 为 armed/OFFBOARD，再重新发送目标。
+- Planner 拒绝或急停：检查 `/planning/status.reason`、目标边界、占据和轨迹。
+- 定位保护触发：检查里程计停更、时间戳和位置跳变；锁存后重启完整栈。
+- GUI 异常：先关闭 Gazebo GUI 和 RViz，确认核心链路。
+- 容器布局或 GPU 过期：运行 `./launch/sim_container.sh verify`，失败后重建容器。

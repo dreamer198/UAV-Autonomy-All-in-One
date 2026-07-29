@@ -6,7 +6,7 @@ find_package(catkin REQUIRED COMPONENTS
   mavros_msgs
   nav_msgs
   rospy
-  traj_utils
+  sim2real_planning_msgs
 )
 
 catkin_package()
@@ -27,6 +27,7 @@ install(DIRECTORY config launch
 
 if(CATKIN_ENABLE_TESTING)
   catkin_add_nosetests(test/test_arm_executor.py)
+  catkin_add_nosetests(test/test_controller_gateway_contract.py)
   catkin_add_nosetests(test/test_goal_executor.py)
   catkin_add_nosetests(test/test_localization_guard.py)
   catkin_add_nosetests(test/test_mission_executor.py)
@@ -37,7 +38,6 @@ if(CATKIN_ENABLE_TESTING)
   catkin_add_nosetests(test/test_shared_rosbag_lifecycle.py)
   catkin_add_nosetests(test/test_shell_safety_contracts.py)
   catkin_add_nosetests(test/test_sim_build_retry.py)
-  catkin_add_nosetests(test/test_planner_config.py)
   catkin_add_nosetests(test/test_ros_adapter_safety.py)
   catkin_add_nosetests(test/test_waypoint_mission.py)
 endif()

@@ -1,0 +1,34 @@
+api_version: sim2real.planner/v1
+id: fast-topo
+ros_namespace: fast_topo
+display_name: Fast Planner Topological
+variant: topological
+adapter_node: adapter
+workspace_setup: planning/workspaces/fast_ws/devel/setup.bash
+launch:
+  package: sim2real_fast_adapter
+  file: fast_backend.launch
+  arguments:
+    backend_id: fast-topo
+    backend_namespace: fast_topo
+    planner: 2
+    profile: local
+    scene: room
+    odom_topic: /localization/odom
+    cloud_topic: /localization/cloud_registered
+default_profile: local
+profiles:
+  - local
+timeouts:
+  startup_sec: 30.0
+  status_sec: 0.5
+  command_sec: 0.08
+rates:
+  status_min_hz: 5.0
+  command_min_hz: 80.0
+capabilities:
+  simulation: true
+  yaw: true
+  cancel: true
+  goal_validation: true
+  rviz: true

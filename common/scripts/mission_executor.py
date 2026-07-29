@@ -320,7 +320,19 @@ class SharedMissionExecutor:
                 now - position_setpoint_received_at,
                 self.config["odom_timeout"],
             )
-            if state_is_fresh and state.armed and not odom_is_fresh:
+            # Subscribers are connected asynchronously when this short-lived
+            # mission process starts.  If PX4 is already armed, /mavros/state
+            # can win that startup race by a few milliseconds and arrive
+            # before the first /localization/odom callback.  Wait for the
+            # initial odometry sample until the normal preflight deadline, but
+            # still fail immediately if a stream that has actually been seen
+            # becomes stale while armed.
+            if (
+                state_is_fresh
+                and state.armed
+                and odom_received_at > 0.0
+                and not odom_is_fresh
+            ):
                 raise FlightDirectorError(
                     "localization odometry is unavailable or stale while "
                     "the vehicle is armed"
@@ -1037,6 +1049,9 @@ class SharedMissionExecutor:
 
     def run(self):
         try:
+            valid, reason = self.runner.validate_all_goals()
+            if not valid:
+                raise FlightDirectorError(reason)
             self._prepare_flight()
             result = self.runner.run()
             if result != EXIT_SUCCESS:
@@ -1154,33 +1169,9 @@ def main(argv=None):
         import rospy
 
         rospy.init_node("shared_waypoint_mission", disable_signals=True)
-        ground = float(
-            rospy.get_param(
-                "/drone_{}_diff_planner_node/grid_map/virtual_ground".format(
-                    args.drone_id
-                )
-            )
-        )
-        ceil = float(
-            rospy.get_param(
-                "/drone_{}_diff_planner_node/grid_map/virtual_ceil".format(
-                    args.drone_id
-                )
-            )
-        )
-        inflation = float(
-            rospy.get_param(
-                "/drone_{}_diff_planner_node/grid_map/obstacles_inflation".format(
-                    args.drone_id
-                )
-            )
-        )
         config = load_mission_config(
             args.mission_file,
             default_takeoff_height=args.default_takeoff_height,
-            virtual_ground=ground,
-            virtual_ceil=ceil,
-            obstacles_inflation=inflation,
         )
         if args.odom_timeout is not None:
             config["odom_timeout"] = args.odom_timeout

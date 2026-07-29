@@ -1,0 +1,69 @@
+<launch>
+  <arg name="backend_id" default="diff"/>
+  <arg name="profile" default="local"/>
+  <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
+  <!-- Accepted as common plugin startup context. Diff uses a rolling map and
+       therefore does not require scene-specific geometry. -->
+  <arg name="scene" default="room"/>
+  <arg name="odom_topic" default="/localization/odom"/>
+  <arg name="cloud_topic" default="/localization/cloud_registered"/>
+  <arg name="config"
+       default="$(eval optenv('SIM2REAL_DIFF_PLANNER_CONFIG', '') or find('sim2real_diff_adapter') + '/config/planner.yaml')"/>
+
+  <!-- The profile argument is intentionally accepted for the common manager
+       contract. Diff-Planner owns one rolling-map parameter set. -->
+  <param name="/planning/backends/$(arg backend_id)/selected_profile" value="$(arg profile)"/>
+
+  <group ns="/planning/backends/$(arg backend_id)">
+    <!-- planner.yaml is organized by the node names below, so one load
+         populates each private namespace without duplicating files. -->
+    <rosparam command="load" file="$(arg config)"/>
+
+    <node pkg="diff_planner" name="planner" type="diff_planner_node" output="screen" required="true">
+      <remap from="/goal" to="/planning/backends/$(arg backend_id)/native/goal"/>
+      <remap from="~odom_world" to="/planning/backends/$(arg backend_id)/native/odom_world"/>
+      <remap from="~mandatory_stop" to="/planning/backends/$(arg backend_id)/native/mandatory_stop"/>
+      <remap from="~recoverable_stop" to="/planning/backends/$(arg backend_id)/native/recoverable_stop"/>
+      <remap from="~planning/trajectory" to="/planning/backends/$(arg backend_id)/native/trajectory"/>
+      <remap from="~planning/data_display" to="/planning/backends/$(arg backend_id)/native/data_display"/>
+      <remap from="~planning/broadcast_traj_send" to="/planning/backends/$(arg backend_id)/native/broadcast_traj_send"/>
+      <remap from="~planning/broadcast_traj_recv" to="/planning/backends/$(arg backend_id)/native/broadcast_traj_recv"/>
+      <remap from="~planning/heartbeat" to="/planning/backends/$(arg backend_id)/native/heartbeat"/>
+      <remap from="~grid_map/odom" to="/planning/backends/$(arg backend_id)/native/odom_world"/>
+      <remap from="~grid_map/cloud" to="/planning/backends/$(arg backend_id)/native/cloud_world"/>
+      <remap from="~grid_map/pose" to="/planning/backends/$(arg backend_id)/native/unused_camera_pose"/>
+      <remap from="~grid_map/depth" to="/planning/backends/$(arg backend_id)/native/unused_depth"/>
+      <remap from="~grid_map/occupancy"
+             to="/planning/viz/raw/occupancy"/>
+      <remap from="~grid_map/occupancy_inflate"
+             to="/planning/viz/raw/inflated_occupancy"/>
+      <remap from="~global_list"
+             to="/planning/viz/backend/global_trajectory"/>
+      <remap from="~optimal_list"
+             to="/planning/viz/backend/trajectory"/>
+      <param name="manager/drone_id" value="0" type="int"/>
+    </node>
+
+    <node pkg="diff_planner" name="trajectory_server" type="traj_server" output="screen" required="true">
+      <remap from="/position_cmd" to="/planning/backends/$(arg backend_id)/native/position_command"/>
+      <remap from="~planning/trajectory" to="/planning/backends/$(arg backend_id)/native/trajectory"/>
+      <remap from="~planning/yaw" to="/planning/backends/$(arg backend_id)/native/yaw"/>
+      <remap from="~heartbeat" to="/planning/backends/$(arg backend_id)/native/heartbeat"/>
+    </node>
+
+    <node pkg="sim2real_diff_adapter" name="adapter" type="diff_backend_adapter.py" output="screen" required="true">
+      <param name="backend/backend_id" value="$(arg backend_id)"/>
+      <param name="backend/profile" value="$(arg profile)"/>
+      <param name="backend/runtime_mode" value="$(arg runtime_mode)"/>
+      <param name="backend/odom_topic" value="$(arg odom_topic)"/>
+      <param name="backend/cloud_topic" value="$(arg cloud_topic)"/>
+      <param name="backend/native_goal_topic" value="/planning/backends/$(arg backend_id)/native/goal"/>
+      <param name="backend/native_stop_topic" value="/planning/backends/$(arg backend_id)/native/recoverable_stop"/>
+      <param name="backend/native_trajectory_topic" value="/planning/backends/$(arg backend_id)/native/trajectory"/>
+      <param name="backend/native_command_topic" value="/planning/backends/$(arg backend_id)/native/position_command"/>
+      <param name="backend/native_heartbeat_topic" value="/planning/backends/$(arg backend_id)/native/heartbeat"/>
+      <param name="backend/native_odom_topic" value="/planning/backends/$(arg backend_id)/native/odom_world"/>
+      <param name="backend/native_cloud_topic" value="/planning/backends/$(arg backend_id)/native/cloud_world"/>
+    </node>
+  </group>
+</launch>

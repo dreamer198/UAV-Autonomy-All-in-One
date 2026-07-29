@@ -70,16 +70,22 @@ class SharedGoalExecutor:
         from geometry_msgs.msg import PoseStamped
         from mavros_msgs.msg import AttitudeTarget, State
         from nav_msgs.msg import Odometry
+        from sim2real_planning_msgs.msg import PlannerGoal, PlannerStatus
+        from sim2real_planning_msgs.srv import ValidateGoal
 
         self.rospy = rospy
         self.rosnode = rosnode
         self.PoseStamped = PoseStamped
+        self.PlannerGoal = PlannerGoal
+        self.PlannerStatus = PlannerStatus
         self.args = args
         self.condition = threading.Condition()
         self.abort_requested = False
         self.state = None
         self.state_received_at = 0.0
         self.odom_received_at = 0.0
+        self.planner_status = None
+        self.planner_status_received_at = 0.0
         self.attitude_setpoint_count = 0
         self.attitude_setpoint_received_at = 0.0
         self.started_at = time.monotonic()
@@ -94,6 +100,13 @@ class SharedGoalExecutor:
             queue_size=1,
             tcp_nodelay=True,
         )
+        rospy.Subscriber(
+            args.planner_status_topic,
+            PlannerStatus,
+            self._planner_status_callback,
+            queue_size=1,
+            tcp_nodelay=True,
+        )
         if not args.allow_disarmed:
             rospy.Subscriber(
                 args.attitude_setpoint_topic,
@@ -105,6 +118,9 @@ class SharedGoalExecutor:
         self.goal_pub = rospy.Publisher(
             args.goal_topic, PoseStamped, queue_size=1, latch=False
         )
+        self.validate_goal = rospy.ServiceProxy(
+            args.validate_goal_service, ValidateGoal
+        )
 
     def _state_callback(self, message):
         with self.condition:
@@ -115,6 +131,12 @@ class SharedGoalExecutor:
     def _odom_callback(self, _message):
         with self.condition:
             self.odom_received_at = time.monotonic()
+            self.condition.notify_all()
+
+    def _planner_status_callback(self, message):
+        with self.condition:
+            self.planner_status = message
+            self.planner_status_received_at = time.monotonic()
             self.condition.notify_all()
 
     def _attitude_setpoint_callback(self, _message):
@@ -157,13 +179,6 @@ class SharedGoalExecutor:
         except Exception as exc:
             raise GoalExecutorError("cannot query ROS nodes: {}".format(exc))
 
-        planner_node = "/drone_{}_diff_planner_node".format(
-            self.args.drone_id
-        )
-        if planner_node not in nodes:
-            raise GoalExecutorError(
-                "Planner node is not running: {}".format(planner_node)
-            )
         if (
             not self.args.allow_disarmed
             and self.args.controller_node not in nodes
@@ -174,34 +189,38 @@ class SharedGoalExecutor:
                 )
             )
 
-    def _check_vertical_fence(self):
-        prefix = "/drone_{}_diff_planner_node/grid_map".format(
-            self.args.drone_id
-        )
+    def _check_backend_goal(self):
+        """Ask the selected backend to validate its own map and constraints."""
+        qz, qw = goal_orientation(self.args.yaw_deg)
+        pose = self.PoseStamped()
+        pose.header.stamp = self.rospy.Time.now()
+        pose.header.frame_id = self.args.frame_id
+        pose.pose.position.x = self.args.x
+        pose.pose.position.y = self.args.y
+        pose.pose.position.z = self.args.z
+        pose.pose.orientation.z = qz
+        pose.pose.orientation.w = qw
+        goal = self.PlannerGoal()
+        goal.header.stamp = pose.header.stamp
+        goal.session_id = "preflight-validation"
+        goal.goal_id = 1
+        goal.action = goal.PLAN
+        goal.goal = pose
+        goal.constrain_yaw = self.args.yaw_deg is not None
         try:
-            ground = float(
-                self.rospy.get_param("{}/virtual_ground".format(prefix))
+            self.rospy.wait_for_service(
+                self.args.validate_goal_service,
+                timeout=self.args.preflight_timeout,
             )
-            ceil = float(
-                self.rospy.get_param("{}/virtual_ceil".format(prefix))
-            )
-            inflation = float(
-                self.rospy.get_param(
-                    "{}/obstacles_inflation".format(prefix)
-                )
-            )
-        except (KeyError, TypeError, ValueError) as exc:
+            response = self.validate_goal(goal)
+        except Exception as exc:
             raise GoalExecutorError(
-                "cannot read Planner vertical fence: {}".format(exc)
+                "selected planner goal validation failed: {}".format(exc)
             )
-        minimum_z, maximum_z = vertical_clearance_bounds(
-            ground, ceil, inflation
-        )
-        if not minimum_z < self.args.z < maximum_z:
+        if not response.valid:
             raise GoalExecutorError(
-                "goal Z={:.3f} must leave full obstacle-inflation clearance "
-                "inside the Planner fence ({:.3f}, {:.3f})".format(
-                    self.args.z, minimum_z, maximum_z
+                "selected planner rejected the goal: {}".format(
+                    response.reason or "unspecified validation failure"
                 )
             )
 
@@ -225,6 +244,22 @@ class SharedGoalExecutor:
             or now - self.odom_received_at > self.args.odom_timeout
         ):
             return "waiting for fresh localization odometry"
+        if (
+            self.planner_status is None
+            or now - self.planner_status_received_at
+            > self.args.planner_status_timeout
+        ):
+            return "waiting for fresh selected-planner status"
+        if self.planner_status.state == self.PlannerStatus.FAULT:
+            raise GoalExecutorError(
+                "selected planner is faulted: {}".format(
+                    self.planner_status.reason or "unspecified fault"
+                )
+            )
+        if not self.planner_status.odom_ready:
+            return "waiting for selected planner odometry readiness"
+        if not self.planner_status.map_ready:
+            return "waiting for selected planner map readiness"
         if not self.args.allow_disarmed:
             if (
                 self.attitude_setpoint_count
@@ -268,8 +303,8 @@ class SharedGoalExecutor:
         try:
             self._check_localization_interlock()
             self._check_required_nodes()
-            self._check_vertical_fence()
             self._wait_for_readiness()
+            self._check_backend_goal()
             self._verify_ready_immediately_before_publish()
 
             qz, qw = goal_orientation(self.args.yaw_deg)
@@ -328,6 +363,10 @@ def _build_parser():
     parser.add_argument("--goal-topic", default="/goal")
     parser.add_argument("--state-topic", default="/mavros/state")
     parser.add_argument("--odometry-topic", default="/localization/odom")
+    parser.add_argument("--planner-status-topic", default="/planning/status")
+    parser.add_argument(
+        "--validate-goal-service", default="/planning/validate_goal"
+    )
     parser.add_argument(
         "--attitude-setpoint-topic",
         default="/mavros/setpoint_raw/attitude",
@@ -338,7 +377,8 @@ def _build_parser():
     parser.add_argument("--odom-timeout", type=float, default=0.5)
     parser.add_argument("--stream-gap-timeout", type=float, default=0.5)
     parser.add_argument("--attitude-setpoint-samples", type=int, default=10)
-    parser.add_argument("--goal-subscribers", type=int, default=2)
+    parser.add_argument("--goal-subscribers", type=int, default=1)
+    parser.add_argument("--planner-status-timeout", type=float, default=0.5)
     parser.add_argument("--delivery-wait", type=float, default=0.05)
     parser.add_argument(
         "--allow-disarmed",
@@ -359,6 +399,7 @@ def _validate_args(parser, args):
         "state_timeout",
         "odom_timeout",
         "stream_gap_timeout",
+        "planner_status_timeout",
         "delivery_wait",
     ):
         value = getattr(args, name)

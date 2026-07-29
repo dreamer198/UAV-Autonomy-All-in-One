@@ -138,6 +138,19 @@ class SimulationAdapterSafetyTest(unittest.TestCase):
         self.assertIn(').lstrip("/")', source)
         self.assertNotIn("self.frame_id.lstrip", source)
 
+    def test_rviz_bridge_waits_for_nonzero_simulation_time(self):
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "scripts",
+            "rviz_2d_goal_bridge.py",
+        )
+        with open(path, "r", encoding="utf-8") as stream:
+            source = stream.read()
+        self.assertIn("wait_for_nonzero_ros_time(self.state_timeout)", source)
+        self.assertIn("time.sleep(min(0.02, remaining))", source)
+        self.assertNotIn("rospy.sleep(min(0.02, remaining))", source)
+
 
 if __name__ == "__main__":
     unittest.main()

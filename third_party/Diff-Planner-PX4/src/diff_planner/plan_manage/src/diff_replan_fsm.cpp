@@ -19,6 +19,7 @@ namespace diff_planner
     have_queued_emergency_target_ = false;
     flag_escape_emergency_ = true;
     mandatory_stop_ = false;
+    recoverable_stop_ = false;
 
     /*  fsm param  */
     nh.param("fsm/flight_type", target_type_, -1);
@@ -115,6 +116,7 @@ namespace diff_planner
 
     odom_sub_ = nh.subscribe("odom_world", 1, &DiffReplanFSM::odometryCallback, this);
     mandatory_stop_sub_ = nh.subscribe("mandatory_stop", 1, &DiffReplanFSM::mandatoryStopCallback, this);
+    recoverable_stop_sub_ = nh.subscribe("recoverable_stop", 1, &DiffReplanFSM::recoverableStopCallback, this);
 
     /* Use MINCO trajectory to minimize the message size in wireless communication */
     broadcast_ploytraj_pub_ = nh.advertise<traj_utils::MINCOTraj>("planning/broadcast_traj_send", 10);
@@ -395,13 +397,17 @@ namespace diff_planner
       }
       else
       {
-        if (enable_fail_safe_ && !need_hover_stop_ && odom_vel_.norm() < 0.1)
+        if ((enable_fail_safe_ || recoverable_stop_) &&
+            !need_hover_stop_ && odom_vel_.norm() < 0.1)
         {
+          recoverable_stop_ = false;
           stuck_progress_monitor_.reset(ros::Time::now().toSec());
           changeFSMExecState(GEN_NEW_TRAJ, "FSM");
         }
-        else if (enable_fail_safe_ && need_hover_stop_ && odom_vel_.norm() < 0.1)
+        else if ((enable_fail_safe_ || recoverable_stop_) &&
+                 need_hover_stop_ && odom_vel_.norm() < 0.1)
         {
+          recoverable_stop_ = false;
           need_hover_stop_ = false;
           if (have_queued_emergency_target_ &&
               have_new_target_ && have_target_ && have_trigger_)
@@ -998,9 +1004,30 @@ namespace diff_planner
   void DiffReplanFSM::mandatoryStopCallback(const std_msgs::Empty &msg)
   {
     mandatory_stop_ = true;
+    recoverable_stop_ = false;
     ROS_ERROR("Received a mandatory stop command!");
     changeFSMExecState(EMERGENCY_STOP, "Mandatory Stop");
     enable_fail_safe_ = false;
+  }
+
+  void DiffReplanFSM::recoverableStopCallback(const std_msgs::Header &msg)
+  {
+    if (!enable_fail_safe_ || mandatory_stop_)
+    {
+      ROS_ERROR("Ignoring recoverable stop because the planner is latched in an unrecoverable safety state.");
+      return;
+    }
+    recoverable_stop_ = true;
+    need_hover_stop_ = true;
+    flag_escape_emergency_ = true;
+    ROS_WARN("Received a recoverable stop command; braking before accepting a fresh goal.");
+    changeFSMExecState(EMERGENCY_STOP, "Recoverable Stop");
+    // Stop and goal use different ROS connections, so receipt order is not a
+    // safe correlation signal. Preserve only a goal stamped after the stop
+    // cutoff; an older active target is the one being cancelled.
+    have_queued_emergency_target_ =
+        !msg.stamp.isZero() && goal_stamp_ > msg.stamp &&
+        have_new_target_ && have_target_ && have_trigger_;
   }
 
   void DiffReplanFSM::odometryCallback(const nav_msgs::OdometryConstPtr &msg)

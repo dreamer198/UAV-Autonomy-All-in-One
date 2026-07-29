@@ -424,6 +424,8 @@ class WaypointMission:
         drone_id,
         odometry_topic="/localization/odom",
         state_topic="/mavros/state",
+        planner_status_topic="/planning/status",
+        validate_goal_service="/planning/validate_goal",
     ):
         # ROS imports stay inside runtime construction so configuration
         # validation also works on a host that does not source ROS.
@@ -432,11 +434,16 @@ class WaypointMission:
         from mavros_msgs.msg import State
         from mavros_msgs.srv import SetMode
         from nav_msgs.msg import Odometry
-        from traj_utils.msg import PolyTraj
+        from sim2real_planning_msgs.msg import PlannerGoal, PlannerStatus
+        from sim2real_planning_msgs.srv import ValidateGoal
+        from std_srvs.srv import Trigger
 
         self.rospy = rospy
         self.PoseStamped = PoseStamped
         self.SetMode = SetMode
+        self.Trigger = Trigger
+        self.PlannerGoal = PlannerGoal
+        self.PlannerStatus = PlannerStatus
         self.config = config
         self.drone_id = drone_id
         self.state_topic = state_topic
@@ -448,6 +455,11 @@ class WaypointMission:
         self.odom = None
         self.odom_received_at = 0.0
         self.current_goal_stamp = None
+        self.current_goal_id = None
+        self.current_goal_floor = 0
+        self.last_planner_goal_id = 0
+        self.planner_status = None
+        self.planner_status_received_at = 0.0
         self.current_requested_goal_position = None
         self.current_goal_position = None
         self.current_goal_message = None
@@ -456,6 +468,7 @@ class WaypointMission:
         self.current_planner_stopped_at = None
         self.current_planner_retry_count = 0
         self.abort_requested = False
+        self.goals_validated = False
 
         self.goal_pub = rospy.Publisher(
             "/goal", PoseStamped, queue_size=1, latch=False
@@ -470,15 +483,19 @@ class WaypointMission:
             queue_size=1,
             tcp_nodelay=True,
         )
-        trajectory_topic = "/drone_{}_planning/trajectory".format(drone_id)
         rospy.Subscriber(
-            trajectory_topic,
-            PolyTraj,
-            self._trajectory_callback,
+            planner_status_topic,
+            PlannerStatus,
+            self._planner_status_callback,
             queue_size=10,
             tcp_nodelay=True,
         )
         self.set_mode = rospy.ServiceProxy("/mavros/set_mode", SetMode)
+        self.validate_goal = rospy.ServiceProxy(
+            validate_goal_service, ValidateGoal
+        )
+        self.validate_goal_service = validate_goal_service
+        self.cancel_goal = rospy.ServiceProxy("/planning/cancel", Trigger)
 
     def _state_callback(self, message):
         with self.lock:
@@ -490,7 +507,74 @@ class WaypointMission:
             self.odom = message
             self.odom_received_at = time.monotonic()
 
+    def _planner_status_callback(self, message):
+        """Consume only the selected backend's public status contract."""
+        if not hasattr(message, "goal_id"):
+            # Kept as a compatibility seam for unit tests of the former
+            # PolyTraj correlation logic; no native topic subscribes here.
+            return self._legacy_trajectory_callback(message)
+
+        fallback_update = None
+        now = time.monotonic()
+        with self.lock:
+            self.planner_status = message
+            self.planner_status_received_at = now
+            goal_id = int(message.goal_id)
+            self.last_planner_goal_id = max(self.last_planner_goal_id, goal_id)
+            if self.current_goal_stamp is None or goal_id <= 0:
+                return
+            if self.current_goal_id is None:
+                if goal_id <= self.current_goal_floor:
+                    return
+                self.current_goal_id = goal_id
+            elif goal_id != self.current_goal_id:
+                return
+
+            active_goal = getattr(message, "active_goal", None)
+            if active_goal is not None:
+                position = active_goal.pose.position
+                goal = (float(position.x), float(position.y), float(position.z))
+                if all(math.isfinite(value) for value in goal):
+                    goal_difference = math.sqrt(
+                        sum(
+                            (goal[index] - self.current_goal_position[index]) ** 2
+                            for index in range(3)
+                        )
+                    )
+                    if goal_difference > 0.05:
+                        fallback_update = (
+                            self.current_requested_goal_position,
+                            self.current_goal_position,
+                            goal,
+                        )
+                        self.current_goal_position = goal
+
+            active_states = {
+                int(getattr(message, "ACTIVE", 3)),
+                int(getattr(message, "REACHED", 5)),
+            }
+            stop_states = {
+                int(getattr(message, "HOLDING", 4)),
+                int(getattr(message, "FAULT", 6)),
+            }
+            if (
+                int(message.state) in active_states
+                and bool(message.armable)
+                and int(message.trajectory_id) > 0
+            ):
+                self.current_plan_accepted = True
+                self.current_planner_stopped_at = None
+            elif int(message.state) in stop_states:
+                if self.current_planner_stopped_at is None:
+                    self.current_planner_stopped_at = now
+        if fallback_update is not None:
+            self._log_fallback(fallback_update)
+
     def _trajectory_callback(self, message):
+        """Backward-compatible test entrypoint; runtime uses PlannerStatus."""
+        return self._planner_status_callback(message)
+
+    def _legacy_trajectory_callback(self, message):
         fallback_update = None
         with self.lock:
             if self.current_goal_stamp is None:
@@ -525,8 +609,11 @@ class WaypointMission:
                 if self.current_planner_stopped_at is None:
                     self.current_planner_stopped_at = time.monotonic()
         if fallback_update is not None:
-            requested, previous, fallback = fallback_update
-            self.rospy.logwarn(
+            self._log_fallback(fallback_update)
+
+    def _log_fallback(self, fallback_update):
+        requested, previous, fallback = fallback_update
+        self.rospy.logwarn(
                 "Planner replaced mission waypoint "
                 "(%.3f, %.3f, %.3f) with a collision-free fallback "
                 "(%.3f, %.3f, %.3f); accepting the fallback and continuing. "
@@ -539,8 +626,69 @@ class WaypointMission:
                 fallback[2],
                 previous[0],
                 previous[1],
-                previous[2],
+            previous[2],
+        )
+
+    def _validate_waypoint(self, waypoint, index, count, session_id):
+        pose = self.PoseStamped()
+        pose.header.stamp = self.rospy.Time.now()
+        pose.header.frame_id = "world"
+        pose.pose.position.x = waypoint["x"]
+        pose.pose.position.y = waypoint["y"]
+        pose.pose.position.z = waypoint["z"]
+        constrain_yaw = waypoint["yaw"] is not None
+        if constrain_yaw:
+            yaw = math.radians(waypoint["yaw"])
+            pose.pose.orientation.z = math.sin(yaw / 2.0)
+            pose.pose.orientation.w = math.cos(yaw / 2.0)
+
+        goal = self.PlannerGoal()
+        goal.header.stamp = pose.header.stamp
+        goal.session_id = session_id
+        goal.goal_id = index
+        goal.action = goal.PLAN
+        goal.goal = pose
+        goal.constrain_yaw = constrain_yaw
+        try:
+            response = self.validate_goal(goal)
+        except Exception as exc:
+            return (
+                False,
+                "selected planner goal validation failed for waypoint "
+                "{}/{}: {}".format(index, count, exc),
             )
+        if not response.valid:
+            return (
+                False,
+                "selected planner rejected waypoint {}/{}: {}".format(
+                    index,
+                    count,
+                    response.reason or "unspecified validation failure",
+                ),
+            )
+        return True, ""
+
+    def validate_all_goals(self):
+        """Validate every mission point with the selected backend before arm."""
+        if self.goals_validated:
+            return True, ""
+        try:
+            self.rospy.wait_for_service(
+                self.validate_goal_service,
+                timeout=self.config["planner_accept_timeout"],
+            )
+        except Exception as exc:
+            return False, "selected planner goal validation failed: {}".format(exc)
+
+        count = len(self.config["waypoints"])
+        for index, waypoint in enumerate(self.config["waypoints"], start=1):
+            valid, reason = self._validate_waypoint(
+                waypoint, index, count, "mission-preflight"
+            )
+            if not valid:
+                return False, reason
+        self.goals_validated = True
+        return True, ""
 
     def _snapshot(self):
         with self.lock:
@@ -591,6 +739,8 @@ class WaypointMission:
             message.pose.position.y = active_goal[1]
             message.pose.position.z = active_goal[2]
             self.current_goal_stamp = message.header.stamp
+            self.current_goal_floor = getattr(self, "last_planner_goal_id", 0)
+            self.current_goal_id = None
             self.current_plan_accepted = False
             self.current_planner_stopped_at = None
 
@@ -605,6 +755,21 @@ class WaypointMission:
             retry_limit,
         )
         self.goal_pub.publish(message)
+        return True, ""
+
+    def _cancel_completed_goal(self):
+        try:
+            self.rospy.wait_for_service(
+                "/planning/cancel", timeout=self.config["state_timeout"]
+            )
+            response = self.cancel_goal()
+        except Exception as exc:
+            return False, "planner cancellation failed: {}".format(exc)
+        if not response.success:
+            return False, response.message or "planner rejected cancellation"
+        with self.lock:
+            self.current_plan_accepted = False
+            self.current_planner_stopped_at = None
         return True, ""
 
     def request_abort(self):
@@ -668,6 +833,26 @@ class WaypointMission:
         if odom is None or now - odom_time > self.config["odom_timeout"]:
             self._latch_localization_fault()
             return EXIT_MISSION_FAILED, LOCALIZATION_STALE_REASON
+        with self.lock:
+            planner_status = self.planner_status
+            planner_status_at = self.planner_status_received_at
+        if (
+            planner_status is None
+            or now - planner_status_at > self.config["state_timeout"]
+        ):
+            return EXIT_MISSION_FAILED, "selected planner status is unavailable or stale"
+        if (
+            int(planner_status.state)
+            == int(getattr(planner_status, "FAULT", 6))
+        ):
+            return (
+                EXIT_MISSION_FAILED,
+                "selected planner fault: {}".format(
+                    planner_status.reason or "unspecified fault"
+                ),
+            )
+        if not planner_status.odom_ready or not planner_status.map_ready:
+            return EXIT_MISSION_FAILED, "selected planner is not map/odom ready"
         return EXIT_SUCCESS, ""
 
     def _request_recovery(self, reason):
@@ -746,10 +931,7 @@ class WaypointMission:
         deadline = time.monotonic() + self.config["planner_accept_timeout"]
         while not self.rospy.is_shutdown() and time.monotonic() < deadline:
             code, reason = self._flight_gate()
-            # Both Diff-Planner and trajectory_msg_converter must see the same
-            # non-latched goal. Publishing as soon as only one subscriber has
-            # connected can lose the first waypoint at node startup.
-            if code == EXIT_SUCCESS and self.goal_pub.get_num_connections() >= 2:
+            if code == EXIT_SUCCESS and self.goal_pub.get_num_connections() >= 1:
                 return EXIT_SUCCESS, ""
             if code == EXIT_MANUAL_TAKEOVER:
                 return code, reason
@@ -814,6 +996,8 @@ class WaypointMission:
 
         with self.lock:
             self.current_goal_stamp = message.header.stamp
+            self.current_goal_floor = self.last_planner_goal_id
+            self.current_goal_id = None
             requested_position = (
                 waypoint["x"],
                 waypoint["y"],
@@ -992,6 +1176,10 @@ class WaypointMission:
         return EXIT_MISSION_FAILED, "waypoint arrival timed out"
 
     def run(self):
+        valid, reason = self.validate_all_goals()
+        if not valid:
+            self.rospy.logerr("Mission validation failed: %s", reason)
+            return EXIT_MISSION_FAILED
         code, reason = self._wait_for_initial_state()
         if code != EXIT_SUCCESS:
             if code == EXIT_MISSION_FAILED:
@@ -1006,6 +1194,12 @@ class WaypointMission:
         count = len(self.config["waypoints"])
         for index, waypoint in enumerate(self.config["waypoints"], start=1):
             fly_through = waypoint_is_fly_through(waypoint, index, count)
+            valid, reason = self._validate_waypoint(
+                waypoint, index, count, "mission-runtime"
+            )
+            if not valid:
+                self._request_recovery(reason)
+                return EXIT_MISSION_FAILED
             self._publish_waypoint(waypoint, index, count)
             code, reason = self._wait_for_plan()
             if code != EXIT_SUCCESS:
@@ -1057,7 +1251,14 @@ class WaypointMission:
                     "Mission waypoint %d/%d reached.", index, count
                 )
 
-        self.rospy.loginfo("All %d mission waypoints reached.", count)
+        cancelled, reason = self._cancel_completed_goal()
+        if not cancelled:
+            self._request_recovery(reason)
+            return EXIT_MISSION_FAILED
+        self.rospy.loginfo(
+            "All %d mission waypoints reached; active planner goal cancelled.",
+            count,
+        )
         return EXIT_SUCCESS
 
 

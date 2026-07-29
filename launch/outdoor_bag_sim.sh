@@ -10,7 +10,7 @@ CONTAINER_NAME="${SIM_DEV_CONTAINER:-diff_planner_px4_sim}"
 BAG_NAME="${OUTDOOR_SIM_BAG_NAME:-se3_test_20260723_151241_0.bag}"
 BAG_HOST="${OUTDOOR_SIM_BAG_HOST:-$PROJECT_ROOT/runtime/simulation/flight_bags/$BAG_NAME}"
 BAG_CONTAINER="${OUTDOOR_SIM_BAG_CONTAINER:-/root/simulation_runtime/flight_bags/$BAG_NAME}"
-SCENE_NAME="${OUTDOOR_SIM_SCENE_NAME:-outdoor_rectangular_forest}"
+SCENE_NAME="${OUTDOOR_SIM_SCENE_NAME:-forest}"
 OUTPUT_ROOT="$PROJECT_ROOT/runtime/simulation/reconstructed"
 OUTPUT_HOST="${OUTDOOR_SIM_OUTPUT_HOST:-$OUTPUT_ROOT/$SCENE_NAME}"
 OUTPUT_CONTAINER="${OUTDOOR_SIM_OUTPUT_CONTAINER:-/root/simulation_runtime/reconstructed/$SCENE_NAME}"
@@ -55,7 +55,7 @@ Usage: outdoor_bag_sim.sh {generate|start|stop|status|attach|shell|arm|land|goal
   Other actions      Compatibility aliases for the corresponding sim.sh action.
 
 New simulations should use the unified entrypoint directly:
-  ./launch/sim.sh --scene outdoor_rectangular_forest restart
+  ./launch/sim.sh --scene forest --planner diff restart
   ./launch/sim.sh arm
   ./launch/sim.sh goal X Y Z [YAW]
   ./launch/sim.sh land

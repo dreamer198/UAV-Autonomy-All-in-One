@@ -12,6 +12,7 @@ FCU_URL="${FCU_URL:-}"
 GCS_URL="${GCS_URL:-}"
 RUNTIME_DIR="${RUNTIME_DIR:-$PROJECT_ROOT/runtime}"
 EXTRA_DOCKER_ARGS="${EXTRA_DOCKER_ARGS:-}"
+PLANNER_PLUGIN_PATH="${SIM2REAL_PLANNER_PLUGIN_PATH:-}"
 
 usage() {
   cat <<'EOF'
@@ -64,6 +65,31 @@ append_extra_args() {
   output_array_ref+=("${parsed[@]}")
 }
 
+append_planner_plugin_mounts() {
+  local destination_name="$1"
+  # shellcheck disable=SC2178
+  local -n output_array_ref="$destination_name"
+  [ -n "$PLANNER_PLUGIN_PATH" ] || return 0
+  local entry mount_source mount_target
+  local -a entries=()
+  IFS=: read -r -a entries <<<"$PLANNER_PLUGIN_PATH"
+  for entry in "${entries[@]}"; do
+    [ -n "$entry" ] || continue
+    [[ "$entry" = /* ]] ||
+      die "SIM2REAL_PLANNER_PLUGIN_PATH entries must be absolute: $entry"
+    [ -e "$entry" ] ||
+      die "Planner plugin search path does not exist: $entry"
+    if [ -f "$entry" ]; then
+      mount_source="$(realpath -e "$(dirname "$entry")")"
+      mount_target="$(dirname "$entry")"
+    else
+      mount_source="$(realpath -e "$entry")"
+      mount_target="$entry"
+    fi
+    output_array_ref+=(-v "$mount_source:$mount_target:ro")
+  done
+}
+
 container_exists() {
   docker inspect "$CONTAINER_NAME" >/dev/null 2>&1
 }
@@ -75,7 +101,7 @@ container_running() {
 container_processes_active() {
   container_running || return 1
   docker top "$CONTAINER_NAME" -eo args 2>/dev/null |
-    grep -Eq '(^|[ /])(roscore|rosmaster|mavros_node|fastlio_mapping|livox_ros_driver2_node|se3_controller_node|diff_planner_node|traj_server)([[:space:]]|$)|localization_guard\.py|trajectory_msg_converter\.py|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
+    grep -Eq '(^|[ /])(roscore|rosmaster|mavros_node|fastlio_mapping|livox_ros_driver2_node|se3_controller_node|diff_planner_node|fast_planner_node|traj_server)([[:space:]]|$)|localization_guard\.py|planner_backend_runner\.py|planner_(manager|gateway|visualization)\.py|command_gateway\.py|(diff|fast)_backend_adapter|sim2real_(diff|fast)_adapter|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
 }
 
 real_stack_active() {
@@ -92,7 +118,8 @@ mavros_reports_armed() {
     export ROS_MASTER_URI=http://127.0.0.1:11311
     unset ROS_HOSTNAME
     source /opt/ros/noetic/setup.bash
-    [ ! -f /root/catkin_ws/devel/setup.bash ] || source /root/catkin_ws/devel/setup.bash
+    [ ! -f /opt/uav-autonomy-aio/planning/workspaces/control_ws/devel/setup.bash ] ||
+      source /opt/uav-autonomy-aio/planning/workspaces/control_ws/devel/setup.bash
     timeout 4 rostopic echo -n 1 /mavros/state 2>/dev/null | grep -q "armed: True"
   '
 }
@@ -126,7 +153,13 @@ validate_container_inputs() {
 }
 
 ensure_image() {
-  if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+  local planner_layout=""
+  planner_layout="$(
+    docker image inspect \
+      -f '{{index .Config.Labels "io.sim2real.planner-workspaces"}}' \
+      "$IMAGE_NAME" 2>/dev/null || true
+  )"
+  if [ "$planner_layout" != "v1" ]; then
     build_image
   fi
 }
@@ -164,6 +197,8 @@ container_layout_current() {
   [ "$(docker inspect -f '{{.HostConfig.Privileged}}' "$CONTAINER_NAME")" = "true" ] || return 1
   docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" |
     grep -qx 'DRONE_ID=0' || return 1
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" |
+    grep -Fxqx "SIM2REAL_PLANNER_PLUGIN_PATH=$PLANNER_PLUGIN_PATH" || return 1
 }
 
 build_image() {
@@ -194,6 +229,8 @@ create_container() {
     --ipc host
     --privileged
     -e "DRONE_ID=0"
+    -e "SIM2REAL_PLANNER_PLUGIN_PATH=$PLANNER_PLUGIN_PATH"
+    -e "SIM2REAL_RUNTIME_MODE=real"
     -e "DISPLAY=$DISPLAY_VALUE"
     -e "QT_X11_NO_MITSHM=1"
     -v /etc/localtime:/etc/localtime:ro
@@ -202,6 +239,7 @@ create_container() {
     -v "$PROJECT_ROOT/deployment/config/livox/MID360s_config.json:/root/livox_ws/src/livox_ros_driver2/config/MID360s_config.json:ro"
     -v "$PROJECT_ROOT/deployment/config/controller.yaml:/root/deployment/controller.yaml:ro"
   )
+  append_planner_plugin_mounts docker_args
 
   [ -z "$FCU_URL" ] || docker_args+=(-e "FCU_URL=$FCU_URL")
   [ -z "$GCS_URL" ] || docker_args+=(-e "GCS_URL=$GCS_URL")

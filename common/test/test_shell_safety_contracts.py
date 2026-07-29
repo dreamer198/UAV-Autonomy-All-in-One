@@ -30,7 +30,7 @@ class ShellSafetyContractsTest(unittest.TestCase):
         for source in (sim, real):
             self.assertIn("Only one vehicle is supported", source)
             self.assertIn("--drone-id 0", source)
-            self.assertIn("drone_id:=0", source)
+            self.assertIn("planner_gateway.launch", source)
         self.assertIn("DRONE_ID=0", real)
         self.assertNotIn("/drone_${DRONE_ID}_planning", sim)
         self.assertNotIn("/drone_${DRONE_ID}_planning", real)
@@ -50,6 +50,67 @@ class ShellSafetyContractsTest(unittest.TestCase):
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("Only one vehicle is supported", completed.stdout)
+
+    def test_sim_and_real_require_explicit_planner_for_start(self):
+        cases = (
+            ("launch/sim.sh", "SIM_PLANNER"),
+            ("launch/real.sh", "REAL_PLANNER"),
+        )
+        for relative_launcher, planner_variable in cases:
+            with self.subTest(launcher=relative_launcher):
+                launcher = os.path.join(PROJECT_ROOT, relative_launcher)
+                source = self.read(relative_launcher)
+                self.assertIn(
+                    'PLANNER_ID="${' + planner_variable + ':-}"', source
+                )
+                self.assertNotIn(planner_variable + ":-diff", source)
+                self.assertIn("require_planner_selection", source)
+
+                test_env = os.environ.copy()
+                test_env.pop(planner_variable, None)
+                completed = subprocess.run(
+                    ["bash", launcher, "start"],
+                    cwd=PROJECT_ROOT,
+                    env=test_env,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("No planner selected", completed.stdout)
+
+    def test_sim_requires_explicit_scene_for_start(self):
+        relative_launcher = "launch/sim.sh"
+        launcher = os.path.join(PROJECT_ROOT, relative_launcher)
+        source = self.read(relative_launcher)
+        self.assertIn('SCENE="${SIM_SCENE:-}"', source)
+        self.assertNotIn('SCENE="${SIM_SCENE:-default}"', source)
+        self.assertIn("require_scene_selection", source)
+
+        test_env = os.environ.copy()
+        test_env.pop("SIM_SCENE", None)
+        test_env["SIM_PLANNER"] = "diff"
+        completed = subprocess.run(
+            ["bash", launcher, "start"],
+            cwd=PROJECT_ROOT,
+            env=test_env,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("No scene selected", completed.stdout)
+
+    def test_sim_passes_the_validated_scene_to_the_selected_plugin(self):
+        sim = self.read("launch/sim.sh")
+        self.assertIn(
+            "runtime_mode:=simulation scene:=%q", sim
+        )
+        self.assertIn(
+            '"$PLANNER_ID" "$PLANNER_PROFILE" "$SCENE"', sim
+        )
 
     def test_sim_rejects_invalid_start_boolean_and_recorder_ownership_override(self):
         launcher = os.path.join(PROJECT_ROOT, "launch", "sim.sh")
@@ -211,6 +272,25 @@ class ShellSafetyContractsTest(unittest.TestCase):
             sim.index("    restart)") : sim.index("    recreate)")
         ]
         self.assertIn("require_inactive_simulation", restart_body)
+
+    def test_planner_builder_sources_underlay_before_ros_tool_checks(self):
+        source = self.read("planning/scripts/build_planner_workspaces.sh")
+        setup_source = 'source "$BASE_SETUP"'
+        rospack_check = (
+            'command -v rospack >/dev/null 2>&1 || '
+            'die "rospack is not installed"'
+        )
+        self.assertIn(setup_source, source)
+        self.assertIn(rospack_check, source)
+        self.assertLess(
+            source.index(setup_source, source.index("BASE_SETUP=")),
+            source.index(rospack_check),
+        )
+        self.assertIn("Preserve the top-level catkin setup symlink", source)
+        self.assertIn("reset_relocated_build_cache", source)
+        self.assertIn(
+            '[[ "$workspace" == "$WORKSPACE_ROOT/"*_ws ]]', source
+        )
 
     def test_outdoor_scene_publish_is_bounded_and_read_only_actions_do_not_generate(self):
         source = self.read("launch/outdoor_bag_sim.sh")

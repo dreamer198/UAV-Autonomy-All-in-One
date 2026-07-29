@@ -40,14 +40,15 @@ class GoalExecutorTest(unittest.TestCase):
         with self.assertRaises(EXECUTOR.GoalExecutorError):
             EXECUTOR.vertical_clearance_bounds(0.1, 0.5, 0.3)
 
-    def test_parser_defaults_require_live_flight_and_both_goal_consumers(self):
+    def test_parser_defaults_require_live_flight_and_gateway_goal_consumer(self):
         parser = EXECUTOR._build_parser()
         args = parser.parse_args(["1", "2", "1"])
         EXECUTOR._validate_args(parser, args)
         self.assertFalse(args.allow_disarmed)
         self.assertEqual(args.attitude_setpoint_samples, 10)
-        self.assertEqual(args.goal_subscribers, 2)
+        self.assertEqual(args.goal_subscribers, 1)
         self.assertEqual(args.state_timeout, 3.0)
+        self.assertEqual(args.planner_status_topic, "/planning/status")
 
     def test_localization_fault_latch_is_understood(self):
         reason = EXECUTOR.localization_fault_reason

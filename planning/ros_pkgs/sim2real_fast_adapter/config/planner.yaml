@@ -1,0 +1,163 @@
+# Fast Kino 与 Fast Topo 共用的完整配置。launch 只负责选择 planner=1（Kino）
+# 或 planner=2（Topo）；两个后端都从本文件读取地图、动力学、优化和 adapter 参数。
+# 单位约定：距离 m，速度 m/s，加速度 m/s^2，jerk m/s^3，时间 s，频率 Hz，角度 deg。
+#
+# 注意：manager、search、optimization 中重复的速度/加速度应保持一致。forest 仿真只会
+# 额外覆盖 config/scenes/forest.yaml 中的地图几何，其余参数仍取自本文件。
+
+# Fast 重规划状态机。标有“仅 Topo”的参数不会改变 Kino 行为。
+fsm:
+  flight_type: 1                    # 目标来源：1=插件转发的外部目标；2=原生预设航点模式。
+  thresh_replan: 0.5                # Kino：飞离本段起点该距离后重规划，单位 m；Topo：本段执行该时间后重规划，单位 s。
+  thresh_no_replan: 2.0             # 距最终/局部终点小于该距离时停止滚动重规划，继续执行当前轨迹。
+  emergency_stop_velocity: 0.15     # 仅 Topo：碰撞制动后，速度低于该值才认为基本停稳。
+  emergency_stop_settle_time: 0.20  # 仅 Topo：满足低速条件后继续保持多久才允许重新规划。
+  max_tracking_error: 0.40          # 仅 Topo：参考轨迹与实测位置的最大误差；超限后先制动再重建轨迹。
+  planning_retry_interval: 0.10     # 仅 Topo：一次规划失败后再次尝试前的最短间隔。
+  waypoint_num: 0                   # flight_type=2 时启用的原生预设航点数；插件模式应保持 0。
+  act_map: false                    # 上游遗留开关；当前 FSM 只读取但不据此执行任何分支。
+
+# Fast 固定范围 SDFMap/ESDF。origin_* 是地图最小角，map_size_* 是从该点起的物理长度。
+sdf_map:
+  frame_id: world                   # 地图、输入点坐标及可视化使用的固定坐标系。
+  resolution: 0.1                   # 体素边长；越小越精细，但体素数、内存和 EDT 计算量增长很快。
+  origin_x: -15.0                   # room/真机默认地图 x 最小值。
+  origin_y: -15.0                   # room/真机默认地图 y 最小值。
+  origin_z: -1.0                    # 默认地图 z 最小值；不是无人机最低允许飞行高度。
+  map_size_x: 30.0                  # 默认地图 x 方向长度，对应范围 [-15, 15]。
+  map_size_y: 30.0                  # 默认地图 y 方向长度，对应范围 [-15, 15]。
+  map_size_z: 5.0                   # 默认地图 z 方向长度，对应范围 [-1, 4]。
+  local_update_range_x: 5.5         # 每帧以传感器/机体为中心参与融合的 x 方向半宽。
+  local_update_range_y: 5.5         # 每帧以传感器/机体为中心参与融合的 y 方向半宽。
+  local_update_range_z: 4.5         # 每帧以传感器/机体为中心参与融合的 z 方向半高。
+  max_memory_mb: 512.0              # 启动前允许地图占用的保守内存上限；估算按每体素 64 byte。
+  obstacles_inflation: 0.1          # 障碍在水平面向外膨胀的距离；增大更保守、可通行空间更少。
+  obstacles_inflation_z: 0.3        # 障碍在竖直方向向外膨胀的距离，用于限制低净空穿越。
+  accumulate_cloud: true            # true=保留历次静态点云占据；false=每帧按当前局部观测重建占据。
+  local_bound_inflate: 0.2          # x/y 方向向外扩展本轮 ESDF 更新框；源码至少取一个体素。
+  local_map_margin: 5               # 局部地图裁剪和可视化边界外保留的体素层数，单位 voxel。
+  ground_height: -1.0               # world 中的地图地面基准；未显式给 origin_z 时也作为默认下边界。
+
+  # 以下相机/深度参数只用于 depth+pose 输入；当前注册 PointCloud2 路径不依赖相机内参。
+  fx: 1.0                            # 深度相机 x 方向焦距，单位 pixel；点云输入时不生效。
+  fy: 1.0                            # 深度相机 y 方向焦距，单位 pixel；点云输入时不生效。
+  cx: 0.0                            # 深度相机主点横坐标，单位 pixel；点云输入时不生效。
+  cy: 0.0                            # 深度相机主点纵坐标，单位 pixel；点云输入时不生效。
+  use_depth_filter: false            # 深度图路径是否启用前后帧重投影一致性过滤。
+  depth_filter_tolerance: 0.15       # 重投影深度差小于该值才接受，单位 m。
+  depth_filter_maxdist: 5.0          # 深度图接受的最大测距；更远像素被忽略。
+  depth_filter_mindist: 0.2          # 深度图接受的最小测距；更近像素被忽略。
+  depth_filter_margin: 2             # 深度图四周忽略的像素宽度，单位 pixel。
+  k_depth_scaling_factor: 1000.0     # 原始深度值除以该系数得到 m；1000 对应毫米输入。
+  skip_pixel: 2                      # 深度图像素采样步长；越大越快但点更稀疏。
+
+  # 以下概率用于深度图 raycast；注册 PointCloud2 路径直接更新二值膨胀占据。
+  p_hit: 0.65                        # 射线端点命中一次时使用的占据概率证据。
+  p_miss: 0.35                       # 射线穿过一次时使用的空闲概率证据。
+  p_min: 0.12                        # 累计占据概率下限，防止空闲证据无限累积。
+  p_max: 0.90                        # 累计占据概率上限，防止命中证据无限累积。
+  p_occ: 0.80                        # 累计概率高于该阈值时将体素判为占据。
+  min_ray_length: 0.2                # 上游保留字段；当前 SDFMap 的最短射线判断已被注释，不生效。
+  max_ray_length: 5.5                # 深度 raycast 的最大长度；更远端点沿射线方向截断。
+
+  esdf_slice_height: 1.0             # ESDF 二维切片可视化使用的 world 绝对 z 高度。
+  visualization_truncate_height: 3.0 # 占据点云可视化的 world 绝对 z 上限，不改变规划地图。
+  virtual_ceil_height: 3.0           # world 中的虚拟天花板高度；地图会将该高度附近体素设为占据。
+  show_occ_time: false               # 是否在终端打印占据融合耗时，仅用于性能诊断。
+  show_esdf_time: false              # 是否在终端打印 ESDF 更新耗时，仅用于性能诊断。
+  pose_type: 1                       # 深度图同步位姿类型：1=PoseStamped，2=Odometry。
+
+# PlannerManager 的动力学、局部路径和模块开关。
+manager:
+  max_vel: 0.5                       # 规划和 B-spline 时间分配使用的最大速度。
+  max_acc: 0.8                       # 规划和 B-spline 时间分配使用的最大加速度。
+  max_jerk: 4.0                      # 上游保留字段；当前 Manager 只读取保存，未施加 jerk 约束。
+  dynamic_environment: 0             # 动态障碍模式；本插件版本只支持 0，其他值会拒绝启动。
+  local_segment_length: 7.0          # 从全局参考截取的局部路径长度；主要决定 Topo 每轮观察多远。
+  clearance_threshold: 0.25          # 最终 B-spline 碰撞复核要求的最小 ESDF 净空。
+  control_points_distance: 0.3       # 粗路径转 B-spline 时相邻控制点的期望间距；越小变量越多。
+  use_geometric_path: false          # 是否启用上游几何 A* 路径模块；当前两个插件均关闭。
+  use_optimization: true             # 是否对搜索结果进行 B-spline 优化；正常运行应保持 true。
+
+# Fast Kino 的 kinodynamic A* 前端；Fast Topo 不读取本组参数。
+search:
+  max_tau: 0.6                       # 普通搜索运动原语的最大持续时间。
+  init_max_tau: 0.8                  # 从真实初始状态展开首批运动原语的最大持续时间。
+  max_vel: 0.5                       # 搜索状态允许的各轴最大速度，应与 manager/max_vel 一致。
+  max_acc: 0.8                       # 搜索运动原语允许的各轴最大加速度，应与 manager/max_acc 一致。
+  w_time: 10.0                       # 搜索代价中的时间权重；增大更偏向更短飞行时间。
+  horizon: 3.0                       # 搜索离起点达到该空间距离后可返回局部路径。
+  lambda_heu: 5.0                    # 启发式代价倍率；增大通常更快，但搜索更不接近最优。
+  resolution_astar: 0.1              # 状态空间位置哈希分辨率；越小搜索更细、节点更多。
+  time_resolution: 0.8               # 动态环境时间哈希分辨率；动态模式禁用时基本不影响结果。
+  allocate_num: 100000               # 预分配搜索节点池大小；耗尽会导致搜索失败。
+  check_num: 8                       # 每条运动原语上的碰撞采样次数；越大越安全但搜索更慢。
+
+# Fast Topo 的拓扑 PRM 前端；Fast Kino 不读取本组参数。
+topo_prm:
+  sample_inflate_x: 1.0              # 围绕起终点连线构造采样椭球时，x 方向额外扩张量。
+  sample_inflate_y: 5.0              # 采样椭球 y 方向额外扩张量；增大可寻找更宽绕行但更耗时。
+  sample_inflate_z: 1.0              # 采样椭球 z 方向额外扩张量；增大允许更高/更低绕行。
+  clearance: 0.3                     # PRM 节点和边要求的最小 ESDF 净空。
+  max_sample_time: 0.02              # 单轮 PRM 随机采样的墙钟时间上限。
+  max_sample_num: 4000               # 单轮 PRM 随机采样点数量上限，与时间上限任一先到即停止。
+  max_raw_path: 300                  # 深度优先枚举的原始拓扑路径数量上限。
+  max_raw_path2: 25                  # 原始路径排序/过滤后继续处理的候选数量上限。
+  short_cut_num: 1                   # 上游保留字段；当前 TopoPRM 只读取但未使用。
+  reserve_num: 6                     # 最终保留并交给后端选择/优化的拓扑候选数量。
+  ratio_to_short: 5.5                # 候选长度相对最短路径的最大倍数；超出者丢弃。
+  parallel_shortcut: true            # 是否并行执行候选路径 shortcut；关闭可简化调试但更慢。
+
+# 三次 B-spline 优化。lambda* 是相对权重，没有可直接比较的物理单位。
+optimization:
+  lambda1: 10.0                      # 平滑/jerk 代价权重；增大可使轨迹更顺滑。
+  lambda2: 5.0                       # 障碍距离代价权重；增大更倾向远离障碍。
+  lambda3: 0.00001                   # 速度和加速度超限惩罚权重；过大可能牺牲避障/平滑。
+  lambda4: 0.01                      # 终点代价权重；仅启用 ENDPOINT 代价的优化流程才生效。
+  lambda5: 100.0                     # Topo 引导路径代价权重；增大更贴近 PRM 选出的安全通道。
+  lambda6: 10.0                      # 上游定义为可见性权重；当前 combineCost 未加入该项，不生效。
+  lambda7: 20.0                      # 航点/终端 yaw 代价权重；只在相应优化流程启用时生效。
+  dist0: 0.5                         # ESDF 距离低于该值时开始计算障碍代价。
+  dist1: 0.0                         # 上游遗留参数；当前优化器没有读取，不生效。
+  max_vel: 0.5                       # 优化器允许的最大速度，应与 manager/max_vel 一致。
+  max_acc: 0.8                       # 优化器允许的最大加速度，应与 manager/max_acc 一致。
+  algorithm1: 15                     # NLopt 算法枚举；用于 Topo 引导的二次型优化阶段。
+  algorithm2: 11                     # NLopt 算法枚举；用于常规非线性代价优化阶段。
+  max_iteration_num1: 100            # Topo GUIDE 阶段的最大目标函数评估次数。
+  max_iteration_num2: 300            # Kino/Topo 常规及 yaw 优化阶段的最大评估次数。
+  max_iteration_num3: 200            # 预留的第 3 档评估上限；当前规划流程未选择该档。
+  max_iteration_num4: 200            # 预留的第 4 档评估上限；当前规划流程未选择该档。
+  max_iteration_time1: 0.0001        # 预留的第 1 档时间上限；当前规划流程未选择该档。
+  max_iteration_time2: 0.02          # 当前各优化阶段采用的单次墙钟时间上限。
+  max_iteration_time3: 0.003         # 预留的第 3 档时间上限；当前规划流程未选择该档。
+  max_iteration_time4: 0.003         # 预留的第 4 档时间上限；当前规划流程未选择该档。
+  order: 3                           # B-spline 阶数；当前算法和 adapter 均要求三次，必须保持 3。
+
+# Fast 原生接口与公共 Planner API、传感器和 RViz 之间的适配。
+adapter:
+  inject_virtual_floor: true         # 是否仅向 Fast 私有规划点云注入虚拟地面；公共 RViz 地图不显示它。
+  virtual_floor_height: 0.0          # 虚拟地面在 world 中的绝对 z 高度。
+  odom_timeout: 0.5                  # 超过该时间未收到有效里程计即令 odom_ready=false。
+  cloud_timeout: 1.0                 # 超过该时间未收到有效注册点云即令 map_ready=false。
+  self_filter_enabled: true          # 是否从送入 Fast 的点云中剔除机体/旋翼自身回波。
+  self_filter_radius: 0.35           # 自滤波圆柱在 base_link 水平面的半径。
+  self_filter_min_z: -0.20           # 自滤波圆柱相对机体原点的 z 下界。
+  self_filter_max_z: 0.20            # 自滤波圆柱相对机体原点的 z 上界。
+  self_filter_pose_tolerance: 0.10   # 点云与匹配里程计允许的最大时间差；超出则不冒险自滤波。
+  hide_observed_ground_plane: true   # 是否只在公共 RViz 点云中隐藏检测到的真实地面；不改规划输入。
+  ground_plane_distance_tolerance: 0.03  # RANSAC 平面内点到地面的最大距离。
+  ground_plane_max_tilt_deg: 15.0    # 允许地面法向偏离 world 竖直方向的最大角度。
+  ground_plane_min_points: 200       # 被识别为地面前要求的最少平面内点数。
+  ground_plane_min_xy_span: 2.0      # 地面内点在 x/y 两方向要求的最小覆盖跨度，抑制误删小物体。
+  ground_plane_ransac_iterations: 96 # RANSAC 随机平面拟合的最大迭代次数。
+  heartbeat_timeout: 0.25            # 超过该时间未收到 Fast FSM 心跳即判定原生节点失联。
+  progress_timeout: 0.25             # ACTIVE 时轨迹执行时间长期不前进超过该值即判定卡住。
+  planning_timeout: 10.0             # 新目标在该时间内没有产生首条有效 B-spline 即报告故障。
+  map_settle_time: 0.1               # 首次收到有效地图后等待该时间再报告 READY。
+  command_rate: 100.0                # 公共 PlannerCommand 的目标发布频率。
+  status_rate: 20.0                  # 公共 PlannerStatus 的发布频率。
+  goal_position_tolerance: 0.35      # adapter 判定实测位置到达目标的最大位置误差。
+  reached_velocity_tolerance: 0.2    # 到达目标时允许的实测速度幅值。
+  reached_yaw_tolerance_deg: 5.0     # 目标约束 yaw 时允许的实测航向误差。
+  reached_yaw_rate_tolerance_deg_s: 10.0  # 到达目标时允许的实测 yaw 角速度。
+  reached_hold_time: 0.5             # 上述到达条件必须连续满足的时间。
