@@ -51,6 +51,58 @@ class ShellSafetyContractsTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("Only one vehicle is supported", completed.stdout)
 
+    def test_runtime_container_defaults_are_planner_neutral(self):
+        simulation_launchers = (
+            "launch/sim.sh",
+            "launch/sim_container.sh",
+            "launch/outdoor_bag_sim.sh",
+        )
+        real_launchers = (
+            "launch/real.sh",
+            "launch/real_container.sh",
+            "launch/real_bag.sh",
+        )
+        for relative_path in simulation_launchers:
+            with self.subTest(launcher=relative_path):
+                source = self.read(relative_path)
+                self.assertIn(
+                    "SIM_DEV_CONTAINER:-uav_autonomy_sim", source
+                )
+        for relative_path in real_launchers:
+            with self.subTest(launcher=relative_path):
+                source = self.read(relative_path)
+                self.assertIn("CONTAINER_NAME:-uav_autonomy_real", source)
+
+        self.assertIn(
+            "SIM_DEV_IMAGE:-uav_autonomy_sim:noetic",
+            self.read("launch/sim_container.sh"),
+        )
+        self.assertIn(
+            "IMAGE_NAME:-uav_autonomy_real:latest",
+            self.read("launch/real_container.sh"),
+        )
+
+        sim_source = self.read("launch/sim.sh")
+        self.assertIn("select_owned_session_container", sim_source)
+        self.assertIn('export SIM_DEV_CONTAINER="$marker_container"', sim_source)
+        self.assertIn(
+            "belongs to container '$marker_container'", sim_source
+        )
+
+    def test_container_probes_cannot_resolve_same_named_images(self):
+        launchers = (
+            "launch/sim.sh",
+            "launch/sim_container.sh",
+            "launch/real.sh",
+            "launch/real_container.sh",
+            "launch/real_bag.sh",
+        )
+        for relative_path in launchers:
+            with self.subTest(launcher=relative_path):
+                source = self.read(relative_path)
+                self.assertNotIn("docker inspect", source)
+                self.assertIn("docker container inspect", source)
+
     def test_sim_and_real_require_explicit_planner_for_start(self):
         cases = (
             ("launch/sim.sh", "SIM_PLANNER"),
@@ -111,6 +163,47 @@ class ShellSafetyContractsTest(unittest.TestCase):
         self.assertIn(
             '"$PLANNER_ID" "$PLANNER_PROFILE" "$SCENE"', sim
         )
+
+    def test_sim_mission_uses_the_same_takeoff_altitude_source_as_arm(self):
+        sim = self.read("launch/sim.sh")
+        self.assertEqual(
+            sim.count(
+                "--takeoff-altitude-field '$TAKEOFF_ALTITUDE_FIELD'"
+            ),
+            2,
+        )
+
+    def test_selected_plugin_controls_its_declarative_controller_overlay(self):
+        sim = self.read("launch/sim.sh")
+        real = self.read("launch/real.sh")
+        controller_launch = self.read("common/launch/controller.launch")
+        for source in (sim, real):
+            self.assertIn(
+                "--field controller_config_relative", source
+            )
+            self.assertIn(
+                "planner_config:=$PLANNER_CONTROLLER_CONFIG", source
+            )
+            self.assertNotIn(
+                'if [ "$PLANNER_ID" = "super" ]', source
+            )
+        self.assertIn(
+            '<rosparam command="load" file="$(arg planner_config)"/>',
+            controller_launch,
+        )
+
+    def test_full_planner_config_override_is_plugin_neutral(self):
+        sim = self.read("launch/sim.sh")
+        real = self.read("launch/real.sh")
+        for source in (sim, real):
+            self.assertIn("SIM2REAL_PLANNER_CONFIG", source)
+            self.assertNotIn("SIM2REAL_DIFF_PLANNER_CONFIG", source)
+        self.assertIn('PLANNER_CONFIG="${SIM_PLANNER_CONFIG:-}"', sim)
+        self.assertIn('PLANNER_CONFIG="${PLANNER_CONFIG:-}"', real)
+        self.assertNotIn('if [ "$PLANNER_ID" = "diff" ]', real)
+        self.assertNotIn("START_DIFF_PLANNER", real)
+        self.assertNotIn("PLANNER_RESOLUTION", real)
+        self.assertNotIn("PLANNER_OBSTACLES_INFLATION", real)
 
     def test_sim_rejects_invalid_start_boolean_and_recorder_ownership_override(self):
         launcher = os.path.join(PROJECT_ROOT, "launch", "sim.sh")
@@ -348,7 +441,7 @@ class ShellSafetyContractsTest(unittest.TestCase):
                 stream.write("session=session_a\ntoken=token_a\n")
             with open(master_marker, "w", encoding="utf-8") as stream:
                 stream.write(
-                    "container=diff_planner_px4_real\n"
+                    "container=uav_autonomy_real\n"
                     "session=session_a\n"
                     "token=token_a\n"
                 )

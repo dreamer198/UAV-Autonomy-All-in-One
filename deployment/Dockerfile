@@ -1,7 +1,7 @@
 FROM ros:noetic-ros-base-focal
 
 LABEL org.opencontainers.image.title="UAV Autonomy All-in-One real-flight runtime" \
-      io.sim2real.planner-workspaces="v1"
+      io.sim2real.planner-workspaces="v2"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     ROS_DISTRO=noetic \
@@ -24,6 +24,7 @@ RUN sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" /et
     iputils-ping \
     libapr1-dev \
     libarmadillo-dev \
+    libdw-dev \
     libeigen3-dev \
     libgflags-dev \
     libgoogle-glog-dev \
@@ -31,6 +32,7 @@ RUN sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" /et
     libnlopt-dev="${NLOPT_DEBIAN_VERSION}" \
     libopencv-dev \
     libpcl-dev \
+    libyaml-cpp-dev \
     net-tools \
     nano \
     pcl-tools \
@@ -40,11 +42,14 @@ RUN sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" /et
     python3-pip \
     python3-rosdep \
     python3-yaml \
+    rsync \
     ros-noetic-cv-bridge \
     ros-noetic-ddynamic-reconfigure \
+    ros-noetic-dynamic-reconfigure \
     ros-noetic-eigen-conversions \
     ros-noetic-mavros \
     ros-noetic-mavros-extras \
+    ros-noetic-message-filters \
     ros-noetic-pcl-ros \
     ros-noetic-roslint \
     ros-noetic-rviz \
@@ -52,6 +57,7 @@ RUN sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" /et
     ros-noetic-tf2-geometry-msgs \
     ros-noetic-tf2-ros \
     ros-noetic-tf2-sensor-msgs \
+    ros-noetic-visualization-msgs \
     usbutils \
     vim \
     wget \
@@ -77,6 +83,7 @@ COPY third_party/livox_ros_driver2 /root/livox_ws/src/livox_ros_driver2
 COPY third_party/FAST_LIO /root/localization_ws/src/FAST_LIO
 COPY third_party/Diff-Planner-PX4 /opt/uav-autonomy-aio/third_party/Diff-Planner-PX4
 COPY third_party/Fast-Planner /opt/uav-autonomy-aio/third_party/Fast-Planner
+COPY third_party/SUPER /opt/uav-autonomy-aio/third_party/SUPER
 COPY common /opt/uav-autonomy-aio/common
 COPY simulation/ros_pkgs /opt/uav-autonomy-aio/simulation/ros_pkgs
 COPY deployment/ros_pkgs /opt/uav-autonomy-aio/deployment/ros_pkgs
@@ -118,7 +125,7 @@ RUN source /opt/ros/noetic/setup.bash \
  && catkin config --extend /root/livox_ws/devel --cmake-args -DCMAKE_BUILD_TYPE=Release \
  && catkin build
 
-# Build public/control, Diff, and Fast in independent catkin domains. Only the
+# Build public/control, Diff, Fast, and SUPER in independent catkin domains. Only the
 # interface and control setup files are sourced by /root/.bashrc at runtime.
 RUN /opt/uav-autonomy-aio/planning/scripts/build_planner_workspaces.sh \
       --project-root /opt/uav-autonomy-aio \

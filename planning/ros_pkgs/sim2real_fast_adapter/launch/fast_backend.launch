@@ -5,7 +5,8 @@
   <arg name="profile" default="local"/>
   <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
   <arg name="scene" default="room"/>
-  <arg name="config" default="$(find sim2real_fast_adapter)/config/planner.yaml"/>
+  <arg name="config"
+       default="$(eval optenv('SIM2REAL_PLANNER_CONFIG', '') or find('sim2real_fast_adapter') + '/config/planner.yaml')"/>
   <arg name="forest_scene_config"
        default="$(find sim2real_fast_adapter)/config/scenes/forest.yaml"/>
   <arg name="odom_topic" default="/localization/odom"/>

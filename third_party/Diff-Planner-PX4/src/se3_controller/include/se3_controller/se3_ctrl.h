@@ -46,6 +46,7 @@ private:
     bool sim_enable_, auto_request_offboard_{false}, auto_request_arm_{false}, auto_land_on_geofence_{false};
     bool enable_thrust_estimation_{false};
     bool use_acceleration_feedforward_{true}, use_yaw_rate_feedforward_{true};
+    bool align_attitude_with_imu_{true};
     bool has_odom_{false}, has_imu_{false}, has_state_{false};
     bool has_trajectory_after_offboard_{false};
     bool land_mode_request_accepted_{false};

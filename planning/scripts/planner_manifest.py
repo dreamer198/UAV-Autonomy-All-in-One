@@ -25,6 +25,7 @@ ROOT_FIELDS = {
     "variant",
     "adapter_node",
     "workspace_setup",
+    "controller_config",
     "launch",
     "default_profile",
     "profiles",
@@ -177,6 +178,21 @@ def _load_manifest(path, project_root):
             f"{path}: workspace_setup must target planning/workspaces/*_ws/devel/setup.bash"
         )
 
+    controller_config = data["controller_config"]
+    if not isinstance(controller_config, str) or not controller_config:
+        raise ManifestError(
+            f"{path}: controller_config must be a non-empty string"
+        )
+    controller_path = Path(controller_config)
+    if (
+        controller_path.is_absolute()
+        or ".." in controller_path.parts
+        or controller_path.suffix not in (".yaml", ".yml")
+    ):
+        raise ManifestError(
+            f"{path}: controller_config must be a safe relative YAML path"
+        )
+
     for nested_name, fields in NESTED_FIELDS.items():
         nested = _expect_mapping(data[nested_name], f"{path}: {nested_name}")
         _expect_exact_fields(nested, fields, f"{path}: {nested_name}")
@@ -226,6 +242,18 @@ def _load_manifest(path, project_root):
     setup_candidate = (setup_root / setup_path).absolute()
     data["_setup"] = str(setup_candidate)
     data["_container_setup"] = setup if builtin else str(setup_candidate)
+    controller_root = project_root if builtin else path.parent
+    controller_candidate = (controller_root / controller_path).absolute()
+    try:
+        controller_candidate.resolve().relative_to(controller_root.resolve())
+    except ValueError as exc:
+        raise ManifestError(
+            f"{path}: controller_config escapes the plugin root"
+        ) from exc
+    data["_controller_config"] = str(controller_candidate)
+    data["_container_controller_config"] = (
+        controller_config if builtin else str(controller_candidate)
+    )
     return data
 
 
@@ -304,6 +332,8 @@ def main():
             "profile",
             "workspace_setup",
             "workspace_setup_relative",
+            "controller_config",
+            "controller_config_relative",
             "ros_namespace",
             "launch_package",
             "launch_file",
@@ -359,6 +389,10 @@ def main():
                 "profile": manifest["selected_profile"],
                 "workspace_setup": manifest["_setup"],
                 "workspace_setup_relative": manifest["_container_setup"],
+                "controller_config": manifest["_controller_config"],
+                "controller_config_relative": manifest[
+                    "_container_controller_config"
+                ],
                 "ros_namespace": manifest["ros_namespace"],
                 "launch_package": manifest["launch"]["package"],
                 "launch_file": manifest["launch"]["file"],

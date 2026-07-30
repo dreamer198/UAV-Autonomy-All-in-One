@@ -5,6 +5,7 @@ display_name: Fast Planner Topological
 variant: topological
 adapter_node: adapter
 workspace_setup: planning/workspaces/fast_ws/devel/setup.bash
+controller_config: common/config/controller_plugin_default.yaml
 launch:
   package: sim2real_fast_adapter
   file: fast_backend.launch

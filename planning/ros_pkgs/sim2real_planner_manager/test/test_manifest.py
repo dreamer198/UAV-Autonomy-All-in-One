@@ -10,6 +10,7 @@ from sim2real_planner_manager.manifest import (
     API_VERSION,
     ManifestError,
     RuntimePaths,
+    clean_runtime_environment,
     discover_plugins,
     load_manifest,
 )
@@ -27,10 +28,15 @@ class ManifestTest(unittest.TestCase):
     def test_builtin_plugins_are_strictly_discovered(self):
         plugins = discover_plugins(builtin_root=PLUGIN_ROOT, plugin_path="")
         self.assertEqual(
-            list(plugins), ["diff", "fast-kino", "fast-topo"]
+            list(plugins), ["diff", "fast-kino", "fast-topo", "super"]
         )
         self.assertEqual(plugins["diff"].api_version, API_VERSION)
         self.assertEqual(plugins["fast-kino"].ros_namespace, "fast_kino")
+        self.assertEqual(plugins["super"].ros_namespace, "super")
+        self.assertEqual(
+            plugins["diff"].controller_config,
+            "common/config/controller_plugin_default.yaml",
+        )
 
     def test_single_fast_profile_and_identity_are_resolved_deterministically(self):
         plugin = discover_plugins(
@@ -58,6 +64,43 @@ class ManifestTest(unittest.TestCase):
         with self.assertRaises(ManifestError):
             merged_launch_arguments(plugin, overrides={"undeclared": "x"})
 
+    def test_super_is_an_isolated_equal_plugin(self):
+        plugin = discover_plugins(
+            builtin_root=PLUGIN_ROOT, plugin_path=""
+        )["super"]
+        arguments = merged_launch_arguments(
+            plugin,
+            profile=None,
+            overrides={
+                "backend_id": "malicious",
+                "backend_namespace": "malicious",
+                "scene": "forest",
+            },
+        )
+        self.assertEqual(
+            plugin.workspace_setup,
+            "planning/workspaces/super_ws/devel/setup.bash",
+        )
+        self.assertEqual(plugin.launch.package, "sim2real_super_adapter")
+        self.assertEqual(plugin.launch.file, "super_backend.launch")
+        self.assertEqual(
+            plugin.controller_config,
+            "planning/plugins/super/controller.yaml",
+        )
+        self.assertEqual(plugin.profiles, ("local",))
+        self.assertEqual(arguments["backend_id"], "super")
+        self.assertEqual(arguments["backend_namespace"], "super")
+        self.assertEqual(arguments["profile"], "local")
+        self.assertEqual(arguments["scene"], "forest")
+        self.assertNotIn("runtime_mode", arguments)
+        self.assertEqual(plugin.timeouts.startup_sec, 30.0)
+        self.assertEqual(plugin.timeouts.command_sec, 0.08)
+        self.assertEqual(plugin.rates.status_min_hz, 5.0)
+        self.assertEqual(plugin.rates.command_min_hz, 80.0)
+        self.assertTrue(all(plugin.capabilities.__dict__.values()))
+        with self.assertRaises(ManifestError):
+            merged_launch_arguments(plugin, profile="fast")
+
     def test_runtime_mode_validation_and_simulation_capability(self):
         plugins = discover_plugins(
             builtin_root=PLUGIN_ROOT, plugin_path=""
@@ -66,6 +109,8 @@ class ManifestTest(unittest.TestCase):
         self.assertTrue(plugins["fast-kino"].supports_runtime("simulation"))
         self.assertTrue(plugins["fast-kino"].supports_runtime("real"))
         self.assertTrue(plugins["fast-topo"].supports_runtime("real"))
+        self.assertTrue(plugins["super"].supports_runtime("simulation"))
+        self.assertTrue(plugins["super"].supports_runtime("real"))
         with self.assertRaises(ManifestError):
             plugins["diff"].supports_runtime("invalid")
 
@@ -93,6 +138,21 @@ class ManifestTest(unittest.TestCase):
             with self.assertRaisesRegex(ManifestError, "ROS graph token"):
                 load_manifest(path)
 
+    def test_unsafe_controller_config_is_rejected(self):
+        source = (PLUGIN_ROOT / "diff" / "planner.plugin.yaml").read_text()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "planner.plugin.yaml"
+            path.write_text(
+                source.replace(
+                    "controller_config: common/config/controller_plugin_default.yaml",
+                    "controller_config: ../../outside.yaml",
+                )
+            )
+            with self.assertRaisesRegex(
+                ManifestError, "repository-relative YAML path"
+            ):
+                load_manifest(path)
+
     def test_duplicate_id_from_external_path_is_rejected(self):
         source = (PLUGIN_ROOT / "diff" / "planner.plugin.yaml").read_text()
         with tempfile.TemporaryDirectory() as directory:
@@ -111,7 +171,25 @@ class ManifestTest(unittest.TestCase):
             clear=False,
         ):
             plugins = discover_plugins(builtin_root=PLUGIN_ROOT)
-        self.assertEqual(set(plugins), {"diff", "fast-kino", "fast-topo"})
+        self.assertEqual(
+            set(plugins), {"diff", "fast-kino", "fast-topo", "super"}
+        )
+
+    def test_runtime_config_environment_is_planner_neutral(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SIM2REAL_PLANNER_CONFIG": "/root/tmp/planner.yaml",
+                "SIM2REAL_DIFF_PLANNER_CONFIG": "/root/tmp/legacy.yaml",
+                "UNRELATED_SECRET": "must-not-leak",
+            },
+            clear=True,
+        ):
+            environment = clean_runtime_environment()
+        self.assertEqual(
+            environment,
+            {"SIM2REAL_PLANNER_CONFIG": "/root/tmp/planner.yaml"},
+        )
 
     def test_runtime_validation_fails_before_workspace_build(self):
         plugin = discover_plugins(
@@ -153,11 +231,17 @@ class ManifestTest(unittest.TestCase):
             "planning/workspaces/diff_ws/devel/setup.bash",
             "workspace/devel/setup.bash",
         )
+        source = source.replace(
+            "common/config/controller_plugin_default.yaml",
+            "controller.yaml",
+        )
         with tempfile.TemporaryDirectory() as directory:
             plugin_dir = Path(directory) / "external"
             setup = plugin_dir / "workspace" / "devel" / "setup.bash"
             setup.parent.mkdir(parents=True)
             setup.write_text("# test setup\n")
+            controller_config = plugin_dir / "controller.yaml"
+            controller_config.write_text("{}\n")
             manifest_path = plugin_dir / "planner.plugin.yaml"
             manifest_path.write_text(source)
             manifest = load_manifest(manifest_path)
@@ -165,6 +249,9 @@ class ManifestTest(unittest.TestCase):
                 repository_root=REPOSITORY_ROOT, check_launch=False
             )
             self.assertEqual(runtime.workspace_setup, setup.absolute())
+            self.assertEqual(
+                runtime.controller_config, controller_config.absolute()
+            )
 
 
 if __name__ == "__main__":

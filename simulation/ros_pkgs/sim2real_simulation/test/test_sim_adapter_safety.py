@@ -151,6 +151,21 @@ class SimulationAdapterSafetyTest(unittest.TestCase):
         self.assertIn("time.sleep(min(0.02, remaining))", source)
         self.assertNotIn("rospy.sleep(min(0.02, remaining))", source)
 
+    def test_active_goal_remains_visible_while_planner_is_holding(self):
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "scripts",
+            "flight_visualization.py",
+        )
+        with open(path, "r", encoding="utf-8") as stream:
+            source = stream.read()
+        visible_states = source[
+            source.index("visible_states = (") :
+            source.index("goal = msg.active_goal")
+        ]
+        self.assertIn("PlannerStatus.HOLDING", visible_states)
+
 
 if __name__ == "__main__":
     unittest.main()

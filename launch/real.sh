@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-CONTAINER_NAME="${CONTAINER_NAME:-diff_planner_px4_real}"
+CONTAINER_NAME="${CONTAINER_NAME:-uav_autonomy_real}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLANNER_ID="${REAL_PLANNER:-}"
@@ -10,6 +10,8 @@ PLANNING_PROJECT_ROOT="${REAL_PROJECT_ROOT_CONTAINER:-/opt/uav-autonomy-aio}"
 PLANNER_MANIFEST_ROOT="$PLANNING_PROJECT_ROOT/planning/plugins"
 PLANNER_MANIFEST_TOOL_HOST="$PROJECT_ROOT/planning/scripts/planner_manifest.py"
 PLANNER_WORKSPACE_SETUP_REL=""
+PLANNER_CONTROLLER_CONFIG_REL=""
+PLANNER_CONTROLLER_CONFIG=""
 PROJECT_SLUG="${PROJECT_SLUG:-uav-autonomy-aio}"
 SESSION_NAME="${SESSION_NAME:-real_px4_stack}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
@@ -36,12 +38,10 @@ REQUESTED_DRONE_ID="${DRONE_ID:-0}"
 # This deployment is deliberately single-vehicle. Every internal topic and
 # launch argument is pinned to drone_0.
 DRONE_ID=0
-START_PLANNER="${START_PLANNER:-${START_DIFF_PLANNER:-true}}"
+START_PLANNER="${START_PLANNER:-true}"
 TRAJ_CONVERTER_OUTPUT_TOPIC="${TRAJ_CONVERTER_OUTPUT_TOPIC:-/command/trajectory}"
 START_SE3_CONTROLLER="${START_SE3_CONTROLLER:-$START_PLANNER}"
 PLANNER_CONFIG="${PLANNER_CONFIG:-}"
-PLANNER_RESOLUTION="${PLANNER_RESOLUTION:-}"
-PLANNER_OBSTACLES_INFLATION="${PLANNER_OBSTACLES_INFLATION:-}"
 CONTROLLER_CONFIG="${CONTROLLER_CONFIG:-/root/deployment/controller.yaml}"
 SE3_NODE_NAME="${SE3_NODE_NAME:-/se3_controller_node}"
 MAVROS_ATTITUDE_TOPIC="${MAVROS_ATTITUDE_TOPIC:-/mavros/setpoint_raw/attitude}"
@@ -82,7 +82,7 @@ ROS_MASTER_URI="${ROS_MASTER_URI:-http://127.0.0.1:11311}"
 ROS_IP="${ROS_IP:-}"
 HOST_LOG_DIR="${HOST_LOG_DIR:-$HOME/${PROJECT_SLUG}_logs/$RUN_ID}"
 CONTAINER_ROS_LOG_DIR="${CONTAINER_ROS_LOG_DIR:-/root/flight_bags/ros_logs/$RUN_ID}"
-PROCESS_GREP_PATTERN="roscore|rosmaster|roslaunch livox_ros_driver2|livox_ros_driver2_node|roslaunch fast_lio mapping_mid360.launch|fastlio_mapping|roslaunch mavros px4.launch|mavros_node|roslaunch sim2real_common|roslaunch sim2real_planner_manager|roslaunch sim2real_deployment frame_aliases.launch|static_transform_publisher.*real_world_|planner_backend_runner.py|planner_manager.py|planner_gateway.py|planner_visualization.py|command_gateway.py|diff_backend_adapter.py|fast_backend_adapter|sim2real_diff_adapter|sim2real_fast_adapter|fast_planner_node|traj_server|diff_planner_node|plan_manage|se3_controller_node|localization_guard.py|odom_to_base.py|odom_to_pose.py|cloud_relay.py"
+PROCESS_GREP_PATTERN="roscore|rosmaster|roslaunch livox_ros_driver2|livox_ros_driver2_node|roslaunch fast_lio mapping_mid360.launch|fastlio_mapping|roslaunch mavros px4.launch|mavros_node|roslaunch sim2real_common|roslaunch sim2real_planner_manager|roslaunch sim2real_deployment frame_aliases.launch|static_transform_publisher.*real_world_|planner_backend_runner.py|planner_manager.py|planner_gateway.py|planner_visualization.py|command_gateway.py|diff_backend_adapter.py|fast_backend_adapter|super_backend_adapter_node|sim2real_diff_adapter|sim2real_fast_adapter|sim2real_super_adapter|super_planner/fsm_node|fast_planner_node|traj_server|diff_planner_node|plan_manage|se3_controller_node|localization_guard.py|odom_to_base.py|odom_to_pose.py|cloud_relay.py"
 LIFECYCLE_LOCK_DIR="/tmp/uav-autonomy-aio-${UID}"
 START_LOCK="$LIFECYCLE_LOCK_DIR/real.lifecycle.lock"
 START_LOCK_FD=""
@@ -96,7 +96,8 @@ Planner selection:
   start and restart require --planner ID or REAL_PLANNER.
 
 Default assumptions for UAV Autonomy All-in-One:
-  - compatibility container name: diff_planner_px4_real
+  - default runtime container: uav_autonomy_real
+    Override it with CONTAINER_NAME when reusing an existing container.
   - container was created by launch/real_container.sh
 
 Flight commands:
@@ -167,6 +168,13 @@ resolve_selected_planner() {
   }
   PLANNER_WORKSPACE_SETUP_REL="$(python3 "${args[@]}" --field workspace_setup_relative)" ||
     return 1
+  PLANNER_CONTROLLER_CONFIG_REL="$(
+    python3 "${args[@]}" --field controller_config_relative
+  )" || return 1
+  PLANNER_CONTROLLER_CONFIG="$PLANNER_CONTROLLER_CONFIG_REL"
+  if [[ "$PLANNER_CONTROLLER_CONFIG" != /* ]]; then
+    PLANNER_CONTROLLER_CONFIG="$PLANNING_PROJECT_ROOT/$PLANNER_CONTROLLER_CONFIG"
+  fi
 }
 
 require_bool() {
@@ -333,11 +341,11 @@ tmux_has_window() {
 }
 
 docker_container_exists() {
-  docker inspect "$CONTAINER_NAME" >/dev/null 2>&1
+  docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1
 }
 
 docker_container_running() {
-  [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" = "true" ]
+  [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" = "true" ]
 }
 
 ensure_container_exists() {
@@ -367,7 +375,7 @@ docker_exec_shell() {
 
 docker_tmux_cmd() {
   local inner_cmd="$1"
-  printf "docker exec -it -e ROS_MASTER_URI=%q -e ROS_IP=%q -e ROS_LOG_DIR=%q -e SIM2REAL_DIFF_PLANNER_CONFIG=%q %q bash -lc %q" \
+  printf "docker exec -it -e ROS_MASTER_URI=%q -e ROS_IP=%q -e ROS_LOG_DIR=%q -e SIM2REAL_PLANNER_CONFIG=%q %q bash -lc %q" \
     "$ROS_MASTER_URI" \
     "$ROS_IP" \
     "$CONTAINER_ROS_LOG_DIR" \
@@ -621,6 +629,7 @@ cleanup_container_processes() {
       "traj_server" \
       "diff_planner_node" \
       "fast_planner_node" \
+      "super_planner/fsm_node" \
       "planner_backend_runner.py" \
       "planner_manager.py" \
       "planner_gateway.py" \
@@ -628,8 +637,10 @@ cleanup_container_processes() {
       "command_gateway.py" \
       "sim2real_diff_adapter" \
       "sim2real_fast_adapter" \
+      "sim2real_super_adapter" \
       "diff_backend_adapter.py" \
       "fast_backend_adapter" \
+      "super_backend_adapter_node" \
       "se3_controller_node" \
       "localization_guard.py" \
       "odom_to_base.py" \
@@ -651,6 +662,7 @@ cleanup_container_processes() {
       "plan_manage" \
       "diff_planner_node" \
       "fast_planner_node" \
+      "super_planner/fsm_node" \
       "planner_backend_runner.py" \
       "planner_manager.py" \
       "planner_gateway.py" \
@@ -658,8 +670,10 @@ cleanup_container_processes() {
       "command_gateway.py" \
       "sim2real_diff_adapter" \
       "sim2real_fast_adapter" \
+      "sim2real_super_adapter" \
       "diff_backend_adapter.py" \
       "fast_backend_adapter" \
+      "super_backend_adapter_node" \
       "se3_controller_node" \
       "localization_guard.py" \
       "odom_to_base.py" \
@@ -688,6 +702,7 @@ cleanup_container_processes() {
       "plan_manage" \
       "diff_planner_node" \
       "fast_planner_node" \
+      "super_planner/fsm_node" \
       "planner_backend_runner.py" \
       "planner_manager.py" \
       "planner_gateway.py" \
@@ -695,8 +710,10 @@ cleanup_container_processes() {
       "command_gateway.py" \
       "sim2real_diff_adapter" \
       "sim2real_fast_adapter" \
+      "sim2real_super_adapter" \
       "diff_backend_adapter.py" \
       "fast_backend_adapter" \
+      "super_backend_adapter_node" \
       "se3_controller_node" \
       "localization_guard.py" \
       "odom_to_base.py" \
@@ -791,68 +808,6 @@ validate_takeoff_settings() {
     echo "[ERROR] Real takeoff height, preflight timeout, stable time and max vertical speed must be finite and positive; tolerance must be strictly between zero and the takeoff height." >&2
     return 1
   fi
-}
-
-prepare_runtime_planner_config() {
-  if [ -z "$PLANNER_RESOLUTION" ] && [ -z "$PLANNER_OBSTACLES_INFLATION" ]; then
-    return
-  fi
-  if [ -n "$PLANNER_CONFIG" ]; then
-    echo "[ERROR] PLANNER_CONFIG cannot be combined with PLANNER_RESOLUTION or PLANNER_OBSTACLES_INFLATION." >&2
-    return 1
-  fi
-
-  local name value
-  for name in PLANNER_RESOLUTION PLANNER_OBSTACLES_INFLATION; do
-    value="${!name}"
-    if [ -n "$value" ] && ! python3 -c \
-      'import math,sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value > 0.0 else 1)' \
-      "$value" 2>/dev/null; then
-      echo "[ERROR] $name must be finite and positive." >&2
-      return 1
-    fi
-  done
-
-  local source_config="$PROJECT_ROOT/planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml"
-  local runtime_tmp_dir="$PROJECT_ROOT/runtime/tmp"
-  local generated_name="planner_runtime_${RUN_ID}.yaml"
-  local generated_host="$runtime_tmp_dir/$generated_name"
-  local generated_tmp="${generated_host}.tmp"
-  mkdir -p "$runtime_tmp_dir"
-
-  if ! awk \
-    -v resolution="$PLANNER_RESOLUTION" \
-    -v inflation="$PLANNER_OBSTACLES_INFLATION" '
-      resolution != "" && /^    resolution:[[:space:]]*/ {
-        print "    resolution: " resolution
-        resolution_replaced = 1
-        next
-      }
-      inflation != "" && /^    obstacles_inflation:[[:space:]]*/ {
-        print "    obstacles_inflation: " inflation
-        inflation_replaced = 1
-        next
-      }
-      { print }
-      END {
-        if (resolution != "" && !resolution_replaced) exit 10
-        if (inflation != "" && !inflation_replaced) exit 11
-      }
-    ' "$source_config" > "$generated_tmp"; then
-    rm -f "$generated_tmp"
-    echo "[ERROR] Unable to generate the runtime Planner configuration." >&2
-    return 1
-  fi
-  mv "$generated_tmp" "$generated_host"
-  PLANNER_CONFIG="/root/tmp/$generated_name"
-
-  local effective_resolution effective_inflation inflation_summary
-  effective_resolution="${PLANNER_RESOLUTION:-$(awk '/^    resolution:/ {print $2; exit}' "$source_config")}"
-  effective_inflation="${PLANNER_OBSTACLES_INFLATION:-$(awk '/^    obstacles_inflation:/ {print $2; exit}' "$source_config")}"
-  inflation_summary="$(python3 -c \
-    'import math,sys; r,i=map(float,sys.argv[1:]); layers=max(0,math.ceil((i-1e-5)/r)); print("{} layer(s), approximately {:.3f} m".format(layers,layers*r))' \
-    "$effective_resolution" "$effective_inflation")"
-  echo "[INFO] Runtime Planner map override: resolution=$effective_resolution m, obstacles_inflation=$effective_inflation m ($inflation_summary)."
 }
 
 vehicle_is_connected() {
@@ -1151,12 +1106,6 @@ start_stack() {
   ensure_prereqs
   acquire_start_lock
   validate_start_settings
-  if [ "$PLANNER_ID" = "diff" ]; then
-    prepare_runtime_planner_config
-  elif [ -n "$PLANNER_CONFIG$PLANNER_RESOLUTION$PLANNER_OBSTACLES_INFLATION" ]; then
-    echo "[ERROR] Diff map overrides are only valid with --planner diff." >&2
-    return 1
-  fi
   resolve_ros_ip
   ensure_container_running
   local container_setup="$PLANNER_WORKSPACE_SETUP_REL"
@@ -1166,6 +1115,12 @@ start_stack() {
   if ! docker exec -i "$CONTAINER_NAME" \
     test -f "$container_setup"; then
     echo "[ERROR] Selected planner workspace is missing in the image: $PLANNER_WORKSPACE_SETUP_REL" >&2
+    echo "[ERROR] Rebuild it with '$SCRIPT_DIR/real_container.sh build'." >&2
+    return 1
+  fi
+  if ! docker exec -i "$CONTAINER_NAME" \
+    test -f "$PLANNER_CONTROLLER_CONFIG"; then
+    echo "[ERROR] Selected planner controller config is missing in the image: $PLANNER_CONTROLLER_CONFIG_REL" >&2
     echo "[ERROR] Rebuild it with '$SCRIPT_DIR/real_container.sh build'." >&2
     return 1
   fi
@@ -1271,7 +1226,7 @@ start_stack() {
 
   if [ "$START_SE3_CONTROLLER" = "true" ]; then
     create_window "se3_controller" \
-      "source ~/.bashrc && roslaunch sim2real_common controller.launch vehicle_config:=$CONTROLLER_CONFIG"
+      "source ~/.bashrc && roslaunch sim2real_common controller.launch planner_config:=$PLANNER_CONTROLLER_CONFIG vehicle_config:=$CONTROLLER_CONFIG"
 
     wait_for_condition "SE3 controller" "rosnode list | grep -qx '$SE3_NODE_NAME' && rostopic list | grep -qx '$MAVROS_ATTITUDE_TOPIC'"
   else
@@ -1301,7 +1256,7 @@ start_stack() {
 
     wait_for_condition "rosbag recorder" "rosnode list | grep -qx '$ROSBAG_NODE_NAME'"
     echo "[INFO] Recording split bags with prefix (container) $ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}"
-    echo "[INFO] Rosbag retention cap: ${ROSBAG_MAX_SPLITS} x ${ROSBAG_SPLIT_SIZE_MB} MB (about $((ROSBAG_MAX_SPLITS * ROSBAG_SPLIT_SIZE_MB)) MB); oldest split files are removed automatically."
+    echo "[INFO] Rosbag rotation target: ${ROSBAG_MAX_SPLITS} x ${ROSBAG_SPLIT_SIZE_MB} MB; one extra split may be retained during rotation, so this is not a strict disk-space cap."
   else
     echo "[INFO] rosbag recording skipped because START_ROSBAG=false."
   fi

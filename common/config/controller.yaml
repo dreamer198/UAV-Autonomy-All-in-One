@@ -6,6 +6,9 @@ auto_land_on_geofence: false
 enable_thrust_estimation: false
 use_acceleration_feedforward: true
 use_yaw_rate_feedforward: true
+# Keep the legacy behavior unless a planner/vehicle overlay knows that odometry
+# and IMU attitudes come from the same estimator.
+align_attitude_with_imu: true
 max_feedforward_acc: 1.2
 
 # 同时检查回调接收时间；消息时间戳非零时也检查源时间。

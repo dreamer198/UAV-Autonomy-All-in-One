@@ -41,6 +41,7 @@
     <param name="manifest_root" value="$(arg manifest_root)"/>
     <param name="repository_root" value="$(arg repository_root)"/>
     <param name="goal_topic" value="$(arg goal_topic)"/>
+    <param name="odom_topic" value="$(arg odom_topic)"/>
     <param name="mavros_state_topic" value="$(arg mavros_state_topic)"/>
     <param name="output_topic" value="$(arg output_topic)"/>
     <param name="require_offboard" value="$(arg require_offboard)"/>

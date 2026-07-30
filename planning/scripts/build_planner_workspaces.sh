@@ -10,13 +10,13 @@ BASE_UNDERLAY="${SIM2REAL_BASE_UNDERLAY:-/opt/ros/noetic}"
 FLAVOR="${SIM2REAL_PLATFORM_FLAVOR:-none}"
 BUILD_JOBS="${SIM2REAL_BUILD_JOBS:-4}"
 RUN_TESTS=false
-SELECTED_WORKSPACES="interfaces,control,diff,fast"
+SELECTED_WORKSPACES="interfaces,control,diff,fast,super"
 
 usage() {
   cat <<'EOF'
 Usage: build_planner_workspaces.sh [OPTIONS]
 
-Build the four isolated ROS planner workspaces. Generated products live below
+Build the five isolated ROS planner workspaces. Generated products live below
 planning/workspaces and are intentionally not source files.
 
 Options:
@@ -25,7 +25,7 @@ Options:
   --underlay PATH           Base setup prefix or setup.bash
   --flavor NAME             simulation, deployment, or none
   --jobs N                  Parallel catkin jobs
-  --workspaces CSV          Subset of interfaces,control,diff,fast
+  --workspaces CSV          Subset of interfaces,control,diff,fast,super
   --test                    Run catkin tests after each selected build
   -h, --help                Show this help
 EOF
@@ -101,6 +101,33 @@ remove_managed_source_link() {
   fi
 }
 
+sync_managed_source_tree() {
+  local workspace="$1" name="$2" source_path="$3"
+  local destination="$workspace/src/$name"
+  local marker="$destination/.sim2real-managed-source"
+
+  [ -d "$source_path" ] || die "Required source tree is missing: $source_path"
+  command -v rsync >/dev/null 2>&1 || die "rsync is required to stage $name"
+  mkdir -p "$workspace/src"
+
+  if [ -L "$destination" ]; then
+    unlink "$destination"
+  elif [ -e "$destination" ] && [ ! -d "$destination" ]; then
+    die "Refusing to replace non-directory workspace entry: $destination"
+  fi
+  if [ -d "$destination" ] && [ ! -f "$marker" ] &&
+     [ -n "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    die "Refusing to overwrite unmanaged workspace source tree: $destination"
+  fi
+
+  mkdir -p "$destination"
+  touch "$marker"
+  rsync -a --delete \
+    --exclude /.sim2real-managed-source \
+    -- "$source_path/" "$destination/"
+  touch "$marker"
+}
+
 reset_relocated_build_cache() {
   local workspace="$1"
   local metadata="$workspace/build/.catkin_tools.yaml"
@@ -144,6 +171,7 @@ configure_sources() {
   local control_ws="$WORKSPACE_ROOT/control_ws"
   local diff_ws="$WORKSPACE_ROOT/diff_ws"
   local fast_ws="$WORKSPACE_ROOT/fast_ws"
+  local super_ws="$WORKSPACE_ROOT/super_ws"
   local ros_pkgs="$PROJECT_ROOT/planning/ros_pkgs"
 
   ensure_source_link "$interfaces_ws" sim2real_planning_msgs \
@@ -191,6 +219,14 @@ configure_sources() {
     "$PROJECT_ROOT/third_party/Fast-Planner"
   ensure_source_link "$fast_ws" sim2real_fast_adapter \
     "$ros_pkgs/sim2real_fast_adapter"
+
+  # SUPER writes logs below its source tree and uses workspace-relative
+  # generated-message includes. Stage the pinned, selected snapshot into this
+  # generated writable domain instead of mounting the tracked vendor tree.
+  sync_managed_source_tree "$super_ws" SUPER \
+    "$PROJECT_ROOT/third_party/SUPER"
+  ensure_source_link "$super_ws" sim2real_super_adapter \
+    "$ros_pkgs/sim2real_super_adapter"
 }
 
 build_workspace() {
@@ -244,6 +280,7 @@ verify_isolation() {
   local interfaces_setup="$WORKSPACE_ROOT/interfaces_ws/devel/setup.bash"
   local diff_setup="$WORKSPACE_ROOT/diff_ws/devel/setup.bash"
   local fast_setup="$WORKSPACE_ROOT/fast_ws/devel/setup.bash"
+  local super_setup="$WORKSPACE_ROOT/super_ws/devel/setup.bash"
 
   [ ! -f "$interfaces_setup" ] || (
     set +u
@@ -275,6 +312,48 @@ verify_isolation() {
       die "Fast workspace resolves plan_env outside Fast-Planner: $fast_plan_env"
     [ "$diff_plan_env" != "$fast_plan_env" ] ||
       die "Diff and Fast workspaces unexpectedly resolve the same plan_env"
+  fi
+
+  if [ -f "$diff_setup" ] && [ -f "$super_setup" ]; then
+    local diff_quadrotor_msgs super_quadrotor_msgs
+    local diff_position_command_md5 super_position_command_md5
+    diff_quadrotor_msgs="$(realpath -e "$(
+      set +u
+      # shellcheck disable=SC1090
+      source "$diff_setup"
+      set -u
+      rospack find quadrotor_msgs
+    )")"
+    super_quadrotor_msgs="$(realpath -e "$(
+      set +u
+      # shellcheck disable=SC1090
+      source "$super_setup"
+      set -u
+      rospack find quadrotor_msgs
+    )")"
+    [[ "$diff_quadrotor_msgs" == "$PROJECT_ROOT/third_party/Diff-Planner-PX4/"* ]] ||
+      die "Diff workspace resolves quadrotor_msgs outside Diff-Planner: $diff_quadrotor_msgs"
+    [[ "$super_quadrotor_msgs" == "$WORKSPACE_ROOT/super_ws/src/SUPER/mars_uav_sim/mars_quadrotor_msgs" ]] ||
+      die "SUPER workspace resolves quadrotor_msgs outside its staged snapshot: $super_quadrotor_msgs"
+    [ "$diff_quadrotor_msgs" != "$super_quadrotor_msgs" ] ||
+      die "Diff and SUPER unexpectedly resolve the same quadrotor_msgs package"
+
+    diff_position_command_md5="$(
+      set +u
+      # shellcheck disable=SC1090
+      source "$diff_setup"
+      set -u
+      rosmsg md5 quadrotor_msgs/PositionCommand
+    )"
+    super_position_command_md5="$(
+      set +u
+      # shellcheck disable=SC1090
+      source "$super_setup"
+      set -u
+      rosmsg md5 quadrotor_msgs/PositionCommand
+    )"
+    [ "$diff_position_command_md5" != "$super_position_command_md5" ] ||
+      die "Diff and SUPER PositionCommand schemas unexpectedly have the same MD5"
   fi
   info "Planner workspace isolation checks passed."
 }
@@ -339,12 +418,12 @@ source "$BASE_SETUP"
 set -u
 
 case ",$SELECTED_WORKSPACES," in
-  *,interfaces,*|*,control,*|*,diff,*|*,fast,*) ;;
+  *,interfaces,*|*,control,*|*,diff,*|*,fast,*|*,super,*) ;;
   *) die "--workspaces did not select a known workspace" ;;
 esac
 for requested in ${SELECTED_WORKSPACES//,/ }; do
   case "$requested" in
-    interfaces|control|diff|fast) ;;
+    interfaces|control|diff|fast|super) ;;
     *) die "Unknown workspace in --workspaces: $requested" ;;
   esac
 done
@@ -369,6 +448,9 @@ if selected diff; then
 fi
 if selected fast; then
   build_workspace fast "$WORKSPACE_ROOT/fast_ws" "$INTERFACES_SETUP"
+fi
+if selected super; then
+  build_workspace super "$WORKSPACE_ROOT/super_ws" "$INTERFACES_SETUP"
 fi
 
 verify_isolation

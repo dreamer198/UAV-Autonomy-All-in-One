@@ -154,6 +154,7 @@ class FlightVisualization:
         visible_states = (
             PlannerStatus.PLANNING,
             PlannerStatus.ACTIVE,
+            PlannerStatus.HOLDING,
             PlannerStatus.REACHED,
         )
         goal = msg.active_goal

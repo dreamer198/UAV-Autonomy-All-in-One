@@ -1,0 +1,82 @@
+<launch>
+  <arg name="backend_id" default="super"/>
+  <arg name="backend_namespace" default="super"/>
+  <arg name="profile" default="local"/>
+  <arg name="runtime_mode" default="$(optenv SIM2REAL_RUNTIME_MODE invalid)"/>
+  <!-- SUPER uses one rolling-map profile; scene remains common plugin context. -->
+  <arg name="scene" default="room"/>
+  <arg name="odom_topic" default="/localization/odom"/>
+  <arg name="cloud_topic" default="/localization/cloud_registered"/>
+  <arg name="config"
+       default="$(eval optenv('SIM2REAL_PLANNER_CONFIG', '') or find('sim2real_super_adapter') + '/config/planner.yaml')"/>
+
+  <param name="/planning/backends/$(arg backend_namespace)/selected_profile"
+         value="$(arg profile)"/>
+  <param name="/planning/backends/$(arg backend_namespace)/selected_scene"
+         value="$(arg scene)"/>
+
+  <group ns="/planning/backends/$(arg backend_namespace)">
+    <node pkg="super_planner" name="planner" type="fsm_node"
+          output="screen" required="true">
+      <param name="config_path" value="$(arg config)"/>
+
+      <remap from="rog_map/occ" to="/planning/viz/raw/occupancy"/>
+      <remap from="rog_map/inf_occ"
+             to="/planning/viz/raw/inflated_occupancy"/>
+      <remap from="rog_map/unk"
+             to="/planning/viz/backend/unknown"/>
+      <remap from="rog_map/inf_unk"
+             to="/planning/viz/backend/inflated_unknown"/>
+      <remap from="rog_map/frontier"
+             to="/planning/viz/backend/frontier"/>
+      <remap from="rog_map/esdf"
+             to="/planning/viz/backend/esdf"/>
+      <remap from="rog_map/esdf/neg"
+             to="/planning/viz/backend/esdf_negative"/>
+      <remap from="rog_map/esdf/occ"
+             to="/planning/viz/backend/esdf_occupied"/>
+      <remap from="rog_map/map_bound"
+             to="/planning/viz/backend/map_bounds"/>
+
+      <remap from="visualization/goal"
+             to="/planning/viz/backend/goal"/>
+      <remap from="visualization/exp_traj"
+             to="/planning/viz/backend/expected_trajectory"/>
+      <remap from="visualization/backup_traj"
+             to="/planning/viz/backend/backup_trajectory"/>
+      <remap from="visualization/committed_traj"
+             to="/planning/backends/$(arg backend_namespace)/native/committed_trajectory_viz"/>
+      <remap from="visualization/exp_sfc"
+             to="/planning/viz/backend/expected_corridor"/>
+      <remap from="visualization/backup_sfc"
+             to="/planning/viz/backend/backup_corridor"/>
+      <remap from="visualization/frontend_path"
+             to="/planning/viz/backend/frontend_path"/>
+      <remap from="visualization/yaw_traj"
+             to="/planning/viz/backend/yaw"/>
+      <remap from="visualization/astar_debug"
+             to="/planning/viz/backend/astar"/>
+      <remap from="visualization/ciri_debug_mkr"
+             to="/planning/viz/backend/ciri"/>
+      <remap from="visualization/ciri_debug_pc"
+             to="/planning/viz/backend/ciri_cloud"/>
+      <remap from="visualization/replan_log_mkr"
+             to="/planning/viz/backend/replan_log"/>
+      <remap from="visualization/replan_log_pc"
+             to="/planning/viz/backend/replan_log_cloud"/>
+      <remap from="fsm/path"
+             to="/planning/viz/backend/path"/>
+    </node>
+
+    <node pkg="sim2real_super_adapter" name="adapter"
+          type="super_backend_adapter_node" output="screen" required="true">
+      <rosparam command="load" file="$(arg config)"/>
+      <param name="backend_id" value="$(arg backend_id)"/>
+      <param name="backend_namespace" value="$(arg backend_namespace)"/>
+      <param name="profile" value="$(arg profile)"/>
+      <param name="runtime_mode" value="$(arg runtime_mode)"/>
+      <param name="odom_topic" value="$(arg odom_topic)"/>
+      <param name="cloud_topic" value="$(arg cloud_topic)"/>
+    </node>
+  </group>
+</launch>

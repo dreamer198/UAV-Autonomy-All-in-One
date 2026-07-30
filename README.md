@@ -1,11 +1,11 @@
 # UAV Autonomy All-in-One
 
-基于 ROS1 Noetic、PX4 和 Gazebo Classic 的无人机自主飞行框架，统一仿真与真机的
-定位、规划、任务和控制接口。规划器在启动时选择，当前支持：
+基于 ROS1 Noetic、PX4 和 Gazebo Classic 的无人机自主飞行框架，统一仿真与真机的定位、规划、任务和控制接口。规划器在启动时选择，当前支持：
 
 - `diff`：Diff-Planner；
 - `fast-kino`：Fast-Planner Kinodynamic；
-- `fast-topo`：Fast-Planner Topological。
+- `fast-topo`：Fast-Planner Topological；
+- `super`：SUPER Safety-assured local planner。
 
 ```text
 仿真：PX4 SITL + Gazebo + 模拟 MID-360
@@ -27,9 +27,13 @@ odom/cloud ───────────────────────
 
 以下 GIF 均为原录像的 4 倍速。
 
-| Diff-Planner | Fast Kino | Fast Topo |
-|---|---|---|
-| <img src="images/diff.gif" alt="Diff-Planner 仿真效果" width="320" height="140"> | <img src="images/fast-kino.gif" alt="Fast Kino 仿真效果" width="320" height="140"> | <img src="images/fast-topo.gif" alt="Fast Topo 仿真效果" width="320" height="140"> |
+| Diff-Planner | Fast Kino |
+|---|---|
+| <img src="images/diff.gif" alt="Diff-Planner 仿真效果" width="440" height="193"> | <img src="images/fast-kino.gif" alt="Fast Kino 仿真效果" width="440" height="193"> |
+
+| Fast Topo | SUPER |
+|---|---|
+| <img src="images/fast-topo.gif" alt="Fast Topo 仿真效果" width="440" height="193"> | <img src="images/super.gif" alt="SUPER 仿真效果" width="440" height="193"> |
 
 ## 环境
 
@@ -41,8 +45,8 @@ odom/cloud ───────────────────────
 `start` 和 `restart` 必须同时指定场景与规划器。内置场景为 `room`、`forest`。
 
 ```bash
-# 构建改动并启动 room + Diff；飞机保持未解锁
-./launch/sim.sh --scene room --planner diff start
+# 构建改动并启动 forest + Diff；飞机保持未解锁
+./launch/sim.sh --scene forest --planner diff start
 
 # PX4 原生起飞到相对 Home 1.5 m，稳定后进入 OFFBOARD
 SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
@@ -61,9 +65,11 @@ SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
 ```bash
 ./launch/sim.sh --scene forest --planner fast-kino restart
 ./launch/sim.sh --scene forest --planner fast-topo restart
+./launch/sim.sh --scene forest --planner super restart
 ```
 
-仿真栈运行时可执行 Mission；命令会在起飞前校验全部航点：
+仿真栈运行时可执行 Mission。起飞前会检查全部航点；rolling-map 规划器无法提前判断
+的远端局部地图范围只在此阶段暂缓，并在每个航点发布前重新验证：
 
 ```bash
 ./launch/sim.sh mission mission_indoor.json
@@ -74,46 +80,7 @@ SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
 
 ## 真机
 
-> 真机操作前必须完成定位、外参、控制参数、PX4 failsafe 和遥控接管验证。
-
-```bash
-# 构建镜像并创建容器
-./launch/real_container.sh build
-FCU_DEVICE=/dev/ttyACM0 ./launch/real_container.sh run
-
-# 按现场网络和 PX4 system ID 启动；不会解锁
-FCU_URL='/dev/ttyACM0:921600' \
-ROS_IP=172.20.10.5 \
-MAVROS_TGT_SYSTEM=5 \
-./launch/real.sh --planner diff start
-
-# 起飞、发送目标、降落
-REAL_TAKEOFF_HEIGHT=1.0 ./launch/real.sh arm
-./launch/real.sh goal 2.0 2.0 1.0
-./launch/real.sh land
-
-# 确认落地并解除武装后停止 ROS 栈
-./launch/real.sh stop
-```
-
-真机栈运行时可执行同一格式的 Mission：
-
-```bash
-./launch/real.sh mission MISSION_FILE.json
-```
-
-设备、网络、飞前检查和远程 RViz 见[真机部署指南](docs/deployment.md)。
-
-## 参数入口
-
-| 内容 | 文件 |
-|---|---|
-| Diff 规划、地图、yaw 与 adapter | [`planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml`](planning/ros_pkgs/sim2real_diff_adapter/config/planner.yaml) |
-| Fast Kino/Topo 共用参数 | [`planning/ros_pkgs/sim2real_fast_adapter/config/planner.yaml`](planning/ros_pkgs/sim2real_fast_adapter/config/planner.yaml) |
-| `forest` 的 Fast 地图覆盖 | [`planning/ros_pkgs/sim2real_fast_adapter/config/scenes/forest.yaml`](planning/ros_pkgs/sim2real_fast_adapter/config/scenes/forest.yaml) |
-| 公共 SE3 与超时 | [`common/config/controller.yaml`](common/config/controller.yaml) |
-| 仿真载体控制参数 | [`simulation/config/controller.yaml`](simulation/config/controller.yaml) |
-| 真机控制参数 | [`deployment/config/controller.yaml`](deployment/config/controller.yaml) |
+真机配置、部署、飞前检查与飞行操作统一见[真机部署指南](docs/deployment.md)。
 
 ## 目录
 
@@ -136,8 +103,8 @@ REAL_TAKEOFF_HEIGHT=1.0 ./launch/real.sh arm
 | 真机 rosbag 与容器 ROS 日志 | `runtime/flight_bags/` |
 | 真机宿主日志 | `~/uav-autonomy-aio_logs/<run-id>/` |
 
-每次运行的 rosbag 默认使用 LZ4、1 GiB 分卷，最多保留 10 个当前运行分卷；历史运行
-不会自动删除。
+每次运行的 rosbag 默认使用 LZ4、1 GiB 分卷，`--max-splits=10` 为轮换值；切分时
+可能多保留一个文件，因此不能把 10 GiB 当作严格空间上限。历史运行不会自动删除。
 
 ## 文档
 
@@ -146,7 +113,7 @@ REAL_TAKEOFF_HEIGHT=1.0 ./launch/real.sh arm
 | [仿真运行指南](docs/simulation.md) | 场景、飞行命令、RViz、日志和排错 |
 | [真机部署指南](docs/deployment.md) | Jetson、传感器、PX4 与飞行流程 |
 | [公共自主飞行接口](common/README.md) | 定位契约、公共话题和安全语义 |
-| [多规划器插件框架](planning/README.md) | 插件接口、隔离 workspace 和扩展方法 |
+| [多规划器插件框架](planning/README.md) | 规划器选择、调参、插件接口和扩展方法 |
 | [SE3 控制器](docs/se3_controller.md) | 控制原理、标定、调参与排障 |
 
 ## 致谢
@@ -155,6 +122,7 @@ REAL_TAKEOFF_HEIGHT=1.0 ./launch/real.sh arm
 
 - 规划与控制：[EGO-Planner-v2](https://github.com/ZJU-FAST-Lab/EGO-Planner-v2)、
   [Fast-Planner](https://github.com/HKUST-Aerial-Robotics/Fast-Planner)、
+  [SUPER](https://github.com/hku-mars/SUPER)、
   [Diff-Planner](https://github.com/DifferentialRobotics/Diff-Planner)、
   [Diff-Planner-PX4](https://github.com/Tfly6/Diff-Planner-PX4) 和
   [SE3 Controller](https://github.com/HITSZ-MAS/se3_controller)；

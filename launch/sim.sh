@@ -75,7 +75,11 @@ done
 SCENE_DIR="$PROJECT_ROOT/simulation/config/scenes"
 SCENE_RESOLVED=false
 
-DEV_CONTAINER="${SIM_DEV_CONTAINER:-diff_planner_px4_sim}"
+SIM_DEV_CONTAINER_EXPLICIT=false
+if [ -n "${SIM_DEV_CONTAINER:-}" ]; then
+  SIM_DEV_CONTAINER_EXPLICIT=true
+fi
+DEV_CONTAINER="${SIM_DEV_CONTAINER:-uav_autonomy_sim}"
 # PX4/Gazebo/Mid360 and the development overlay now run in the same
 # repository-owned container. Keep one name internally so no command can
 # silently fall back to the legacy ros_noetic container.
@@ -87,6 +91,8 @@ PLANNER_MANIFEST_ROOT="$PLANNING_PROJECT_ROOT/planning/plugins"
 PLANNER_MANIFEST_TOOL_HOST="$PROJECT_ROOT/planning/scripts/planner_manifest.py"
 PLANNER_BUILD_TOOL="$PLANNING_PROJECT_ROOT/planning/scripts/build_planner_workspaces.sh"
 PLANNER_WORKSPACE_SETUP_REL=""
+PLANNER_CONTROLLER_CONFIG_REL=""
+PLANNER_CONTROLLER_CONFIG=""
 DEV_RUNTIME="${SIM_RUNTIME_CONTAINER:-/root/simulation_runtime}"
 BASE_SIM_WORKSPACE="${SIM_BASE_WORKSPACE_CONTAINER:-/opt/simulation_ws}"
 SOURCE_HOST="${SIM_SOURCE_HOST:-$PROJECT_ROOT/third_party/Diff-Planner-PX4}"
@@ -147,7 +153,7 @@ PLANNER_CONFIG="${SIM_PLANNER_CONFIG:-}"
 CONTROLLER_CONFIG="${SIM_CONTROLLER_CONFIG:-/etc/sim2real/simulation/controller.yaml}"
 RVIZ_CONFIG="${SIM_RVIZ_CONFIG:-/etc/sim2real/simulation/rviz/sim.rviz}"
 REQUIRE_ARMED_GOAL="${SIM_REQUIRE_ARMED_GOAL:-true}"
-TEST_WORKSPACES="${SIM_TEST_WORKSPACES:-interfaces,control,diff,fast}"
+TEST_WORKSPACES="${SIM_TEST_WORKSPACES:-interfaces,control,diff,fast,super}"
 MISSION_RUNNER_HOST="$PROJECT_ROOT/common/scripts/waypoint_mission.py"
 MISSION_EXECUTOR_HOST="$PROJECT_ROOT/common/scripts/mission_executor.py"
 ARM_EXECUTOR_HOST="$PROJECT_ROOT/common/scripts/arm_executor.py"
@@ -183,10 +189,12 @@ Scene and planner selection:
   start, restart, and test require --scene NAME and --planner ID.
   SIM_SCENE and SIM_PLANNER provide the equivalent selections.
   Built-in scenes: room, forest.
+  The default runtime container is uav_autonomy_sim.
+  Override it with SIM_DEV_CONTAINER when reusing an existing container.
 
 Actions:
   build                 Incrementally build the host deployment source.
-  test                  Build and test all four isolated workspaces.
+  test                  Build and test all five isolated workspaces.
   start                 Build and start the complete simulation stack.
   restart               Stop, rebuild changed code, and start again.
   stop                  Gracefully stop this script's simulation stack.
@@ -207,6 +215,7 @@ Stack examples:
   ./launch/sim.sh --scene room --planner diff start
   ./launch/sim.sh --scene room --planner fast-kino start
   ./launch/sim.sh --scene room --planner fast-topo start
+  ./launch/sim.sh --scene room --planner super start
   ./launch/sim.sh --scene forest --planner diff restart
   SIM_GAZEBO_GUI=false SIM_START_RVIZ=false ./launch/sim.sh --scene room --planner diff restart
   SIM_START_ROSBAG=false ./launch/sim.sh --scene room --planner diff restart
@@ -300,13 +309,24 @@ resolve_selected_planner() {
     die "Planner selection failed. Run '$0 planners' to inspect available plugins."
   PLANNER_WORKSPACE_SETUP_REL="$(python3 "${args[@]}" --field workspace_setup_relative)" ||
     die "Planner workspace resolution failed."
+  PLANNER_CONTROLLER_CONFIG_REL="$(
+    python3 "${args[@]}" --field controller_config_relative
+  )" || die "Planner controller config resolution failed."
   local container_setup="$PLANNER_WORKSPACE_SETUP_REL"
   if [[ "$container_setup" != /* ]]; then
     container_setup="$PLANNING_PROJECT_ROOT/$container_setup"
   fi
+  PLANNER_CONTROLLER_CONFIG="$PLANNER_CONTROLLER_CONFIG_REL"
+  if [[ "$PLANNER_CONTROLLER_CONFIG" != /* ]]; then
+    PLANNER_CONTROLLER_CONFIG="$PLANNING_PROJECT_ROOT/$PLANNER_CONTROLLER_CONFIG"
+  fi
   if [ "$require_built" = "true" ] && ! docker exec -i "$DEV_CONTAINER" \
     test -f "$container_setup"; then
     die "Selected planner workspace is not built in the container: $PLANNER_WORKSPACE_SETUP_REL"
+  fi
+  if [ "$require_built" = "true" ] && ! docker exec -i "$DEV_CONTAINER" \
+    test -f "$PLANNER_CONTROLLER_CONFIG"; then
+    die "Selected planner controller config is missing in the container: $PLANNER_CONTROLLER_CONFIG_REL"
   fi
 }
 
@@ -322,6 +342,21 @@ require_number() {
   local name="$1" value="$2"
   [[ "$value" =~ ^[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$ ]] ||
     die "$name must be a finite number (got: $value)."
+}
+
+ros_master_port() {
+  local authority port
+  authority="${ROS_MASTER_URI#*://}"
+  authority="${authority%%/*}"
+  if [[ "$authority" =~ :([0-9]+)$ ]]; then
+    port="${BASH_REMATCH[1]}"
+  else
+    port=11311
+  fi
+  if (( port < 1 || port > 65535 )); then
+    die "ROS_MASTER_URI contains an invalid port: $ROS_MASTER_URI"
+  fi
+  printf '%s\n' "$port"
 }
 
 validate_bool_config() {
@@ -407,11 +442,11 @@ need_cmd() {
 }
 
 container_exists() {
-  docker inspect "$1" >/dev/null 2>&1
+  docker container inspect "$1" >/dev/null 2>&1
 }
 
 container_running() {
-  [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || echo false)" = "true" ]
+  [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null || echo false)" = "true" ]
 }
 
 ensure_prereqs() {
@@ -450,6 +485,42 @@ first_simulation_owner_marker() {
     return 0
   done
   return 1
+}
+
+select_owned_session_container() {
+  local action="$1"
+  [ -s "$SESSION_MARKER" ] || return 0
+
+  local marker_container="" marker_session="" key value
+  while IFS='=' read -r key value; do
+    case "$key" in
+      container) marker_container="$value" ;;
+      session) marker_session="$value" ;;
+    esac
+  done <"$SESSION_MARKER"
+
+  [ "$marker_session" = "$SESSION_NAME" ] ||
+    die "Simulation ownership marker has an unexpected session: $SESSION_MARKER"
+  [[ "$marker_container" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] ||
+    die "Simulation ownership marker has an invalid container name: $SESSION_MARKER"
+
+  if [ "$SIM_DEV_CONTAINER_EXPLICIT" = "true" ]; then
+    if [ "$marker_container" != "$DEV_CONTAINER" ]; then
+      case "$action" in
+        stop|restart|status|attach|arm|land|goal|mission|shell)
+          die "Simulation session '$SESSION_NAME' belongs to container '$marker_container', not explicit SIM_DEV_CONTAINER='$DEV_CONTAINER'."
+          ;;
+      esac
+    fi
+    return 0
+  fi
+
+  if [ "$marker_container" != "$DEV_CONTAINER" ]; then
+    info "Using owned simulation container from the active session marker: $marker_container"
+  fi
+  DEV_CONTAINER="$marker_container"
+  SIMULATOR_CONTAINER="$marker_container"
+  export SIM_DEV_CONTAINER="$marker_container"
 }
 
 ensure_simulator_container() {
@@ -529,7 +600,7 @@ docker_tmux_command() {
   setup="$(container_setup "$container")"
   shell_cmd="set -eo pipefail; unset ROS_HOSTNAME; $setup; export ROS_MASTER_URI='$ROS_MASTER_URI' ROS_IP='$ROS_IP' ROS_HOME='$ros_home' ROS_LOG_DIR='$ros_log_dir'; mkdir -p \"\$ROS_HOME\" \"\$ROS_LOG_DIR\"; $inner_cmd"
 
-  printf 'docker exec -it -e ROS_MASTER_URI=%q -e ROS_IP=%q -e ROS_HOME=%q -e ROS_LOG_DIR=%q -e SIM2REAL_DIFF_PLANNER_CONFIG=%q -e PYTHONDONTWRITEBYTECODE=1 %q bash -lc %q' \
+  printf 'docker exec -it -e ROS_MASTER_URI=%q -e ROS_IP=%q -e ROS_HOME=%q -e ROS_LOG_DIR=%q -e SIM2REAL_PLANNER_CONFIG=%q -e PYTHONDONTWRITEBYTECODE=1 %q bash -lc %q' \
     "$ROS_MASTER_URI" "$ROS_IP" "$ros_home" "$ros_log_dir" \
     "$PLANNER_CONFIG" "$container" "$shell_cmd"
 }
@@ -802,7 +873,7 @@ build_overlay() {
   # catkin build --no-status -j1 -p1. Ordinary failures still exit "$build_status".
   [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] ||
     die "SIM_BUILD_JOBS must be a positive integer."
-  info "Building isolated interfaces/control/Diff/Fast workspaces"
+  info "Building isolated interfaces/control/Diff/Fast/SUPER workspaces"
   docker exec -i \
     -e PYTHONDONTWRITEBYTECODE=1 \
     "$DEV_CONTAINER" \
@@ -842,6 +913,7 @@ test_overlay() {
   docker exec -i \
     -e "ROS_MASTER_URI=$ROS_MASTER_URI" \
     -e "ROS_IP=$ROS_IP" \
+    -e "SIM2REAL_PLANNER_CONFIG=$PLANNER_CONFIG" \
     "$DEV_CONTAINER" bash -lc "
       set -eo pipefail
       unset ROS_HOSTNAME
@@ -851,7 +923,9 @@ test_overlay() {
         planner_id:='$PLANNER_ID' planner_profile:='$PLANNER_PROFILE' \
         runtime_mode:=simulation scene:='$SCENE' \
         manifest_root:='$PLANNER_MANIFEST_ROOT' repository_root:='$PLANNING_PROJECT_ROOT'
-      roslaunch --nodes sim2real_common controller.launch vehicle_config:='$CONTROLLER_CONFIG'
+      roslaunch --nodes sim2real_common controller.launch \
+        planner_config:='$PLANNER_CONTROLLER_CONFIG' \
+        vehicle_config:='$CONTROLLER_CONFIG'
       roslaunch --nodes sim2real_simulation localization.launch
       roslaunch --nodes sim2real_simulation goal_bridge.launch
     "
@@ -920,7 +994,7 @@ start_stack() {
     die "Simulation session '$SESSION_NAME' already exists. Use '$0 attach' or '$0 restart'."
   fi
   if container_running "$DEV_CONTAINER" && master_is_running; then
-    die "A ROS master is already running on 127.0.0.1:11311 outside session '$SESSION_NAME'. Stop the manual stack first."
+    die "A ROS master is already running at '$ROS_MASTER_URI' outside session '$SESSION_NAME'. Stop the manual stack first."
   fi
 
   ensure_simulator_container
@@ -964,8 +1038,10 @@ start_stack() {
   trap 'cleanup_failed_start "$?"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  local master_port
+  master_port="$(ros_master_port)"
   tmux new-session -d -s "$SESSION_NAME" -n roscore \
-    "$(docker_tmux_command "$SIMULATOR_CONTAINER" 'exec roscore')"
+    "$(docker_tmux_command "$SIMULATOR_CONTAINER" "exec roscore -p '$master_port'")"
   START_CREATED_SESSION=true
   create_session_marker
   tmux set-option -t "$SESSION_NAME" remain-on-exit on
@@ -1025,7 +1101,7 @@ start_stack() {
 
   if [ "$START_SE3" = "true" ]; then
     create_window se3 "$DEV_CONTAINER" \
-      "exec roslaunch sim2real_common controller.launch vehicle_config:=$CONTROLLER_CONFIG"
+      "exec roslaunch sim2real_common controller.launch planner_config:=$PLANNER_CONTROLLER_CONFIG vehicle_config:=$CONTROLLER_CONFIG"
 
     wait_for_condition "fresh-odometry SE3 setpoint stream" "$DEV_CONTAINER" \
       "rosnode list | grep -qx '/se3_controller_node' && timeout 8 rostopic echo -n 1 /mavros/setpoint_position/local/header >/dev/null" se3
@@ -1064,7 +1140,7 @@ start_stack() {
     wait_for_condition "rosbag recorder" "$DEV_CONTAINER" \
       "rosnode list | grep -qx '$ROSBAG_NODE_NAME'" rosbag
     info "Recording split bags with prefix (container): $ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}"
-    info "Rosbag retention cap: ${ROSBAG_MAX_SPLITS} x ${ROSBAG_SPLIT_SIZE_MB} MB (about $((ROSBAG_MAX_SPLITS * ROSBAG_SPLIT_SIZE_MB)) MB); oldest split files are removed automatically."
+    info "Rosbag rotation target: ${ROSBAG_MAX_SPLITS} x ${ROSBAG_SPLIT_SIZE_MB} MB; one extra split may be retained during rotation, so this is not a strict disk-space cap."
     info "Simulation bags persist on the host under: $RUNTIME_HOST/flight_bags/"
   else
     info "rosbag recording skipped because SIM_START_ROSBAG=false."
@@ -1205,21 +1281,21 @@ stop_stack() {
     kill_matching "$DEV_CONTAINER" INT \
       "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
       "pointcloud_to_world.py" "sim_odometry_adapter.py" "stable_environment_viz.py" "flight_visualization.py" "planner_backend_runner.py" "planner_manager.py" "planner_gateway.py" "planner_visualization.py" "command_gateway.py" \
-      "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
+      "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "super_backend_adapter_node" "sim2real_super_adapter" "super_planner/fsm_node" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
     kill_matching "$SIMULATOR_CONTAINER" INT \
       "outdoor_mid360.launch" "mavros_node" "gzserver" "gzclient" "PX4-Autopilot.*px4" "rosmaster" "roscore"
     sleep 2
     kill_matching "$DEV_CONTAINER" TERM \
       "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
       "pointcloud_to_world.py" "sim_odometry_adapter.py" "stable_environment_viz.py" "flight_visualization.py" "planner_backend_runner.py" "planner_manager.py" "planner_gateway.py" "planner_visualization.py" "command_gateway.py" \
-      "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
+      "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "super_backend_adapter_node" "sim2real_super_adapter" "super_planner/fsm_node" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
     kill_matching "$SIMULATOR_CONTAINER" TERM \
       "outdoor_mid360.launch" "mavros_node" "gzserver" "gzclient" "PX4-Autopilot.*px4" "rosmaster" "roscore"
     sleep 2
     kill_matching "$DEV_CONTAINER" KILL \
       "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
       "pointcloud_to_world.py" "sim_odometry_adapter.py" "stable_environment_viz.py" "flight_visualization.py" "planner_backend_runner.py" "planner_manager.py" "planner_gateway.py" "planner_visualization.py" "command_gateway.py" \
-      "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
+      "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "super_backend_adapter_node" "sim2real_super_adapter" "super_planner/fsm_node" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
     kill_matching "$SIMULATOR_CONTAINER" KILL \
       "outdoor_mid360.launch" "mavros_node" "gzserver" "gzclient" "PX4-Autopilot.*px4" "rosmaster" "roscore"
     if rosbag_record_process_running; then
@@ -1402,6 +1478,7 @@ run_waypoint_mission() {
       --default-takeoff-height '$TAKEOFF_HEIGHT' \
       --px4-hover-thrust '$PX4_HOVER_THRUST' \
       --disarmed-prearm-mode '$DISARMED_PREARM_MODE' \
+      --takeoff-altitude-field '$TAKEOFF_ALTITUDE_FIELD' \
       --preflight-timeout '$PREFLIGHT_TIMEOUT' \
       --command-timeout '$COMMAND_TIMEOUT' \
       --takeoff-timeout '$TAKEOFF_TIMEOUT' \
@@ -1444,6 +1521,7 @@ main() {
     return 0
   fi
 
+  select_owned_session_container "$action"
   validate_bool_config
 
   case "$action" in

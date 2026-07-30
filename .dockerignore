@@ -3,6 +3,7 @@
 docs
 README.md
 runtime
+planning/workspaces
 **/__pycache__
 **/.pytest_cache
 **/.mypy_cache

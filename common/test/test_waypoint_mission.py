@@ -21,6 +21,35 @@ SPEC.loader.exec_module(MISSION)
 
 
 class WaypointMissionConfigTest(unittest.TestCase):
+    @staticmethod
+    def _fake_pose_stamped_type():
+        class FakePoseStamped:
+            def __init__(self):
+                self.header = SimpleNamespace(stamp=None, frame_id="")
+                self.pose = SimpleNamespace(
+                    position=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                    orientation=SimpleNamespace(
+                        x=0.0, y=0.0, z=0.0, w=0.0
+                    ),
+                )
+
+        return FakePoseStamped
+
+    @staticmethod
+    def _fake_planner_goal_type():
+        class FakePlannerGoal:
+            PLAN = 0
+
+            def __init__(self):
+                self.header = SimpleNamespace(stamp=None)
+                self.session_id = ""
+                self.goal_id = 0
+                self.action = self.PLAN
+                self.goal = None
+                self.constrain_yaw = False
+
+        return FakePlannerGoal
+
     def write_config(self, payload):
         handle = tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", encoding="utf-8", delete=False
@@ -552,6 +581,8 @@ class WaypointMissionConfigTest(unittest.TestCase):
         runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
         runner.lock = threading.Lock()
         runner.config = {"state_timeout": 3.0}
+        runner.current_goal_stamp = 123
+        runner.current_goal_id = 6
         runner.current_plan_accepted = True
         runner.current_planner_stopped_at = time.monotonic()
         runner.rospy = SimpleNamespace(
@@ -569,6 +600,49 @@ class WaypointMissionConfigTest(unittest.TestCase):
         self.assertEqual(reason, "")
         self.assertFalse(runner.current_plan_accepted)
         self.assertIsNone(runner.current_planner_stopped_at)
+        self.assertIsNone(runner.current_goal_stamp)
+        self.assertIsNone(runner.current_goal_id)
+
+    def test_cancel_status_cannot_revert_an_effective_planner_goal(self):
+        warnings = []
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.lock = threading.Lock()
+        runner.rospy = SimpleNamespace(
+            logwarn=lambda message, *args: warnings.append(message % args)
+        )
+        runner.current_goal_stamp = 123
+        runner.current_goal_floor = 5
+        runner.current_goal_id = 6
+        runner.last_planner_goal_id = 6
+        runner.current_requested_goal_position = (60.28, -19.53, 1.0)
+        runner.current_goal_position = (60.25, -19.55, 1.55)
+        runner.current_plan_accepted = True
+        runner.current_planner_stopped_at = None
+
+        status = SimpleNamespace(
+            PLANNING=2,
+            ACTIVE=3,
+            REACHED=5,
+            HOLDING=4,
+            FAULT=6,
+            goal_id=6,
+            state=1,
+            armable=False,
+            trajectory_id=0,
+            active_goal=SimpleNamespace(
+                pose=SimpleNamespace(
+                    position=SimpleNamespace(
+                        x=60.28, y=-19.53, z=1.0
+                    )
+                )
+            ),
+        )
+        runner._planner_status_callback(status)
+
+        self.assertEqual(
+            runner.current_goal_position, (60.25, -19.55, 1.55)
+        )
+        self.assertEqual(warnings, [])
 
     def test_completed_mission_reports_planner_cancel_failure(self):
         runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
@@ -638,6 +712,50 @@ class WaypointMissionConfigTest(unittest.TestCase):
         self.assertIn("required clearance", reason)
         self.assertEqual(validated[0].session_id, "mission-runtime")
         self.assertEqual(validated[0].goal.pose.position.x, 4.0)
+
+    def test_preflight_defers_goal_outside_rolling_local_map(self):
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.PoseStamped = self._fake_pose_stamped_type()
+        runner.PlannerGoal = self._fake_planner_goal_type()
+        runner.rospy = SimpleNamespace(
+            Time=SimpleNamespace(now=lambda: 123),
+            loginfo=lambda *_args: None,
+        )
+        runner.validate_goal = lambda _goal: SimpleNamespace(
+            valid=False,
+            reason="goal_out_of_local_map",
+        )
+
+        valid, reason = runner._validate_waypoint(
+            {"x": 27.3, "y": -11.3, "z": 1.0, "yaw": None},
+            3,
+            6,
+            "mission-preflight",
+            defer_dynamic_map_rejections=True,
+        )
+
+        self.assertTrue(valid)
+        self.assertEqual(reason, "")
+
+    def test_runtime_does_not_defer_goal_outside_rolling_local_map(self):
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.PoseStamped = self._fake_pose_stamped_type()
+        runner.PlannerGoal = self._fake_planner_goal_type()
+        runner.rospy = SimpleNamespace(Time=SimpleNamespace(now=lambda: 123))
+        runner.validate_goal = lambda _goal: SimpleNamespace(
+            valid=False,
+            reason="goal_out_of_local_map",
+        )
+
+        valid, reason = runner._validate_waypoint(
+            {"x": 27.3, "y": -11.3, "z": 1.0, "yaw": None},
+            3,
+            6,
+            "mission-runtime",
+        )
+
+        self.assertFalse(valid)
+        self.assertIn("goal_out_of_local_map", reason)
 
 
 if __name__ == "__main__":

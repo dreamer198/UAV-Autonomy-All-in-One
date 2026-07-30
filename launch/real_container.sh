@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE_NAME="${IMAGE_NAME:-diff_planner_px4_real:latest}"
-CONTAINER_NAME="${CONTAINER_NAME:-diff_planner_px4_real}"
+IMAGE_NAME="${IMAGE_NAME:-uav_autonomy_real:latest}"
+CONTAINER_NAME="${CONTAINER_NAME:-uav_autonomy_real}"
 REAL_SESSION_NAME="${REAL_SESSION_NAME:-real_px4_stack}"
 FCU_DEVICE="${FCU_DEVICE:-/dev/ttyACM0}"
 DISPLAY_VALUE="${DISPLAY:-:0}"
@@ -91,17 +91,17 @@ append_planner_plugin_mounts() {
 }
 
 container_exists() {
-  docker inspect "$CONTAINER_NAME" >/dev/null 2>&1
+  docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1
 }
 
 container_running() {
-  [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" = "true" ]
+  [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" = "true" ]
 }
 
 container_processes_active() {
   container_running || return 1
   docker top "$CONTAINER_NAME" -eo args 2>/dev/null |
-    grep -Eq '(^|[ /])(roscore|rosmaster|mavros_node|fastlio_mapping|livox_ros_driver2_node|se3_controller_node|diff_planner_node|fast_planner_node|traj_server)([[:space:]]|$)|localization_guard\.py|planner_backend_runner\.py|planner_(manager|gateway|visualization)\.py|command_gateway\.py|(diff|fast)_backend_adapter|sim2real_(diff|fast)_adapter|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
+    grep -Eq '(^|[ /])(roscore|rosmaster|mavros_node|fastlio_mapping|livox_ros_driver2_node|se3_controller_node|diff_planner_node|fast_planner_node|super_backend_adapter_node|traj_server)([[:space:]]|$)|localization_guard\.py|planner_backend_runner\.py|planner_(manager|gateway|visualization)\.py|command_gateway\.py|(diff|fast)_backend_adapter|sim2real_(diff|fast)_adapter|sim2real_super_adapter|super_planner/fsm_node|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
 }
 
 real_stack_active() {
@@ -159,25 +159,25 @@ ensure_image() {
       -f '{{index .Config.Labels "io.sim2real.planner-workspaces"}}' \
       "$IMAGE_NAME" 2>/dev/null || true
   )"
-  if [ "$planner_layout" != "v1" ]; then
+  if [ "$planner_layout" != "v2" ]; then
     build_image
   fi
 }
 
 mount_source_for() {
   local mount_destination="$1"
-  docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.Source}}{{end}}{{end}}" "$CONTAINER_NAME"
+  docker container inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.Source}}{{end}}{{end}}" "$CONTAINER_NAME"
 }
 
 mount_rw_for() {
   local mount_destination="$1"
-  docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.RW}}{{end}}{{end}}" "$CONTAINER_NAME"
+  docker container inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.RW}}{{end}}{{end}}" "$CONTAINER_NAME"
 }
 
 container_layout_current() {
   local expected_image actual_image expected_bags expected_tmp expected_livox expected_controller
   expected_image="$(docker image inspect -f '{{.Id}}' "$IMAGE_NAME" 2>/dev/null)" || return 1
-  actual_image="$(docker inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null)" || return 1
+  actual_image="$(docker container inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null)" || return 1
   [ "$actual_image" = "$expected_image" ] || return 1
   expected_bags="$(realpath -m "$RUNTIME_DIR/flight_bags")"
   expected_tmp="$(realpath -m "$RUNTIME_DIR/tmp")"
@@ -191,13 +191,13 @@ container_layout_current() {
   [ "$(mount_rw_for /root/tmp)" = "true" ] || return 1
   [ "$(mount_rw_for /root/livox_ws/src/livox_ros_driver2/config/MID360s_config.json)" = "false" ] || return 1
   [ "$(mount_rw_for /root/deployment/controller.yaml)" = "false" ] || return 1
-  [ "$(docker inspect -f '{{.HostConfig.Init}}' "$CONTAINER_NAME")" = "true" ] || return 1
-  [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER_NAME")" = "host" ] || return 1
-  [ "$(docker inspect -f '{{.HostConfig.IpcMode}}' "$CONTAINER_NAME")" = "host" ] || return 1
-  [ "$(docker inspect -f '{{.HostConfig.Privileged}}' "$CONTAINER_NAME")" = "true" ] || return 1
-  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" |
+  [ "$(docker container inspect -f '{{.HostConfig.Init}}' "$CONTAINER_NAME")" = "true" ] || return 1
+  [ "$(docker container inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER_NAME")" = "host" ] || return 1
+  [ "$(docker container inspect -f '{{.HostConfig.IpcMode}}' "$CONTAINER_NAME")" = "host" ] || return 1
+  [ "$(docker container inspect -f '{{.HostConfig.Privileged}}' "$CONTAINER_NAME")" = "true" ] || return 1
+  docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" |
     grep -qx 'DRONE_ID=0' || return 1
-  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" |
+  docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" |
     grep -Fxqx "SIM2REAL_PLANNER_PLUGIN_PATH=$PLANNER_PLUGIN_PATH" || return 1
 }
 

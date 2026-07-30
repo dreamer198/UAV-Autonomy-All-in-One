@@ -1,0 +1,34 @@
+api_version: sim2real.planner/v1
+id: super
+ros_namespace: super
+display_name: SUPER
+variant: super
+adapter_node: adapter
+workspace_setup: planning/workspaces/super_ws/devel/setup.bash
+controller_config: planning/plugins/super/controller.yaml
+launch:
+  package: sim2real_super_adapter
+  file: super_backend.launch
+  arguments:
+    backend_id: super
+    backend_namespace: super
+    profile: local
+    scene: room
+    odom_topic: /localization/odom
+    cloud_topic: /localization/cloud_registered
+default_profile: local
+profiles:
+  - local
+timeouts:
+  startup_sec: 30.0
+  status_sec: 0.5
+  command_sec: 0.08
+rates:
+  status_min_hz: 5.0
+  command_min_hz: 80.0
+capabilities:
+  simulation: true
+  yaw: true
+  cancel: true
+  goal_validation: true
+  rviz: true

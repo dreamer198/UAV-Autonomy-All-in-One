@@ -60,7 +60,7 @@
   </node>
 
   <!-- A human-facing persistent layer derived only from the shared cloud
-       contract. It is not remapped into Diff or Fast and cannot affect
+       contract. It is not remapped into any planner backend and cannot affect
        collision checking or planning. -->
   <node if="$(arg environment_viz_enable)"
         pkg="sim2real_simulation" type="stable_environment_viz.py"

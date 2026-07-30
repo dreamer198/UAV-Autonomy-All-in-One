@@ -1,0 +1,202 @@
+# SUPER 本地配置：规划器和地图段由 SUPER/ROG-Map 读取，adapter 段由适配器读取。
+# 默认单位：距离 m、时间 s、频率 Hz；角速度默认 rad/s，名称含 deg 的参数使用 °。
+# “当前未生效”表示本仓库固定的 SUPER 版本虽保留该字段，但运行时不会使用。
+
+# 目标输入与规划状态机
+fsm:
+  click_goal_en: true                       # 是否接收目标话题
+  click_goal_topic: "/planning/backends/super/native/goal"  # 内部目标话题，通常不改
+  click_height: 1.5                         # 目标高度；值 > -5 时覆盖目标 z
+  click_yaw_en: true                        # 是否使用目标姿态中的偏航角
+  replan_rate: 15.0                         # 重规划频率；越高响应越快、计算量越大
+  close_goal_threshold: 0.35                # 接近目标的距离阈值；须与 adapter 对应值一致
+  # 以下是 SUPER 与适配器之间的内部接口，除非同步修改启动文件和代码，否则不要改。
+  cmd_topic: "/planning/backends/super/native/position_command"
+  mpc_cmd_topic: "/planning/backends/super/native/polynomial_trajectory"
+  heartbeat_topic: "/planning/backends/super/native/heartbeat"
+  progress_topic: "/planning/backends/super/native/progress"
+  effective_goal_topic: "/planning/backends/super/native/effective_goal"
+  reset_service: "/planning/backends/super/native/reset"
+  validate_goal_service: "/planning/backends/super/native/validate_goal"
+  timer_en: true                            # 启用状态机及重规划定时器
+
+# SUPER 规划流程
+super_planner:
+  backup_traj_en: true                     # 当前未生效：备份轨迹仍按固定流程生成
+  detailed_log_en: false                   # 当前未生效
+  visualization_en: true                   # 发布规划轨迹、走廊等可视化
+  use_fov_cut: false                       # 是否按当前传感器视场裁剪安全走廊
+  print_log: false                         # 打印规划耗时及结果日志
+  visual_process: false                    # 逐步显示规划过程；调试用，会拖慢规划
+  frontend_in_known_free: false            # true：前端把未知区域视为障碍，更保守
+  goal_yaw_en: true                        # 轨迹末端是否跟随目标偏航角
+  goal_vel_en: false                       # 是否使用目标速度作为末端速度
+  corridor_bound_dis: 1.0                  # 走廊生成的障碍搜索边界；增大更保守、更慢
+  corridor_line_max_length: 1.2            # 期望轨迹走廊的最大种子线长度；减小更细致
+  safe_corridor_line_max_length: 5.0       # 备份轨迹安全走廊的最大种子线长度
+  iris_iter_num: 2                         # 凸走廊膨胀迭代次数；增大更精细、更慢
+  obs_skip_num: 2                          # 当前未生效
+  replan_forward_dt: 0.1                   # 重规划前瞻时间及时间预算；过小易规划超时
+  planning_horizon: 7.0                    # 单次局部规划距离
+  sensing_horizon: -1                      # 传感距离；>0 时裁剪走廊，-1 表示不限制
+  receding_dis: 4.0                        # 重规划时沿旧轨迹向前保留的距离
+  robot_r: 0.3                             # 碰撞检测使用的机体半径
+  yaw_dot_max: 3.0                         # 规划偏航角速度上限
+  yaw_mode: 1                              # 当前未生效：预留值 1=朝速度、2=朝目标
+  mpc_horizon: 15                          # 当前未生效
+
+# MINCO 轨迹优化
+traj_opt:
+  switch:
+    save_log_en: false                     # 保存优化问题日志；仅排查优化失败时开启
+    print_optimizer_log: false             # 打印 L-BFGS 迭代日志
+
+  boundary:
+    max_vel: 2.4                           # 最大速度，m/s；须与 adapter 对应值一致
+    max_acc: 3.0                           # 最大加速度，m/s²；过小可能使优化无解
+    max_jerk: 120.0                        # 最大加加速度，m/s³
+    max_omg: 2.5                           # 最大机体角速度，rad/s
+    max_acc_thr: 20.0                      # 最大比推力，m/s²
+    min_acc_thr: 6.0                       # 最小比推力，m/s²
+    penna_margin: 0.05                     # 约束验收余量比例；越小越严格
+
+  # 期望轨迹。penna_* 为惩罚权重：增大可强化约束，但过大可能更难收敛。
+  exp_traj:
+    pos_constraint_type: 1                 # 位置约束：1=航点，2=走廊
+    energy_cost_type: 4                    # 当前源码未读取，保留上游兼容
+    block_energy_cost: false               # true：关闭平滑能量项，只优化时间和约束
+    opt_accuracy: 5.0e-6                   # 优化收敛容差；越小越精确、耗时越长
+    scale_factor: 1.0                      # 当前源码未读取，保留上游兼容
+    integral_reso: 15                      # 每段约束积分采样数；越大越准、越慢
+    smooth_eps: 0.01                       # 约束惩罚的平滑区间
+    penna_t: 12000.0                       # 总时间权重；增大倾向于更短轨迹
+    penna_pos: 5.0e+6                      # 位置/走廊越界惩罚
+    penna_vel: 5.0e+5                      # 超速惩罚
+    penna_acc: 5.0e+5                      # 超加速度惩罚
+    penna_jerk: -5.0e+5                    # 加加速度惩罚；≤0 表示关闭
+    penna_attract: 1.0e+3                  # 对引导航点的吸引权重
+    penna_omg: 5.0e+5                      # 超机体角速度惩罚
+    penna_thr: 1.0e+5                      # 超推力范围惩罚
+
+  # 备份轨迹，用于期望轨迹失效时安全制动。
+  backup_traj:
+    uniform_time_en: true                  # 所有多项式段使用相同持续时间
+    pos_constraint_type: 1                 # 位置约束：1=航点，2=走廊
+    piece_num: 2                           # 备份轨迹的多项式段数
+    energy_cost_type: 4                    # 当前源码未读取，保留上游兼容
+    block_energy_cost: true                # true：关闭平滑能量项，只优化时间和约束
+    opt_accuracy: 1.0e-6                   # 优化收敛容差
+    scale_factor: 1.0                      # 当前源码未读取，保留上游兼容
+    integral_reso: 12                      # 每段约束积分采样数
+    smooth_eps: 0.01                       # 约束惩罚的平滑区间
+    penna_t: 1200.0                        # 备份轨迹总时间权重
+    penna_ts: 1.0e+5                       # 切换时刻权重；增大倾向于更晚切入备份轨迹
+    penna_pos: 1.0e+6                      # 位置/走廊越界惩罚
+    penna_vel: 1.0e+5                      # 超速惩罚
+    penna_acc: 1.0e+5                      # 超加速度惩罚
+    penna_jerk: -1.0e+5                    # 加加速度惩罚；≤0 表示关闭
+    penna_omg: 1.0e+5                      # 超机体角速度惩罚
+    penna_thr: 1.0e+5                      # 超推力范围惩罚
+
+  # 四旋翼差分平坦模型
+  flatness:
+    mass: 1.64                             # 飞行器质量，kg
+    dh: 0.35                               # 水平阻力系数
+    dv: 0.35                               # 垂直阻力系数
+    cp: 0.001                              # 寄生阻力系数
+    v_eps: 0.0001                          # 低速平滑量，避免零速度奇异
+    grav: 9.81                             # 重力加速度，m/s²
+
+# A* 前端搜索
+astar:
+  map_voxel_num: [500, 500, 100]           # 搜索缓存体素数 [x, y, z]；越大占内存越多
+  visual_process: false                    # 逐步显示搜索；调试用，会显著变慢
+  allow_diag: true                         # 允许对角扩展，路径更短但邻居更多
+  heu_type: 2                              # 启发函数：0=对角，1=曼哈顿，2=欧氏
+  debug_visualization_en: false            # 发布额外 A* 调试标记
+
+# ROG-Map 占据栅格
+rog_map:
+  resolution: 0.1                         # 原始占据栅格分辨率；越小越精细、越耗内存
+  inflation_resolution: 0.2               # 膨胀栅格分辨率，须不小于 resolution
+  inflation_step: 2                       # 障碍膨胀格数；膨胀半径约为本值×膨胀分辨率
+  unk_inflation_en: false                 # 是否把未知区域也作为障碍膨胀
+  unk_inflation_step: 1                   # 未知区域膨胀格数
+  map_size: [50, 50, 6]                   # 局部地图尺寸 [x, y, z]
+  fix_map_origin: [0, 0, 1.5]             # 地图初始中心 [x, y, z]
+  frontier_extraction_en: false            # 提取已知/未知边界；探索任务才需开启
+  virtual_ceil_height: 3.5                # 虚拟天花板的世界坐标 z
+  virtual_ground_height: -0.1             # 虚拟地面的世界坐标 z
+  load_pcd_en: false                       # 启动时是否载入静态 PCD 地图
+
+  map_sliding:
+    enable: true                           # 地图中心是否跟随飞行器滑动
+    threshold: 0.3                         # 飞行器离地图中心超过该距离时滑动
+
+  esdf:
+    enable: false                          # 是否构建 ESDF；本规划流程不需要
+    resolution: 0.1                        # ESDF 分辨率
+    local_update_box: [5, 5, 3]            # ESDF 局部更新范围 [x, y, z]
+
+  ros_callback:
+    enable: true                           # 由 ROG-Map 直接订阅点云和里程计
+    cloud_topic: "/planning/backends/super/native/cloud_world"  # 内部话题，通常不改
+    odom_topic: "/planning/backends/super/native/odom_world"    # 内部话题，通常不改
+    odom_timeout: 0.5                      # 点云匹配里程计时允许的最大时间差
+    publish_tf: false                      # 是否发布地图 TF；关闭可避免重复 TF
+
+  visualization:
+    enable: true                           # 发布地图可视化
+    use_dynamic_reconfigure: false         # 当前未生效
+    time_rate: 2                           # 定时发布频率
+    frame_rate: 0                          # 当前未生效
+    range: [15, 15, 4]                    # 飞行器周围的可视化范围 [x, y, z]
+    frame_id: "world"                      # 可视化坐标系
+    pub_unknown_map_en: false              # 是否同时发布未知栅格
+
+  intensity_thresh: -10                   # 点云强度阈值；≤0 表示不按强度过滤
+  point_filt_num: 1                       # 每 N 个点取 1 个；1 表示不降采样
+
+  # enable=false 时只更新障碍端点，不沿射线清空自由空间；概率阈值仍用于地图分类。
+  raycasting:
+    enable: false                          # 是否射线清空传感器与障碍点之间的空间
+    batch_update_size: 1                   # 累积多少帧点云后更新一次概率地图
+    local_update_box: [100, 100, 5]        # 射线更新范围 [x, y, z]
+    ray_range: [0.5, 100]                  # 有效射线距离 [最小, 最大]
+    p_min: 0.12                            # 占据概率下限
+    p_miss: 0.49                           # 射线穿过时的空闲观测概率
+    p_free: 0.499                          # 低于此概率判为空闲
+    p_occ: 0.85                            # 高于此概率判为占据
+    p_hit: 0.9                             # 障碍端点的占据观测概率
+    p_max: 0.98                            # 占据概率上限
+    unk_thresh: 1.0                        # 子栅格中未知比例阈值；越小越保守
+
+# sim2real 适配器：数据新鲜度、安全等待和到达判定
+adapter:
+  odom_timeout: 0.5                       # 里程计最大允许未更新时长
+  cloud_timeout: 1.0                      # 点云最大允许未更新时长
+  map_settle_time: 0.2                    # 收到首帧有效点云后等待地图稳定的时长
+  heartbeat_timeout: 0.25                 # SUPER 心跳最大允许中断时长
+  progress_timeout: 0.25                  # SUPER 规划进度消息最大允许中断时长
+  native_command_timeout: 0.08            # SUPER 位置指令最大允许中断时长
+  planning_timeout: 10.0                  # 等待首条轨迹或重规划完成的最长时间
+  settle_timeout: 10.0                    # 下发目标前等待飞行器稳定的最长时间
+  reset_timeout: 0.5                      # 等待 SUPER reset 服务出现的最长时间
+  command_rate: 100.0                     # 向公共控制接口转发指令的频率
+  status_rate: 20.0                       # 发布规划器状态的频率
+  settle_velocity_tolerance: 0.2          # 下发目标前允许的最大线速度，m/s
+  settle_angular_velocity_tolerance_deg_s: 10.0  # 下发目标前允许的最大角速度，°/s
+  settle_hold_time: 0.5                   # 速度持续满足稳定阈值的时间
+  goal_position_tolerance: 0.35           # SUPER 原生目标判定距离；须与 FSM 对应值一致
+  reached_velocity_tolerance: 0.2         # 公共接口判定到达时的最大线速度，m/s
+  reached_yaw_tolerance_deg: 5.0          # 公共接口判定到达时的偏航误差，°
+  reached_yaw_rate_tolerance_deg_s: 10.0  # 公共接口判定到达时的偏航角速度，°/s
+  reached_hold_time: 0.5                  # 连续满足到达条件的保持时间
+  max_effective_goal_shift: 3.0           # SUPER 有效目标相对请求目标的最大允许偏移
+  max_velocity: 2.4                       # 仅上报能力；须与 traj_opt 最大速度一致
+  max_acceleration: 3.0                   # 仅上报能力；须与 traj_opt 最大加速度一致
+  self_filter_enabled: true               # 从点云中移除机体自身点
+  self_filter_radius: 0.35                # 机体系自滤波圆柱半径
+  self_filter_min_z: -0.20                # 自滤波圆柱最低 z（机体系）
+  self_filter_max_z: 0.20                 # 自滤波圆柱最高 z（机体系）
+  self_filter_pose_tolerance: 0.10        # 点云与用于自滤波的位姿最大时间差

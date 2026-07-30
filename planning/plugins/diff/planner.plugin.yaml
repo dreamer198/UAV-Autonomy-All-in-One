@@ -5,6 +5,7 @@ display_name: Diff Planner
 variant: diff
 adapter_node: adapter
 workspace_setup: planning/workspaces/diff_ws/devel/setup.bash
+controller_config: common/config/controller_plugin_default.yaml
 launch:
   package: sim2real_diff_adapter
   file: diff_backend.launch

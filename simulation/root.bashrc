@@ -3,8 +3,8 @@
 [ -f /opt/ros/noetic/setup.bash ] && source /opt/ros/noetic/setup.bash
 [ -f /opt/simulation_ws/devel/setup.bash ] && source /opt/simulation_ws/devel/setup.bash
 
-# Source only the public interfaces and control plane globally. Diff and Fast
-# remain isolated and are sourced by the planner manager's backend subprocess.
+# Source only the public interfaces and control plane globally. Planner-native
+# workspaces remain isolated and are sourced by the manager's backend subprocess.
 SIM2REAL_PROJECT_ROOT="${SIM2REAL_PROJECT_ROOT:-/opt/uav-autonomy-aio}"
 SIM2REAL_INTERFACES_SETUP="$SIM2REAL_PROJECT_ROOT/planning/workspaces/interfaces_ws/devel/setup.bash"
 SIM2REAL_CONTROL_SETUP="$SIM2REAL_PROJECT_ROOT/planning/workspaces/control_ws/devel/setup.bash"

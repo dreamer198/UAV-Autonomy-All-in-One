@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SIM_SCRIPT="$SCRIPT_DIR/sim.sh"
 CONTAINER_SCRIPT="$SCRIPT_DIR/sim_container.sh"
 
-CONTAINER_NAME="${SIM_DEV_CONTAINER:-diff_planner_px4_sim}"
+CONTAINER_NAME="${SIM_DEV_CONTAINER:-uav_autonomy_sim}"
 BAG_NAME="${OUTDOOR_SIM_BAG_NAME:-se3_test_20260723_151241_0.bag}"
 BAG_HOST="${OUTDOOR_SIM_BAG_HOST:-$PROJECT_ROOT/runtime/simulation/flight_bags/$BAG_NAME}"
 BAG_CONTAINER="${OUTDOOR_SIM_BAG_CONTAINER:-/root/simulation_runtime/flight_bags/$BAG_NAME}"
@@ -221,13 +221,13 @@ ensure_scene() {
 }
 
 sim_command() {
-  env \
-    SIM_DEV_CONTAINER="$CONTAINER_NAME" \
+  if [ -n "${SIM_DEV_CONTAINER:-}" ]; then
+    env \
+      SIM_DEV_CONTAINER="$SIM_DEV_CONTAINER" \
+      "$SIM_SCRIPT" --scene "$SCENE_NAME" "$@"
+  else
     "$SIM_SCRIPT" --scene "$SCENE_NAME" "$@"
-}
-
-container_running() {
-  [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" = "true" ]
+  fi
 }
 
 main() {
@@ -242,12 +242,7 @@ main() {
       sim_command restart
       ;;
     shell)
-      container_running || die "Simulation container is not running; use the unified start command first."
-      [ "$#" -eq 0 ] || die "Usage: $0 shell"
-      exec docker exec -it \
-        -e ROS_MASTER_URI=http://127.0.0.1:11311 \
-        -e ROS_IP=127.0.0.1 \
-        "$CONTAINER_NAME" bash -lc 'source /root/.bashrc && exec bash'
+      sim_command shell "$@"
       ;;
     stop|status|attach|arm|land|goal)
       sim_command "$action" "$@"

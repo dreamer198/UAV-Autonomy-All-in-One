@@ -13,6 +13,7 @@ import yaml
 class FastPlannerConfigTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        package_root = Path(__file__).resolve().parents[1]
         config_dir = os.path.join(os.path.dirname(__file__), "..", "config")
         cls.config_dir = config_dir
         cls.config = {}
@@ -34,6 +35,11 @@ class FastPlannerConfigTest(unittest.TestCase):
                 "fast_backend.launch",
             )
         ).getroot()
+        cls.adapter_source = (
+            package_root
+            / "src"
+            / "fast_backend_adapter_node.cpp"
+        ).read_text(encoding="utf-8")
 
     def test_every_parameter_has_an_inline_explanation(self):
         paths = (
@@ -100,7 +106,8 @@ class FastPlannerConfigTest(unittest.TestCase):
         }
         self.assertEqual(
             launch_args["config"]["default"],
-            "$(find sim2real_fast_adapter)/config/planner.yaml",
+            "$(eval optenv('SIM2REAL_PLANNER_CONFIG', '') or "
+            "find('sim2real_fast_adapter') + '/config/planner.yaml')",
         )
         self.assertEqual(
             launch_args["forest_scene_config"]["default"],
@@ -120,6 +127,16 @@ class FastPlannerConfigTest(unittest.TestCase):
                 if element.attrib.get("file") == "$(arg config)"
             ]
             self.assertEqual(len(core_loads), 1)
+
+    def test_adapter_accepts_both_common_runtime_modes(self):
+        self.assertIn(
+            '(runtime_mode_ != "simulation" && runtime_mode_ != "real")',
+            self.adapter_source,
+        )
+        self.assertIn(
+            "environment_mode != runtime_mode_",
+            self.adapter_source,
+        )
 
     def test_forest_scene_map_covers_forest_with_local_update_margin(self):
         sdf_map = self.config["forest"]["sdf_map"]

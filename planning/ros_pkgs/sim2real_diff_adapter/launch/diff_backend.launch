@@ -8,7 +8,7 @@
   <arg name="odom_topic" default="/localization/odom"/>
   <arg name="cloud_topic" default="/localization/cloud_registered"/>
   <arg name="config"
-       default="$(eval optenv('SIM2REAL_DIFF_PLANNER_CONFIG', '') or find('sim2real_diff_adapter') + '/config/planner.yaml')"/>
+       default="$(eval optenv('SIM2REAL_PLANNER_CONFIG', '') or find('sim2real_diff_adapter') + '/config/planner.yaml')"/>
 
   <!-- The profile argument is intentionally accepted for the common manager
        contract. Diff-Planner owns one rolling-map parameter set. -->

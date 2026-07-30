@@ -471,7 +471,8 @@ public:
 					Controller_Output_t &output,
 					double odom_timeout_sec = 0.2,
 					double imu_timeout_sec = 0.2,
-					double control_dt_sec = kCtrlDt_){
+					double control_dt_sec = kCtrlDt_,
+					bool align_attitude_with_imu = true){
 		if(!odom_data.isFresh(odom_timeout_sec) ||
 		   !imu_data.isFresh(imu_timeout_sec) ||
 		   !desired_state.isValid() ||
@@ -540,7 +541,15 @@ public:
 			resetIntegral();
 			return false;
 		}
-		output.q = imu_data.q * odom_data.q.inverse() * desired_odom.q; // Align with FCU frame, from odom to imu frame
+		// External odometry can use an attitude reference that differs from the
+		// FCU IMU, in which case the legacy dynamic alignment is useful.  When
+		// odometry and IMU come from the same MAVROS estimator, however, their
+		// different publication rates make "latest IMU * latest odom^-1"
+		// oscillate even though the desired attitude is continuous.  Let the
+		// vehicle/plugin configuration select the appropriate contract.
+		output.q = align_attitude_with_imu
+			? imu_data.q * odom_data.q.inverse() * desired_odom.q
+			: desired_odom.q;
 		if (!se3_safety::isQuaternionValid(output.q))
 		{
 			resetIntegral();

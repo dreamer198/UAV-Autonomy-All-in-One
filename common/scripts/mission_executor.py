@@ -76,6 +76,22 @@ def native_takeoff_handoff_ready(
     )
 
 
+def select_takeoff_altitude(field, local, relative, target):
+    """Select the MAVROS altitude that represents the PX4 takeoff target."""
+    candidates = {"local": local, "relative": relative}
+    if field != "auto":
+        return field, candidates[field]
+
+    finite = [
+        (name, float(value))
+        for name, value in candidates.items()
+        if value is not None and math.isfinite(float(value))
+    ]
+    if not finite:
+        return "auto", None
+    return min(finite, key=lambda item: abs(item[1] - float(target)))
+
+
 def preflight_position_stream_ready(
     armed, setpoint_count, setpoint_age, odom_timeout, required_samples=10
 ):
@@ -130,8 +146,9 @@ class SharedMissionExecutor:
         self.abort_requested = False
         self.state = None
         self.state_received_at = 0.0
-        self.relative_altitude = None
+        self.takeoff_altitude = None
         self.altitude_received_at = 0.0
+        self.takeoff_altitude_source = args.takeoff_altitude_field
         self.vertical_velocity = None
         self.odom_received_at = 0.0
         self.position_setpoint_count = 0
@@ -196,7 +213,15 @@ class SharedMissionExecutor:
 
     def _altitude_callback(self, message):
         with self.condition:
-            self.relative_altitude = message.relative
+            (
+                self.takeoff_altitude_source,
+                self.takeoff_altitude,
+            ) = select_takeoff_altitude(
+                self.args.takeoff_altitude_field,
+                message.local,
+                message.relative,
+                self.config["takeoff_height"],
+            )
             self.altitude_received_at = time.monotonic()
             self.condition.notify_all()
 
@@ -295,7 +320,7 @@ class SharedMissionExecutor:
             with self.condition:
                 state = self.state
                 state_received_at = self.state_received_at
-                relative_altitude = self.relative_altitude
+                takeoff_altitude = self.takeoff_altitude
                 altitude_received_at = self.altitude_received_at
                 odom_received_at = self.odom_received_at
                 position_setpoint_count = self.position_setpoint_count
@@ -307,7 +332,7 @@ class SharedMissionExecutor:
                 and now - state_received_at <= self.config["state_timeout"]
             )
             altitude_is_fresh = (
-                relative_altitude is not None
+                takeoff_altitude is not None
                 and now - altitude_received_at <= self.args.altitude_timeout
             )
             odom_is_fresh = (
@@ -340,7 +365,7 @@ class SharedMissionExecutor:
             ready = (
                 state_is_fresh
                 and altitude_is_fresh
-                and math.isfinite(float(relative_altitude))
+                and math.isfinite(float(takeoff_altitude))
                 and odom_is_fresh
                 and position_stream_ready
             )
@@ -353,9 +378,9 @@ class SharedMissionExecutor:
                     missing.append("fresh MAVROS state")
                 if (
                     not altitude_is_fresh
-                    or not math.isfinite(float(relative_altitude))
+                    or not math.isfinite(float(takeoff_altitude))
                 ):
-                    missing.append("fresh relative altitude")
+                    missing.append("fresh takeoff altitude")
                 if not odom_is_fresh:
                     missing.append("fresh localization")
                 if not position_stream_ready:
@@ -383,7 +408,7 @@ class SharedMissionExecutor:
 
     def _state_snapshot(self):
         with self.condition:
-            return self.state, self.relative_altitude
+            return self.state, self.takeoff_altitude
 
     def _state_is_fresh(self, now=None):
         if now is None:
@@ -400,7 +425,7 @@ class SharedMissionExecutor:
             now = time.monotonic()
         with self.condition:
             return (
-                self.relative_altitude is not None
+                self.takeoff_altitude is not None
                 and now - self.altitude_received_at
                 <= self.args.altitude_timeout
             )
@@ -669,12 +694,13 @@ class SharedMissionExecutor:
             now = time.monotonic()
             with self.condition:
                 vertical_velocity = self.vertical_velocity
+                altitude_source = self.takeoff_altitude_source
                 odom_is_fresh = (
                     now - self.odom_received_at
                     <= self.config["odom_timeout"]
                 )
                 altitude_is_fresh = (
-                    self.relative_altitude is not None
+                    self.takeoff_altitude is not None
                     and now - self.altitude_received_at
                     <= self.args.altitude_timeout
                 )
@@ -695,9 +721,10 @@ class SharedMissionExecutor:
                     stable_since = now
                 if now - stable_since >= self.args.takeoff_stable_time:
                     self.rospy.loginfo(
-                        "PX4 native takeoff settled in %s: altitude=%.2f m, "
+                        "PX4 native takeoff settled in %s: %s altitude=%.2f m, "
                         "vertical speed=%.2f m/s, stable for %.2f s.",
                         state.mode,
+                        altitude_source,
                         altitude,
                         vertical_velocity,
                         self.args.takeoff_stable_time,
@@ -1096,6 +1123,16 @@ def _build_parser():
         help=(
             "Optional MPC_THR_HOVER calibration used by PX4 native takeoff. "
             "Omit on real flight to retain the autopilot's stored value."
+        ),
+    )
+    parser.add_argument(
+        "--takeoff-altitude-field",
+        choices=("relative", "local", "auto"),
+        default="relative",
+        help=(
+            "mavros_msgs/Altitude field used for takeoff completion. "
+            "Simulation can use auto to select whichever of local/relative "
+            "matches the PX4 target; real flight defaults to relative."
         ),
     )
     parser.add_argument(

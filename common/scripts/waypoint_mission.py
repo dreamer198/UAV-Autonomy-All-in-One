@@ -78,6 +78,16 @@ DEFAULTS = {
     "odom_timeout": 0.5,
 }
 
+# A rolling local map cannot authoritatively validate distant waypoints before
+# the vehicle has moved near them.  These backend reason codes are therefore
+# deferred during whole-mission preflight only; every waypoint is validated
+# again immediately before it is published.
+DEFERRED_PREFLIGHT_GOAL_REASONS = frozenset(
+    {
+        "goal_out_of_local_map",
+    }
+)
+
 
 class MissionConfigError(ValueError):
     pass
@@ -530,8 +540,14 @@ class WaypointMission:
             elif goal_id != self.current_goal_id:
                 return
 
+            state = int(message.state)
+            goal_update_states = {
+                int(getattr(message, "PLANNING", 2)),
+                int(getattr(message, "ACTIVE", 3)),
+                int(getattr(message, "REACHED", 5)),
+            }
             active_goal = getattr(message, "active_goal", None)
-            if active_goal is not None:
+            if active_goal is not None and state in goal_update_states:
                 position = active_goal.pose.position
                 goal = (float(position.x), float(position.y), float(position.z))
                 if all(math.isfinite(value) for value in goal):
@@ -558,13 +574,13 @@ class WaypointMission:
                 int(getattr(message, "FAULT", 6)),
             }
             if (
-                int(message.state) in active_states
+                state in active_states
                 and bool(message.armable)
                 and int(message.trajectory_id) > 0
             ):
                 self.current_plan_accepted = True
                 self.current_planner_stopped_at = None
-            elif int(message.state) in stop_states:
+            elif state in stop_states:
                 if self.current_planner_stopped_at is None:
                     self.current_planner_stopped_at = now
         if fallback_update is not None:
@@ -629,7 +645,15 @@ class WaypointMission:
             previous[2],
         )
 
-    def _validate_waypoint(self, waypoint, index, count, session_id):
+    def _validate_waypoint(
+        self,
+        waypoint,
+        index,
+        count,
+        session_id,
+        *,
+        defer_dynamic_map_rejections=False,
+    ):
         pose = self.PoseStamped()
         pose.header.stamp = self.rospy.Time.now()
         pose.header.frame_id = "world"
@@ -658,18 +682,31 @@ class WaypointMission:
                 "{}/{}: {}".format(index, count, exc),
             )
         if not response.valid:
+            backend_reason = (response.reason or "").strip()
+            if (
+                defer_dynamic_map_rejections
+                and backend_reason in DEFERRED_PREFLIGHT_GOAL_REASONS
+            ):
+                self.rospy.loginfo(
+                    "Deferring selected planner validation for waypoint "
+                    "%d/%d until dispatch: %s",
+                    index,
+                    count,
+                    backend_reason,
+                )
+                return True, ""
             return (
                 False,
                 "selected planner rejected waypoint {}/{}: {}".format(
                     index,
                     count,
-                    response.reason or "unspecified validation failure",
+                    backend_reason or "unspecified validation failure",
                 ),
             )
         return True, ""
 
     def validate_all_goals(self):
-        """Validate every mission point with the selected backend before arm."""
+        """Preflight goals, deferring only rolling-map range checks."""
         if self.goals_validated:
             return True, ""
         try:
@@ -683,7 +720,11 @@ class WaypointMission:
         count = len(self.config["waypoints"])
         for index, waypoint in enumerate(self.config["waypoints"], start=1):
             valid, reason = self._validate_waypoint(
-                waypoint, index, count, "mission-preflight"
+                waypoint,
+                index,
+                count,
+                "mission-preflight",
+                defer_dynamic_map_rejections=True,
             )
             if not valid:
                 return False, reason
@@ -770,6 +811,8 @@ class WaypointMission:
         with self.lock:
             self.current_plan_accepted = False
             self.current_planner_stopped_at = None
+            self.current_goal_stamp = None
+            self.current_goal_id = None
         return True, ""
 
     def request_abort(self):

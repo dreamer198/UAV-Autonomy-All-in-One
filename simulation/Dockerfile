@@ -10,9 +10,9 @@ ARG BUILD_JOBS=4
 ARG NLOPT_DEBIAN_VERSION=2.6.1-8ubuntu2
 
 LABEL org.opencontainers.image.title="UAV Autonomy All-in-One simulation" \
-      io.diff-planner.simulation.px4-commit="$PX4_COMMIT" \
-      io.diff-planner.simulation.mid360-commit="$MID360_COMMIT" \
-      io.sim2real.planner-workspaces="v1"
+      io.uav-autonomy-aio.simulation.px4-commit="$PX4_COMMIT" \
+      io.uav-autonomy-aio.simulation.mid360-commit="$MID360_COMMIT" \
+      io.sim2real.planner-workspaces="v2"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     ROS_DISTRO=noetic \
@@ -42,6 +42,7 @@ RUN apt-get -o Acquire::Retries=5 update \
     lcov \
     libapr1-dev \
     libarmadillo-dev \
+    libdw-dev \
     libeigen3-dev \
     libgazebo11-dev \
     libgflags-dev \
@@ -55,6 +56,7 @@ RUN apt-get -o Acquire::Retries=5 update \
     libprotobuf-dev \
     libxml2-dev \
     libxml2-utils \
+    libyaml-cpp-dev \
     net-tools \
     ninja-build \
     pkg-config \
@@ -72,12 +74,14 @@ RUN apt-get -o Acquire::Retries=5 update \
     rsync \
     ros-noetic-cv-bridge \
     ros-noetic-ddynamic-reconfigure \
+    ros-noetic-dynamic-reconfigure \
     ros-noetic-eigen-conversions \
     ros-noetic-gazebo-plugins \
     ros-noetic-gazebo-ros-pkgs \
     ros-noetic-laser-geometry \
     ros-noetic-mavros \
     ros-noetic-mavros-extras \
+    ros-noetic-message-filters \
     ros-noetic-pcl-ros \
     ros-noetic-roslint \
     ros-noetic-rviz \
@@ -85,6 +89,7 @@ RUN apt-get -o Acquire::Retries=5 update \
     ros-noetic-tf2-geometry-msgs \
     ros-noetic-tf2-ros \
     ros-noetic-tf2-sensor-msgs \
+    ros-noetic-visualization-msgs \
     shellcheck \
     sudo \
     unzip \

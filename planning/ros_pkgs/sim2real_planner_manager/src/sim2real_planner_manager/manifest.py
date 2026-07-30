@@ -31,6 +31,7 @@ _ROOT_KEYS = frozenset(
         "variant",
         "adapter_node",
         "workspace_setup",
+        "controller_config",
         "launch",
         "default_profile",
         "profiles",
@@ -102,6 +103,7 @@ class CapabilitySpec:
 @dataclass(frozen=True)
 class RuntimePaths:
     workspace_setup: Path
+    controller_config: Optional[Path] = None
     package_path: Optional[Path] = None
     launch_file: Optional[Path] = None
 
@@ -115,6 +117,7 @@ class PluginManifest:
     variant: str
     adapter_node: str
     workspace_setup: str
+    controller_config: str
     launch: LaunchSpec
     default_profile: str
     profiles: Tuple[str, ...]
@@ -190,8 +193,34 @@ class PluginManifest:
             raise ManifestError(
                 "{}: workspace setup is not readable: {}".format(self.id, setup)
             )
+
+        controller_config = (root / self.controller_config).absolute()
+        canonical_controller_config = controller_config.resolve()
+        try:
+            canonical_controller_config.relative_to(root)
+        except ValueError as exc:
+            raise ManifestError(
+                "{}: controller_config escapes repository root".format(
+                    self.source
+                )
+            ) from exc
+        if not controller_config.is_file():
+            raise ManifestError(
+                "{}: controller config does not exist: {}".format(
+                    self.id, controller_config
+                )
+            )
+        if not os.access(str(controller_config), os.R_OK):
+            raise ManifestError(
+                "{}: controller config is not readable: {}".format(
+                    self.id, controller_config
+                )
+            )
         if not check_launch:
-            return RuntimePaths(workspace_setup=setup)
+            return RuntimePaths(
+                workspace_setup=setup,
+                controller_config=controller_config,
+            )
 
         package_path = _rospack_find(
             setup, self.launch.package, timeout_sec=timeout_sec
@@ -209,6 +238,7 @@ class PluginManifest:
             )
         return RuntimePaths(
             workspace_setup=setup,
+            controller_config=controller_config,
             package_path=package_path,
             launch_file=launch_file,
         )
@@ -246,7 +276,7 @@ def clean_runtime_environment() -> Dict[str, str]:
         "ROS_MASTER_URI",
         "ROS_NAMESPACE",
         "SIM2REAL_RUNTIME_MODE",
-        "SIM2REAL_DIFF_PLANNER_CONFIG",
+        "SIM2REAL_PLANNER_CONFIG",
         "USER",
         "XAUTHORITY",
     }
@@ -420,6 +450,19 @@ def load_manifest(path: Path) -> PluginManifest:
             "workspace_setup must be a repository-relative setup.bash path"
         )
 
+    controller_config = _string(
+        root["controller_config"], "controller_config"
+    )
+    controller_config_path = Path(controller_config)
+    if (
+        controller_config_path.is_absolute()
+        or ".." in controller_config_path.parts
+        or controller_config_path.suffix not in (".yaml", ".yml")
+    ):
+        raise ManifestError(
+            "controller_config must be a repository-relative YAML path"
+        )
+
     launch_raw = _mapping(root["launch"], "launch")
     _reject_unknown(launch_raw, _LAUNCH_KEYS, "launch")
     package = _string(launch_raw["package"], "launch.package")
@@ -506,6 +549,7 @@ def load_manifest(path: Path) -> PluginManifest:
         variant=variant,
         adapter_node=adapter_node,
         workspace_setup=workspace_setup,
+        controller_config=controller_config,
         launch=LaunchSpec(
             package=package, file=launch_file, arguments=arguments
         ),

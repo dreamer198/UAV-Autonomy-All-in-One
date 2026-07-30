@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONTAINER_NAME="${CONTAINER_NAME:-diff_planner_px4_real}"
+CONTAINER_NAME="${CONTAINER_NAME:-uav_autonomy_real}"
 RUNTIME_DIR="${RUNTIME_DIR:-$PROJECT_ROOT/runtime}"
 SESSION_NAME="${BAG_SESSION_NAME:-real_bag_playback}"
 REAL_SESSION_NAME="${REAL_SESSION_NAME:-real_px4_stack}"
@@ -37,7 +37,7 @@ need_cmd() {
 }
 
 container_running() {
-  [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)" = "true" ]
+  [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)" = "true" ]
 }
 
 detect_ros_ip() {
@@ -60,13 +60,13 @@ master_running() {
 }
 
 flight_nodes_running() {
-  docker_ros "rosnode list 2>/dev/null | grep -Eq '^/(mavros(/|$)|se3_controller_node$|drone_0_|fastlio_mapping$|livox_lidar_publisher|localization_guard$|odom_to_base$|odom_to_pose$|cloud_relay$|trajectory_msg_converter$|flight_recorder$)'"
+  docker_ros "rosnode list 2>/dev/null | grep -Eq '^/(mavros(/|$)|planning/backends/super/(planner|adapter)$|se3_controller_node$|drone_0_|fastlio_mapping$|livox_lidar_publisher|localization_guard$|odom_to_base$|odom_to_pose$|cloud_relay$|trajectory_msg_converter$|flight_recorder$)'"
 }
 
 flight_processes_running() {
   container_running || return 1
   docker top "$CONTAINER_NAME" -eo args 2>/dev/null |
-    grep -Eq 'mavros_node|se3_controller_node|diff_planner_node|traj_server|fastlio_mapping|livox_ros_driver2_node|localization_guard\.py|trajectory_msg_converter\.py|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
+    grep -Eq 'mavros_node|se3_controller_node|diff_planner_node|super_backend_adapter_node|super_planner/fsm_node|traj_server|fastlio_mapping|livox_ros_driver2_node|localization_guard\.py|trajectory_msg_converter\.py|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
 }
 
 write_master_marker() {

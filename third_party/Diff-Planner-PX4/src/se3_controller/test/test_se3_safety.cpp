@@ -165,6 +165,49 @@ TEST_F(Se3SafetyTest, ControlRejectsStaleImuAndInvalidDesiredState)
       odom, imu, desired, output, 0.2, 0.2, 0.01));
 }
 
+TEST_F(Se3SafetyTest, SameEstimatorCanBypassAsynchronousAttitudeAlignment)
+{
+  SE3_CONTROLLER controller;
+  controller.init(0.5, 0.8, 0.0, 0.9, true, false);
+  ASSERT_TRUE(controller.setup(
+      Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(),
+      100.0, 100.0, 100.0,
+      1000.0, 1000.0, 1000.0));
+
+  ros::Time::setNow(ros::Time(50.0));
+  Odom_Data_t odom;
+  Imu_Data_t imu;
+  ASSERT_TRUE(odom.feed(validOdom(50.0), true, false));
+  sensor_msgs::ImuPtr imu_msg = validImu(50.0);
+  const double half_yaw = M_PI / 4.0;
+  imu_msg->orientation.z = std::sin(half_yaw);
+  imu_msg->orientation.w = std::cos(half_yaw);
+  ASSERT_TRUE(imu.feed(imu_msg, true));
+
+  Desired_State_t desired;
+  Controller_Output_t aligned_output;
+  Controller_Output_t direct_output;
+  ASSERT_TRUE(controller.calControl(
+      odom, imu, desired, aligned_output, 0.2, 0.2, 0.01, true));
+  controller.resetIntegral();
+  ASSERT_TRUE(controller.calControl(
+      odom, imu, desired, direct_output, 0.2, 0.2, 0.01, false));
+
+  EXPECT_NEAR(
+      std::abs(aligned_output.q.z()), std::sin(half_yaw), 1e-9);
+  EXPECT_NEAR(std::abs(direct_output.q.z()), 0.0, 1e-9);
+  EXPECT_NEAR(std::abs(direct_output.q.w()), 1.0, 1e-9);
+}
+
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);

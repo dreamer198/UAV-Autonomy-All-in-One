@@ -141,7 +141,8 @@ class FastBackendAdapter {
         (backend_id_ == "fast-kino" && planner_ != 1) ||
         (backend_id_ == "fast-topo" && planner_ != 2) ||
         profile_ != "local" ||
-        runtime_mode_ != "simulation" || environment_mode != runtime_mode_ ||
+        (runtime_mode_ != "simulation" && runtime_mode_ != "real") ||
+        environment_mode != runtime_mode_ ||
         backend_namespace_.empty() ||
         backend_namespace_.find('-') != std::string::npos ||
         !finite(command_rate_) || !finite(status_rate_) ||

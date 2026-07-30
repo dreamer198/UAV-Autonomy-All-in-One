@@ -1,6 +1,5 @@
 # PX4 SITL iris_mid360 专用的 SE3 控制与安全参数。这里不定义质量、
-# 惯量、电机模型或 PX4 内环参数。Planner 参数统一维护在
-# 规划与地图参数属于所选插件，不放在本文件中。
+# 惯量、电机模型或 PX4 内环参数；规划与地图参数由所选插件维护，不放在本文件中。
 
 # 启用仿真专用控制路径。公共 controller.yaml 仍禁止自动 OFFBOARD 和解锁，
 # 并以 odom_timeout=0.2 s 判断 MAVROS 里程计是否新鲜。必须显式执行
@@ -14,9 +13,11 @@ hover_percent: 0.755
 # 在线推力估计允许的最大悬停推力。公共配置关闭了推力估计，当前不会在线调整。
 max_hover_percent: 0.85
 
-# SE3 在已解锁且处于 OFFBOARD 时发送的归一化推力上下限。
+# SE3 在已解锁且处于 OFFBOARD 时发送的归一化推力上下限。0.99 只用于
+# SITL：0.95 在 SUPER 低空上拉段会连续饱和，无法跟踪 3.0 m/s² 规划边界。
+# 真机使用独立 deployment/config/controller.yaml，不继承此值。
 min_output_thrust: 0.20
-max_output_thrust: 0.95
+max_output_thrust: 0.99
 
 # 软件围栏：x/y 为正负对称边界，z 为高度上限。公共配置关闭自动降落，
 # 超出围栏时当前只记录警告。

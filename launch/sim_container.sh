@@ -10,8 +10,8 @@ VERSIONS_FILE="$PROJECT_ROOT/simulation/versions.env"
 # shellcheck disable=SC1090
 source "$VERSIONS_FILE"
 
-IMAGE_NAME="${SIM_DEV_IMAGE:-diff_planner_px4_sim:noetic}"
-CONTAINER_NAME="${SIM_DEV_CONTAINER:-diff_planner_px4_sim}"
+IMAGE_NAME="${SIM_DEV_IMAGE:-uav_autonomy_sim:noetic}"
+CONTAINER_NAME="${SIM_DEV_CONTAINER:-uav_autonomy_sim}"
 SOURCE_HOST="${SIM_SOURCE_HOST:-$PROJECT_ROOT/third_party/Diff-Planner-PX4}"
 COMMON_SOURCE_HOST="${SIM_COMMON_SOURCE_HOST:-$PROJECT_ROOT/common}"
 ADAPTER_SOURCE_HOST="${SIM_ADAPTER_SOURCE_HOST:-$PROJECT_ROOT/simulation/ros_pkgs/sim2real_simulation}"
@@ -40,9 +40,9 @@ usage() {
 Usage: sim_container.sh {build|run|stop|restart|recreate|rm|shell|status|verify} [--force]
 
 Builds and manages the repository-owned PX4/Gazebo/Mid360 simulation image.
-The repository is mounted read-only and the four generated planner workspaces
+The repository is mounted read-only and the five generated planner workspaces
 are mounted read-write below planning/workspaces. Legacy source mounts are
-retained for compatibility but are not used to overlay Fast and Diff together.
+retained for compatibility but are not used to overlay planner domains together.
 No pre-existing ros_noetic container is used. SIM_GPU_MODE defaults to auto
 and accepts auto|nvidia|dri|none.
 Container mutation is refused while a simulation stack is active. --force is
@@ -108,11 +108,11 @@ resolve_gpu_mode() {
 }
 
 container_exists() {
-  docker inspect "$CONTAINER_NAME" >/dev/null 2>&1
+  docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1
 }
 
 container_running() {
-  [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" = "true" ]
+  [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" = "true" ]
 }
 
 active_simulation_detected() {
@@ -123,7 +123,7 @@ active_simulation_detected() {
 
   container_running || return 1
   docker top "$CONTAINER_NAME" -eo args 2>/dev/null |
-    grep -Eq '(^|[ /])(roscore|rosmaster|gzserver|gzclient|mavros_node|px4|se3_controller_node|diff_planner_node|fast_planner_node|traj_server)([[:space:]]|$)|planner_backend_runner\.py|planner_(manager|gateway|visualization)\.py|command_gateway\.py|(diff|fast)_backend_adapter|sim2real_(diff|fast)_adapter|outdoor_mid360\.launch|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
+    grep -Eq '(^|[ /])(roscore|rosmaster|gzserver|gzclient|mavros_node|px4|se3_controller_node|diff_planner_node|fast_planner_node|super_backend_adapter_node|traj_server)([[:space:]]|$)|planner_backend_runner\.py|planner_(manager|gateway|visualization)\.py|command_gateway\.py|(diff|fast)_backend_adapter|sim2real_(diff|fast)_adapter|sim2real_super_adapter|super_planner/fsm_node|outdoor_mid360\.launch|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
 }
 
 require_inactive_simulation() {
@@ -181,12 +181,12 @@ canonical_path() {
 
 mount_source_for() {
   local mount_destination="$1"
-  docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.Source}}{{end}}{{end}}" "$CONTAINER_NAME"
+  docker container inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.Source}}{{end}}{{end}}" "$CONTAINER_NAME"
 }
 
 mount_rw_for() {
   local mount_destination="$1"
-  docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.RW}}{{end}}{{end}}" "$CONTAINER_NAME"
+  docker container inspect --format "{{range .Mounts}}{{if eq .Destination \"$mount_destination\"}}{{.RW}}{{end}}{{end}}" "$CONTAINER_NAME"
 }
 
 verify_live_bind_mount() {
@@ -250,10 +250,10 @@ verify_mounts() {
   actual_config_rw="$(mount_rw_for "$SIMULATION_CONFIG_CONTAINER")"
   actual_workspace_rw="$(mount_rw_for "$WORKSPACE_CONTAINER")"
   actual_runtime_rw="$(mount_rw_for "$RUNTIME_CONTAINER")"
-  actual_workspace_env="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" | sed -n 's/^SIM_WORKSPACE_CONTAINER=//p' | tail -n 1)"
-  actual_plugin_path="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" | sed -n 's/^SIM2REAL_PLANNER_PLUGIN_PATH=//p' | tail -n 1)"
+  actual_workspace_env="$(docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" | sed -n 's/^SIM_WORKSPACE_CONTAINER=//p' | tail -n 1)"
+  actual_plugin_path="$(docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" | sed -n 's/^SIM2REAL_PLANNER_PLUGIN_PATH=//p' | tail -n 1)"
   expected_gpu_mode="$(resolve_gpu_mode)" || return 1
-  actual_gpu_mode="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" | sed -n 's/^SIM_GPU_MODE_RESOLVED=//p' | tail -n 1)"
+  actual_gpu_mode="$(docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" | sed -n 's/^SIM_GPU_MODE_RESOLVED=//p' | tail -n 1)"
 
   [ "$(canonical_path "$actual_source")" = "$expected_source" ] || {
     die "Container source mount is stale: '$actual_source'. Run '$0 recreate'."
@@ -323,14 +323,14 @@ verify_mounts() {
     die "Container GPU mode is stale: '${actual_gpu_mode:-unset}' (expected '$expected_gpu_mode'). Run '$0 recreate'."
   }
   if [ "$expected_gpu_mode" = "nvidia" ]; then
-    actual_gpu_request="$(docker inspect --format '{{json .HostConfig.DeviceRequests}}' "$CONTAINER_NAME")"
+    actual_gpu_request="$(docker container inspect --format '{{json .HostConfig.DeviceRequests}}' "$CONTAINER_NAME")"
     grep -q '"gpu"' <<<"$actual_gpu_request" || {
       die "Container is missing its NVIDIA device request. Run '$0 recreate'."
     }
   fi
 
   expected_image_id="$(docker image inspect -f '{{.Id}}' "$IMAGE_NAME")"
-  actual_image_id="$(docker inspect -f '{{.Image}}' "$CONTAINER_NAME")"
+  actual_image_id="$(docker container inspect -f '{{.Image}}' "$CONTAINER_NAME")"
   [ "$actual_image_id" = "$expected_image_id" ] || {
     die "Container image is stale. Run '$0 recreate' after rebuilding '$IMAGE_NAME'."
   }
@@ -375,7 +375,7 @@ ensure_image() {
       -f '{{index .Config.Labels "io.sim2real.planner-workspaces"}}' \
       "$IMAGE_NAME" 2>/dev/null || true
   )"
-  if [ "$planner_layout" != "v1" ]; then
+  if [ "$planner_layout" != "v2" ]; then
     info "Simulation image is missing or predates planner workspace isolation; building it from $DOCKERFILE"
     build_image
   fi
@@ -501,13 +501,14 @@ create_container() {
 
 run_container() {
   local force="${1:-false}"
+  local layout_report=""
   need_cmd docker
   need_cmd realpath
   resolve_gpu_mode >/dev/null
 
   if container_exists; then
     ensure_image
-    if ! (verify_mounts); then
+    if ! layout_report="$(verify_mounts 2>&1)"; then
       validate_container_inputs
       require_inactive_simulation "$force"
       warn "Container layout is stale; recreating it for the UAV Autonomy All-in-One workspace."
@@ -515,6 +516,7 @@ run_container() {
       create_container
       return
     fi
+    printf '%s\n' "$layout_report"
     if container_running; then
       info "Container is already running: $CONTAINER_NAME"
     else

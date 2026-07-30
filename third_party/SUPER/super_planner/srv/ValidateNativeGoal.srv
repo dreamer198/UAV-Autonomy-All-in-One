@@ -1,0 +1,5 @@
+geometry_msgs/PoseStamped goal
+---
+bool valid
+string reason
+geometry_msgs/PoseStamped effective_goal

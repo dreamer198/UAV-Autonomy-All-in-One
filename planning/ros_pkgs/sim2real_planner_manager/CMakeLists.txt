@@ -4,6 +4,7 @@ project(sim2real_planner_manager)
 find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   mavros_msgs
+  nav_msgs
   rospy
   sensor_msgs
   sim2real_planning_msgs
@@ -18,6 +19,7 @@ catkin_package(
   CATKIN_DEPENDS
   geometry_msgs
   mavros_msgs
+  nav_msgs
   rospy
   sensor_msgs
   sim2real_planning_msgs
@@ -40,6 +42,7 @@ install(DIRECTORY launch
 
 if(CATKIN_ENABLE_TESTING)
   catkin_add_nosetests(test/test_command_gate.py)
+  catkin_add_nosetests(test/test_gateway_status.py)
   catkin_add_nosetests(test/test_manifest.py)
   catkin_add_nosetests(test/test_rate_monitor.py)
   catkin_add_nosetests(test/test_validation.py)

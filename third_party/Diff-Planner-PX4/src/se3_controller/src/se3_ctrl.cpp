@@ -34,6 +34,8 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     nh_.param<bool>("enable_thrust_estimation", enable_thrust_estimation_, false);
     nh_.param<bool>("use_acceleration_feedforward", use_acceleration_feedforward_, true);
     nh_.param<bool>("use_yaw_rate_feedforward", use_yaw_rate_feedforward_, true);
+    nh_.param<bool>(
+        "align_attitude_with_imu", align_attitude_with_imu_, true);
     nh_.param<double>("max_feedforward_acc", max_feedforward_acc_, 2.0);
     nh_.param<double>("odom_timeout", odom_timeout_, 0.2);
     nh_.param<double>("imu_timeout", imu_timeout_, 0.2);
@@ -175,6 +177,11 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
              use_yaw_rate_feedforward_ ? "true" : "false",
              max_feedforward_acc_);
     ROS_INFO(
+        "[se3_controller] attitude reference: %s",
+        align_attitude_with_imu_
+            ? "dynamic IMU-to-odometry alignment"
+            : "direct desired attitude (shared MAVROS estimator)");
+    ROS_INFO(
         "[se3_controller] input timeouts: state=%.3f odom=%.3f imu=%.3f "
         "trajectory=%.3f s",
         state_timeout_, odom_timeout_, imu_timeout_,
@@ -299,7 +306,8 @@ void se3Ctrl::execFSMCallback(const ros::TimerEvent &e){
         Controller_Output_t output;
         if(se3_controller_.calControl(
                odom_data_, imu_data_, desired_state_, output,
-               odom_timeout_, imu_timeout_, control_dt)){
+               odom_timeout_, imu_timeout_, control_dt,
+               align_attitude_with_imu_)){
             if (!send_cmd(output, true)) {
                 requestSafetyHold("non-finite controller output");
                 return;

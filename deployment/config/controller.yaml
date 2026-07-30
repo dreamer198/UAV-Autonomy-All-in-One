@@ -1,15 +1,15 @@
-# Real-vehicle-specific SE3 control and safety parameters. This file includes
-# a measured hover-thrust calibration, but it does not define mass, inertia,
-# motor models, sensor calibration, or PX4 inner-loop gains. Planner parameters
-# belong to the selected planner plugin and must not be duplicated here.
-enable_sim: false
-hover_percent: 0.50
-max_hover_percent: 0.95
-min_output_thrust: 0.20
-max_output_thrust: 1.00
+# 真机载体的 SE3 控制与安全参数；不包含规划器或 PX4 内环参数。
+enable_sim: false          # 真机必须为 false
+hover_percent: 0.50        # 核心参数，稳定悬停所需的归一化推力
+max_hover_percent: 0.95    # 在线推力估计允许的悬停推力上限
+min_output_thrust: 0.20    # SE3 允许输出的最小归一化推力
+max_output_thrust: 1.00    # SE3 允许输出的最大归一化推力
+
+# 软件围栏：x/y 为正负对称边界，z 为高度上限，单位 m。
 geo_fence:
   x: 50.0
   y: 50.0
   z: 3.0
-ki_pz: 0.30
-int_limit_z: 5.0
+
+ki_pz: 0.30               # 高度位置误差的积分增益
+int_limit_z: 5.0          # 高度累计误差限幅，单位 m·s

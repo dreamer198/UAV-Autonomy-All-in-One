@@ -19,31 +19,36 @@ selected planner → planner_gateway → /command/trajectory
 | `/mavros/state` | 连接、解锁和飞行模式 |
 | `/command/trajectory` | 期望位置、速度、加速度和 yaw |
 
-| 输出 | 作用 |
+| 输出话题 | 作用 |
 |---|---|
 | `/mavros/setpoint_raw/attitude` | 姿态四元数和归一化推力 |
 | `/mavros/setpoint_position/local` | OFFBOARD 交接前的位置 setpoint |
 | `/desire_odom_pub` | 控制器实际采用的期望状态 |
-| `/land` | 请求 PX4 `AUTO.LAND` |
 
-控制周期为 10 ms。控制器使用 ENU；MAVROS odom 的 twist 按
-`child_frame_id` 从机体系旋转到世界系后参与反馈。
+控制器还提供 `/land`（`std_srvs/SetBool`）服务。只有 `data=true` 才会进入降落
+流程并循环请求 PX4 `AUTO.LAND`；该服务不会强制解除武装。
+
+控制定时器的标称周期为 10 ms。控制器使用 ENU，并固定将 MAVROS odom 的
+`twist.linear` 视为机体系速度，再用当前姿态旋转到世界系参与反馈。代码不会读取
+`child_frame_id` 自动判断速度坐标系，因此输入必须遵守这一约定。
 
 ## 模式和命令门禁
 
-SE3 不主动解锁或进入 OFFBOARD。`sim.sh arm`、`real.sh arm` 和 Mission 执行器负责
-PX4 原生起飞与模式交接。
+当前公共配置将 `auto_request_offboard` 和 `auto_request_arm` 均设为 `false`，
+因此 SE3 不主动解锁或进入 OFFBOARD。`sim.sh arm`、`real.sh arm` 和 Mission
+执行器负责 PX4 原生起飞与模式交接。
 
 进入 OFFBOARD 后，控制器先保持当前位置，直到收到合法轨迹。轨迹必须：
 
 - 来自 `/planner_gateway`；
 - 在 armed/OFFBOARD 下接收；
-- 包含有限的位置、速度和有效姿态；
+- 至少包含一个 transform 和 velocity；控制器只使用第一条轨迹点，加速度可选；
+- 包含有限的位置、速度、可选加速度和有效姿态四元数；
 - 在里程计、IMU、MAVROS 状态有效时接收。
 
 `trajectory_command_timeout` 默认为 `0.08 s`。命令流中断后，控制器把移动 setpoint
 替换为当前位置零速度保持；后续合法命令可以恢复跟踪。离开 OFFBOARD、解除武装或
-输入失效会清除旧轨迹状态。
+MAVROS state、里程计、IMU 失效都会清除旧轨迹状态。
 
 输入失效时：
 
@@ -89,8 +94,8 @@ normalized_thrust = projected_acceleration / T_a
 - 归一化推力。
 
 因此主要调节对象是 `hover_percent`、推力上下限、`Kp_p/Kd_p`、`Kp_v/Kd_v`、
-`ki_pz` 和加速度前馈。`Kp_a/Kd_a`、`Kp_q` 等只影响当前被忽略的 body-rate
-支路。
+`ki_pz` 和加速度前馈。`Kp_a/Kd_a`、`Kp_q/Kd_q`、`Kp_w/Kd_w` 以及 yaw-rate
+前馈只影响当前被忽略的 body-rate 支路。
 
 ## 围栏
 
@@ -105,18 +110,27 @@ Planner 地图边界决定能否规划，SE3 围栏监控实际位置，两者�
 
 ## 配置
 
-[controller.launch](../common/launch/controller.launch) 先加载公共配置，再加载载体
-配置；后者覆盖同名参数。
+[controller.launch](../common/launch/controller.launch) 依次加载公共配置、当前规划器的
+控制器覆盖和载体配置；后加载的文件覆盖同名参数。规划器 manifest 的
+`controller_config` 决定第二层使用哪个文件。
 
 | 文件 | 内容 |
 |---|---|
 | [common/config/controller.yaml](../common/config/controller.yaml) | 模式门禁、前馈、输入/命令超时和命令发布者 |
+| [common/config/controller_plugin_default.yaml](../common/config/controller_plugin_default.yaml) | Diff、Fast Kino/Topo 使用的空覆盖 |
+| [planning/plugins/super/controller.yaml](../planning/plugins/super/controller.yaml) | SUPER 专用反馈增益、姿态对齐和前馈上限 |
 | [simulation/config/controller.yaml](../simulation/config/controller.yaml) | SITL 推力、积分和围栏 |
 | [deployment/config/controller.yaml](../deployment/config/controller.yaml) | 真机推力、积分和围栏 |
 
-`Kp_*`、`Kd_*` 和误差限幅由 dynamic reconfigure 管理，其默认值位于
-[`tune.cfg`](../third_party/Diff-Planner-PX4/src/se3_controller/cfg/tune.cfg)；
-修改后需要重新构建。悬停推力、积分、前馈、超时和围栏使用上表中的 YAML。
+`Kp_*`、`Kd_*`、误差限幅、`ki_pz` 和 `int_limit_z` 由 dynamic reconfigure
+管理；启动时先读取上述 YAML，未覆盖项使用
+[`tune.cfg`](../third_party/Diff-Planner-PX4/src/se3_controller/cfg/tune.cfg) 中的
+默认值。运行中可通过 dynamic reconfigure 临时调整，重启后恢复 YAML/编译默认值；
+修改 `tune.cfg` 才需要重新构建。
+
+若某个规划器需要独立增益，应在该插件目录提供控制器覆盖，并由 manifest 引用，不要
+修改所有规划器共用的默认值。悬停推力和围栏由仿真/真机载体 YAML 管理，输入超时和
+命令来源由公共 YAML 管理。
 
 ## 调参顺序
 
@@ -139,7 +153,7 @@ Planner 地图边界决定能否规划，SE3 围栏监控实际位置，两者�
 
 1. 先记录 `ki_pz=0` 的悬停误差；
 2. 每次只小幅提高 `ki_pz`；
-3. 每个值重新进入 OFFBOARD，使积分从零开始；
+3. 每次修改后重新进入 OFFBOARD；dynamic reconfigure 更新也会立即清空积分；
 4. 选择能消除稳态高度偏差且不过冲的最小值。
 
 | 现象 | 处理 |
@@ -168,7 +182,7 @@ Planner 地图边界决定能否规划，SE3 围栏监控实际位置，两者�
 | `/desire_odom_pub` 与 `/mavros/local_position/odom` | 期望与实际误差 |
 | `/localization/odom` 与 MAVROS odom | 定位适配与 PX4 EKF 一致性 |
 | `/mavros/setpoint_raw/attitude` | 姿态、推力和饱和 |
-| `/command/trajectory` | SE3 收到的位置、速度、加速度和 yaw |
+| `/command/trajectory` | gateway 发出的 SE3 输入；是否被控制器接受还需结合状态与日志判断 |
 | `/mavros/state` | OFFBOARD、解锁和人工接管时刻 |
 
 仿真 bag 位于 `runtime/simulation/flight_bags/`，真机 bag 位于
@@ -181,6 +195,6 @@ Planner 地图边界决定能否规划，SE3 围栏监控实际位置，两者�
 3. `/command/trajectory` 是否持续更新；
 4. `/desire_odom_pub` 是否符合当前目标；
 5. `/mavros/setpoint_raw/attitude` 是否持续发布且推力未饱和；
-6. PX4 是否已进入 `AUTO.LOITER`，或触发 OFFBOARD/EKF failsafe。
+6. PX4 是否已进入 `AUTO.LOITER`、`AUTO.LAND`，或触发 OFFBOARD/EKF failsafe。
 
 真机调参必须在有净空的场地进行，飞手全程准备遥控接管，并保持 rosbag 录制。

@@ -50,6 +50,19 @@ class MissionExecutorTest(unittest.TestCase):
         self.assertFalse(ready("AUTO.TAKEOFF", 1.11, 0.0, 1.0, 0.1, 0.2))
         self.assertFalse(ready("AUTO.LOITER", 0.95, 0.3, 1.0, 0.1, 0.2))
 
+    def test_simulation_auto_altitude_uses_value_closest_to_target(self):
+        select = EXECUTOR.select_takeoff_altitude
+        self.assertEqual(select("auto", 0.78, 0.96, 1.0), ("relative", 0.96))
+        self.assertEqual(select("auto", 0.92, 0.75, 1.0), ("local", 0.92))
+        self.assertEqual(
+            select("relative", 0.92, 0.75, 1.0),
+            ("relative", 0.75),
+        )
+        self.assertEqual(
+            select("auto", float("nan"), None, 1.0),
+            ("auto", None),
+        )
+
     def test_disarmed_prearm_mode_matches_arm_executor_behavior(self):
         needs_reset = EXECUTOR.disarmed_mode_requires_reset
         self.assertFalse(needs_reset("AUTO.LOITER", "AUTO.LOITER"))
@@ -63,6 +76,7 @@ class MissionExecutorTest(unittest.TestCase):
         args = EXECUTOR._build_parser().parse_args(["mission.json"])
         self.assertEqual(args.landing_timeout, 120.0)
         self.assertEqual(args.disarmed_prearm_mode, "STABILIZED")
+        self.assertEqual(args.takeoff_altitude_field, "relative")
         self.assertIsNone(args.odom_timeout)
         self.assertEqual(args.state_topic, "/mavros/state")
         self.assertEqual(args.odometry_topic, "/localization/odom")
@@ -105,7 +119,7 @@ class MissionExecutorTest(unittest.TestCase):
         executor.state = SimpleNamespace(
             connected=True, armed=True, mode="AUTO.TAKEOFF"
         )
-        executor.relative_altitude = 0.4
+        executor.takeoff_altitude = 0.4
         executor.state_received_at = time.monotonic()
         executor.config = {"state_timeout": 3.0}
         executor.args = SimpleNamespace(command_timeout=0.2)
@@ -135,7 +149,7 @@ class MissionExecutorTest(unittest.TestCase):
         executor.state = SimpleNamespace(
             connected=True, armed=True, mode="AUTO.TAKEOFF"
         )
-        executor.relative_altitude = 0.4
+        executor.takeoff_altitude = 0.4
         executor.state_received_at = time.monotonic()
         executor.config = {"state_timeout": 3.0}
         executor.args = SimpleNamespace(command_timeout=0.2)
@@ -230,7 +244,7 @@ class MissionExecutorTest(unittest.TestCase):
             system_status=3,
         )
         executor.state_received_at = now
-        executor.relative_altitude = 1.0
+        executor.takeoff_altitude = 1.0
         executor.altitude_received_at = now
         executor.odom_received_at = now - 1.0
         executor.position_setpoint_count = 0
@@ -267,7 +281,7 @@ class MissionExecutorTest(unittest.TestCase):
             system_status=3,
         )
         executor.state_received_at = now
-        executor.relative_altitude = 1.0
+        executor.takeoff_altitude = 1.0
         executor.altitude_received_at = now
         executor.odom_received_at = 0.0
         executor.position_setpoint_count = 0

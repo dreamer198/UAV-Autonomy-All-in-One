@@ -12,6 +12,7 @@ import uuid
 import rospy
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.msg import State
+from nav_msgs.msg import Odometry
 from std_srvs.srv import Trigger, TriggerResponse
 from trajectory_msgs.msg import MultiDOFJointTrajectory
 
@@ -47,6 +48,31 @@ from sim2real_planner_manager.validation import (
     status_order_is_newer,
     validate_trajectory_point,
 )
+
+
+def stationary_point_at_pose(point, pose):
+    """Return a zero-motion controller point anchored at a measured pose."""
+    stationary = copy.deepcopy(point)
+    transform = stationary.transforms[0]
+    transform.translation.x = pose.position.x
+    transform.translation.y = pose.position.y
+    transform.translation.z = pose.position.z
+    transform.rotation = copy.deepcopy(pose.orientation)
+    for twist in stationary.velocities:
+        twist.linear.x = 0.0
+        twist.linear.y = 0.0
+        twist.linear.z = 0.0
+        twist.angular.x = 0.0
+        twist.angular.y = 0.0
+        twist.angular.z = 0.0
+    for twist in stationary.accelerations:
+        twist.linear.x = 0.0
+        twist.linear.y = 0.0
+        twist.linear.z = 0.0
+        twist.angular.x = 0.0
+        twist.angular.y = 0.0
+        twist.angular.z = 0.0
+    return stationary
 
 
 class PlannerGateway:
@@ -121,13 +147,30 @@ class PlannerGateway:
             )
         )
         self._rate_window = float(rospy.get_param("~rate_window", 1.0))
+        self._handoff_odom_timeout = float(
+            rospy.get_param("~handoff_odom_timeout", 0.2)
+        )
+        self._handoff_hold_rate = float(
+            rospy.get_param(
+                "~handoff_hold_rate",
+                max(100.0, 1.25 * self._manifest.rates.command_min_hz),
+            )
+        )
         if (
             not math.isfinite(self._startup_timeout)
             or self._startup_timeout <= 0.0
             or not math.isfinite(self._rate_window)
             or self._rate_window <= 0.0
+            or not math.isfinite(self._handoff_odom_timeout)
+            or self._handoff_odom_timeout <= 0.0
+            or not math.isfinite(self._handoff_hold_rate)
+            or self._handoff_hold_rate
+            < self._manifest.rates.command_min_hz
         ):
-            raise RuntimeError("startup_timeout and rate_window must be positive")
+            raise RuntimeError(
+                "timeouts and rate_window must be positive; handoff_hold_rate "
+                "must meet the plugin command-rate contract"
+            )
         self._state_timeout = float(rospy.get_param("~state_timeout", 3.0))
         self._backend_service_timeout = float(
             rospy.get_param("~backend_service_timeout", 2.0)
@@ -197,6 +240,12 @@ class PlannerGateway:
         self._capabilities = None
         self._capabilities_valid = False
         self._fault_reported = False
+        self._last_odom_pose = None
+        self._last_odom_at = 0.0
+        self._last_output_point = None
+        self._transition_hold_pose = None
+        self._cancel_hold_active = False
+        self._handoff_hold_sequence = 0
 
         rospy.Subscriber(
             rospy.get_param("~goal_topic", "/goal"),
@@ -209,6 +258,13 @@ class PlannerGateway:
             State,
             self._state_callback,
             queue_size=1,
+        )
+        rospy.Subscriber(
+            rospy.get_param("~odom_topic", "/localization/odom"),
+            Odometry,
+            self._odom_callback,
+            queue_size=1,
+            tcp_nodelay=True,
         )
         rospy.Subscriber(
             backend + "/command",
@@ -237,6 +293,10 @@ class PlannerGateway:
         self._watchdog_timer = rospy.Timer(
             rospy.Duration(min(0.02, self._command_timeout / 4.0)),
             self._watchdog_callback,
+        )
+        self._handoff_hold_timer = rospy.Timer(
+            rospy.Duration(1.0 / self._handoff_hold_rate),
+            self._handoff_hold_callback,
         )
         self._publisher_timer = rospy.Timer(
             rospy.Duration(2.0), self._publisher_check_callback
@@ -373,11 +433,97 @@ class PlannerGateway:
                 and not was_revoked
                 and self._gate.is_revoked
             ):
+                self._cancel_hold_active = False
+                self._transition_hold_pose = None
                 self._fault_reported = True
                 self._publish_lifecycle(
                     PlannerStatus.FAULT,
                     "vehicle left connected armed OFFBOARD; publish a new goal",
                 )
+
+    def _odom_callback(self, message):
+        now = self._now_monotonic()
+        stamp_valid = not message.header.stamp.is_zero()
+        stamp_age = (
+            (rospy.Time.now() - message.header.stamp).to_sec()
+            if stamp_valid
+            else float("inf")
+        )
+        position = message.pose.pose.position
+        orientation = message.pose.pose.orientation
+        values = (
+            position.x,
+            position.y,
+            position.z,
+            orientation.x,
+            orientation.y,
+            orientation.z,
+            orientation.w,
+        )
+        norm_sq = (
+            orientation.x * orientation.x
+            + orientation.y * orientation.y
+            + orientation.z * orientation.z
+            + orientation.w * orientation.w
+        )
+        if (
+            message.header.frame_id != self._goal_frame
+            or not stamp_valid
+            or not math.isfinite(stamp_age)
+            or stamp_age < -0.05
+            or stamp_age > self._handoff_odom_timeout
+            or not all(math.isfinite(value) for value in values)
+            or norm_sq <= 1.0e-12
+            or abs(math.sqrt(norm_sq) - 1.0) > 1.0e-3
+        ):
+            rospy.logwarn_throttle(
+                1.0,
+                "[planner_gateway] ignoring invalid or stale odometry for "
+                "transition HOLD",
+            )
+            return
+        accepted = copy.deepcopy(message.pose.pose)
+        norm = math.sqrt(norm_sq)
+        accepted.orientation.x /= norm
+        accepted.orientation.y /= norm
+        accepted.orientation.z /= norm
+        accepted.orientation.w /= norm
+        with self._lock:
+            self._last_odom_pose = accepted
+            self._last_odom_at = now
+
+    def _handoff_hold_callback(self, _event):
+        now = self._now_monotonic()
+        with self._lock:
+            transition = (
+                self._goal_id > 0
+                and not self._gate.is_open
+                and not self._gate.is_revoked
+            )
+            if (
+                self._last_output_point is None
+                or not (transition or self._cancel_hold_active)
+                or not self._gate.vehicle_ready(now)
+                or self._last_odom_pose is None
+                or now - self._last_odom_at > self._handoff_odom_timeout
+            ):
+                return
+            if self._transition_hold_pose is None:
+                self._transition_hold_pose = copy.deepcopy(
+                    self._last_odom_pose
+                )
+            output = MultiDOFJointTrajectory()
+            self._handoff_hold_sequence += 1
+            output.header.seq = self._handoff_hold_sequence
+            output.header.stamp = rospy.Time.now()
+            output.header.frame_id = self._goal_frame
+            output.points.append(
+                stationary_point_at_pose(
+                    self._last_output_point,
+                    self._transition_hold_pose,
+                )
+            )
+            self._output_pub.publish(output)
 
     def _normalize_goal(self, message):
         valid, reason, constrain_yaw = validate_goal_pose(
@@ -491,6 +637,8 @@ class PlannerGateway:
             # new goal, so a racing old command can never pass through.
             self._gate.begin_goal(self._goal_id)
             self._command_receipts.clear()
+            self._cancel_hold_active = False
+            self._transition_hold_pose = None
             self._fault_reported = False
             self._publish_lifecycle(
                 PlannerStatus.PLANNING, "goal accepted; waiting for backend plan"
@@ -555,6 +703,7 @@ class PlannerGateway:
                 accepted = copy.deepcopy(message)
                 accepted.session_id = self._session_id
             else:
+                was_open = self._gate.is_open
                 was_revoked = self._gate.is_revoked
                 decision = self._gate.update_status(
                     StatusSnapshot(
@@ -576,6 +725,12 @@ class PlannerGateway:
                         decision.reason,
                     )
                     return
+                if (
+                    was_open
+                    and not self._gate.is_open
+                    and not self._gate.is_revoked
+                ):
+                    self._transition_hold_pose = None
                 accepted = copy.deepcopy(message)
             self._last_backend_status = accepted
             self._last_backend_status_at = now
@@ -594,7 +749,11 @@ class PlannerGateway:
                     "authorization was revoked",
                 )
                 self._update_ready_time(now)
-                if accepted.odom_ready and accepted.map_ready:
+                if accepted.state == PlannerStatus.FAULT:
+                    fault = copy.deepcopy(accepted)
+                    fault.armable = False
+                    self._status_pub.publish(fault)
+                elif accepted.odom_ready and accepted.map_ready:
                     recoverable = copy.deepcopy(accepted)
                     recoverable.state = PlannerStatus.HOLDING
                     recoverable.armable = False
@@ -644,6 +803,8 @@ class PlannerGateway:
             if mismatch:
                 self._capabilities = None
                 self._gate.force_close()
+                self._cancel_hold_active = False
+                self._transition_hold_pose = None
                 self._publish_lifecycle(
                     PlannerStatus.FAULT,
                     "runtime capabilities disagree with manifest: {}".format(
@@ -751,6 +912,9 @@ class PlannerGateway:
             output = MultiDOFJointTrajectory()
             output.header = copy.deepcopy(message.header)
             output.points.append(copy.deepcopy(message.point))
+            self._last_output_point = copy.deepcopy(message.point)
+            if decision.opened_gate:
+                self._transition_hold_pose = None
             self._accepted_command_pub.publish(message)
             self._output_pub.publish(output)
             if not receipt_recorded:
@@ -825,6 +989,8 @@ class PlannerGateway:
             self._gate.cancel_goal()
             self._goal_request_generation += 1
             self._command_receipts.clear()
+            self._cancel_hold_active = self._last_output_point is not None
+            self._transition_hold_pose = None
             self._goal_started_at = 0.0
             self._fault_reported = False
             self._assigned_goal_pub.publish(cancel)
@@ -926,6 +1092,8 @@ class PlannerGateway:
                 or command_rate_low
             ):
                 self._gate.force_close()
+                self._cancel_hold_active = False
+                self._transition_hold_pose = None
                 self._fault_reported = True
                 if command_rate_low:
                     reason = "selected backend command rate is below manifest minimum"
@@ -971,6 +1139,8 @@ class PlannerGateway:
         if unexpected:
             with self._lock:
                 self._gate.force_close()
+                self._cancel_hold_active = False
+                self._transition_hold_pose = None
                 self._fault_reported = self._goal_id > 0
             rospy.logfatal(
                 "[planner_gateway] other publishers detected on %s: %s",

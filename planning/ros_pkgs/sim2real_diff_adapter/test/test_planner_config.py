@@ -68,6 +68,11 @@ class DiffPlannerConfigTest(unittest.TestCase):
             for element in self.launch_root.findall("arg")
         }
         self.assertIn("config", launch_args)
+        self.assertEqual(
+            launch_args["config"]["default"],
+            "$(eval optenv('SIM2REAL_PLANNER_CONFIG', '') or "
+            "find('sim2real_diff_adapter') + '/config/planner.yaml')",
+        )
         self.assertNotIn("planner_config", launch_args)
         self.assertNotIn("trajectory_server_config", launch_args)
         self.assertNotIn("adapter_config", launch_args)
