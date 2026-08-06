@@ -52,6 +52,44 @@ class RecordingPublisher:
         self.messages.append(copy.deepcopy(message))
 
 
+class PlannerGatewayCommandClockTest(unittest.TestCase):
+    def setUp(self):
+        self.original_rospy = GATEWAY.rospy
+        self.original_now_seconds = FakeTime.now_seconds
+        GATEWAY.rospy = SimpleNamespace(Time=FakeTime)
+        self.gateway = GATEWAY.PlannerGateway.__new__(GATEWAY.PlannerGateway)
+        self.gateway._gate = SimpleNamespace(is_open=True)
+        self.gateway._command_timeout = 0.08
+
+    def tearDown(self):
+        FakeTime.now_seconds = self.original_now_seconds
+        GATEWAY.rospy = self.original_rospy
+
+    def test_slow_simulation_uses_ros_clock_for_command_freshness(self):
+        self.gateway._runtime_mode = "simulation"
+        self.gateway._last_command_stream_at = 155.274
+        FakeTime.now_seconds = 155.334
+
+        # The host advanced by 137 ms, but the simulated vehicle advanced by
+        # only 60 ms. This reproduces the cross-machine false timeout.
+        stream_now = self.gateway._rate_now(1000.137)
+        self.assertAlmostEqual(stream_now, 155.334)
+        self.assertFalse(self.gateway._command_stream_timed_out(stream_now))
+
+        FakeTime.now_seconds = 155.364
+        stream_now = self.gateway._rate_now(1000.167)
+        self.assertTrue(self.gateway._command_stream_timed_out(stream_now))
+
+    def test_real_runtime_keeps_monotonic_command_timeout(self):
+        self.gateway._runtime_mode = "real"
+        self.gateway._last_command_stream_at = 1000.0
+        FakeTime.now_seconds = 155.280
+
+        stream_now = self.gateway._rate_now(1000.081)
+        self.assertAlmostEqual(stream_now, 1000.081)
+        self.assertTrue(self.gateway._command_stream_timed_out(stream_now))
+
+
 def vector(x, y, z):
     return SimpleNamespace(x=float(x), y=float(y), z=float(z))
 

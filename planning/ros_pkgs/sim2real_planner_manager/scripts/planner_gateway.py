@@ -231,6 +231,12 @@ class PlannerGateway:
         self._ever_backend_ready = False
         self._status_receipts = deque(maxlen=4096)
         self._command_receipts = deque(maxlen=4096)
+        # Command freshness must be measured in the clock domain that drives
+        # the selected runtime. Gazebo publishers advance with /clock, whereas
+        # real-flight publishers must remain accountable to host monotonic
+        # time. CommandGate keeps monotonic receipt times for its other safety
+        # correlations, so freshness is tracked separately here.
+        self._last_command_stream_at = None
         self._goal_started_at = 0.0
         self._last_goal = None
         self._last_backend_status = None
@@ -400,6 +406,14 @@ class PlannerGateway:
                 rospy.Time.now().to_sec(),
             )
         return receipt_monotonic
+
+    def _command_stream_timed_out(self, stream_now):
+        return (
+            self._gate.is_open
+            and self._last_command_stream_at is not None
+            and stream_now - self._last_command_stream_at
+            > self._command_timeout
+        )
 
     def _preopen_command_rate_ready(self):
         minimum_rate = self._manifest.rates.command_min_hz
@@ -637,6 +651,7 @@ class PlannerGateway:
             # new goal, so a racing old command can never pass through.
             self._gate.begin_goal(self._goal_id)
             self._command_receipts.clear()
+            self._last_command_stream_at = None
             self._cancel_hold_active = False
             self._transition_hold_pose = None
             self._fault_reported = False
@@ -909,6 +924,7 @@ class PlannerGateway:
                     " ({})".format(shape_reason) if shape_reason else "",
                 )
                 return
+            self._last_command_stream_at = self._rate_now(now)
             output = MultiDOFJointTrajectory()
             output.header = copy.deepcopy(message.header)
             output.points.append(copy.deepcopy(message.point))
@@ -989,6 +1005,7 @@ class PlannerGateway:
             self._gate.cancel_goal()
             self._goal_request_generation += 1
             self._command_receipts.clear()
+            self._last_command_stream_at = None
             self._cancel_hold_active = self._last_output_point is not None
             self._transition_hold_pose = None
             self._goal_started_at = 0.0
@@ -1059,11 +1076,7 @@ class PlannerGateway:
                 and self._goal_started_at > 0.0
                 and now - self._goal_started_at > self._status_timeout
             )
-            command_timed_out = (
-                self._gate.is_open
-                and self._gate.last_command_at is not None
-                and now - self._gate.last_command_at > self._command_timeout
-            )
+            command_timed_out = self._command_stream_timed_out(rate_now)
             vehicle_timed_out = (
                 self._require_offboard
                 and not self._gate.vehicle_ready(now)

@@ -27,12 +27,17 @@ class SharedMissionEntrypointTest(unittest.TestCase):
             return stream.read()
 
     def test_both_launchers_execute_the_shared_director(self):
-        for launcher in ("launch/sim.sh", "launch/real.sh"):
+        runtime_modes = {
+            "launch/sim.sh": "simulation",
+            "launch/real.sh": "real",
+        }
+        for launcher, runtime_mode in runtime_modes.items():
             with self.subTest(launcher=launcher):
                 source = self.read_project_file(launcher)
                 self.assertIn("MISSION_EXECUTOR_HOST=", source)
                 self.assertIn("python3 -u '$container_executor'", source)
                 self.assertIn("--disarmed-prearm-mode", source)
+                self.assertIn("--runtime-mode {}".format(runtime_mode), source)
                 self.assertNotIn("arm_vehicle mission", source)
 
     def test_shared_director_has_no_platform_branch(self):

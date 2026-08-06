@@ -73,8 +73,11 @@ class MissionExecutorTest(unittest.TestCase):
         self.assertFalse(needs_reset("ALTCTL", "STABILIZED"))
 
     def test_landing_timeout_allows_px4_to_finish_auto_land(self):
-        args = EXECUTOR._build_parser().parse_args(["mission.json"])
+        args = EXECUTOR._build_parser().parse_args(
+            ["mission.json", "--runtime-mode", "real"]
+        )
         self.assertEqual(args.landing_timeout, 120.0)
+        self.assertEqual(args.runtime_mode, "real")
         self.assertEqual(args.disarmed_prearm_mode, "STABILIZED")
         self.assertEqual(args.takeoff_altitude_field, "relative")
         self.assertIsNone(args.odom_timeout)
@@ -87,7 +90,13 @@ class MissionExecutorTest(unittest.TestCase):
 
     def test_mission_accepts_same_hover_calibration_as_arm(self):
         args = EXECUTOR._build_parser().parse_args(
-            ["mission.json", "--px4-hover-thrust", "0.755"]
+            [
+                "mission.json",
+                "--runtime-mode",
+                "simulation",
+                "--px4-hover-thrust",
+                "0.755",
+            ]
         )
         self.assertAlmostEqual(args.px4_hover_thrust, 0.755)
 

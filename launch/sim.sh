@@ -1475,6 +1475,7 @@ run_waypoint_mission() {
   if ros_exec "$DEV_CONTAINER" \
     "python3 -u '$container_executor' '$container_mission' \
       --drone-id 0 \
+      --runtime-mode simulation \
       --default-takeoff-height '$TAKEOFF_HEIGHT' \
       --px4-hover-thrust '$PX4_HOVER_THRUST' \
       --disarmed-prearm-mode '$DISARMED_PREARM_MODE' \

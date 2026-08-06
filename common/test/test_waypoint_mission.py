@@ -59,7 +59,7 @@ class WaypointMissionConfigTest(unittest.TestCase):
             json.dump(payload, handle)
         return handle.name
 
-    def test_runtime_waits_do_not_depend_on_ros_sim_time(self):
+    def test_blocking_waits_do_not_depend_on_ros_sim_time(self):
         with open(SCRIPT_PATH, "r", encoding="utf-8") as stream:
             source = stream.read()
         self.assertNotIn("rospy.Rate", source)
@@ -67,10 +67,14 @@ class WaypointMissionConfigTest(unittest.TestCase):
         self.assertIn("time.sleep(duration)", source)
 
     def test_state_topic_is_configurable_for_remapped_mavros(self):
-        args = MISSION._build_parser().parse_args(["mission.json"])
+        args = MISSION._build_parser().parse_args(
+            ["mission.json", "--runtime-mode", "real"]
+        )
         self.assertEqual(args.state_topic, "/mavros/state")
+        self.assertEqual(args.runtime_mode, "real")
         signature = inspect.signature(MISSION.WaypointMission.__init__)
         self.assertIn("state_topic", signature.parameters)
+        self.assertIn("runtime_mode", signature.parameters)
 
     def test_normalizes_ordered_waypoints_and_automatic_yaw(self):
         path = self.write_config(
@@ -396,6 +400,7 @@ class WaypointMissionConfigTest(unittest.TestCase):
 
     def test_temporary_emergency_stop_is_cleared_by_recovery_trajectory(self):
         runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.runtime_mode = "real"
         runner.lock = threading.Lock()
         runner.current_goal_stamp = 123
         runner.current_requested_goal_position = (1.0, 2.0, 3.0)
@@ -424,6 +429,7 @@ class WaypointMissionConfigTest(unittest.TestCase):
 
     def test_initial_emergency_stop_starts_bounded_retry_window(self):
         runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.runtime_mode = "real"
         runner.lock = threading.Lock()
         runner.current_goal_stamp = 123
         runner.current_requested_goal_position = (1.0, 2.0, 3.0)
@@ -442,8 +448,35 @@ class WaypointMissionConfigTest(unittest.TestCase):
         self.assertFalse(runner.current_plan_accepted)
         self.assertIsNotNone(runner.current_planner_stopped_at)
 
+    def test_simulation_emergency_stop_records_ros_clock(self):
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.runtime_mode = "simulation"
+        runner.lock = threading.Lock()
+        runner.rospy = SimpleNamespace(
+            Time=SimpleNamespace(
+                now=lambda: SimpleNamespace(to_sec=lambda: 42.5)
+            )
+        )
+        runner.current_goal_stamp = 123
+        runner.current_requested_goal_position = (1.0, 2.0, 3.0)
+        runner.current_goal_position = (1.0, 2.0, 3.0)
+        runner.current_plan_accepted = False
+        runner.current_planner_stopped_at = None
+
+        runner._trajectory_callback(
+            SimpleNamespace(
+                goal_stamp=123,
+                goal_position=(1.0, 2.0, 3.0),
+                armable=False,
+                traj_id=1,
+            )
+        )
+
+        self.assertEqual(runner.current_planner_stopped_at, 42.5)
+
     def test_repeated_stop_messages_do_not_restart_recovery_window(self):
         runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.runtime_mode = "real"
         runner.lock = threading.Lock()
         runner.current_goal_stamp = 123
         runner.current_requested_goal_position = (1.0, 2.0, 3.0)
@@ -493,6 +526,7 @@ class WaypointMissionConfigTest(unittest.TestCase):
 
     def test_emergency_after_fallback_still_starts_recovery_window(self):
         runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.runtime_mode = "real"
         runner.lock = threading.Lock()
         runner.current_goal_stamp = 123
         runner.current_requested_goal_position = (1.0, 2.0, 3.0)
@@ -514,6 +548,25 @@ class WaypointMissionConfigTest(unittest.TestCase):
 
     def test_emergency_stop_only_fails_after_recovery_timeout(self):
         runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.runtime_mode = "simulation"
+        runner.config = {"planner_recovery_timeout": 2.0}
+        simulated_now = [101.0]
+        runner.rospy = SimpleNamespace(
+            Time=SimpleNamespace(
+                now=lambda: SimpleNamespace(to_sec=lambda: simulated_now[0])
+            ),
+            logwarn_throttle=lambda *args: None,
+        )
+
+        self.assertFalse(runner._planner_stop_is_persistent(100.0))
+        # Host wall time is irrelevant here; only /clock crossing two seconds
+        # may consume the simulated planner's recovery allowance.
+        simulated_now[0] = 102.1
+        self.assertTrue(runner._planner_stop_is_persistent(100.0))
+
+    def test_real_recovery_timeout_uses_monotonic_clock(self):
+        runner = MISSION.WaypointMission.__new__(MISSION.WaypointMission)
+        runner.runtime_mode = "real"
         runner.config = {"planner_recovery_timeout": 2.0}
         runner.rospy = SimpleNamespace(logwarn_throttle=lambda *args: None)
 

@@ -163,6 +163,7 @@ class SharedMissionExecutor:
         self.runner = WaypointMission(
             config,
             args.drone_id,
+            args.runtime_mode,
             state_topic=args.state_topic,
             odometry_topic=args.odometry_topic,
         )
@@ -1115,6 +1116,9 @@ def _build_parser():
     )
     parser.add_argument("mission_file")
     parser.add_argument("--drone-id", type=int, default=0)
+    parser.add_argument(
+        "--runtime-mode", choices=("simulation", "real"), required=True
+    )
     parser.add_argument("--default-takeoff-height", type=float, default=1.0)
     parser.add_argument(
         "--px4-hover-thrust",

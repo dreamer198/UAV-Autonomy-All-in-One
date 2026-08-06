@@ -432,6 +432,7 @@ class WaypointMission:
         self,
         config,
         drone_id,
+        runtime_mode,
         odometry_topic="/localization/odom",
         state_topic="/mavros/state",
         planner_status_topic="/planning/status",
@@ -454,8 +455,11 @@ class WaypointMission:
         self.Trigger = Trigger
         self.PlannerGoal = PlannerGoal
         self.PlannerStatus = PlannerStatus
+        if runtime_mode not in {"simulation", "real"}:
+            raise ValueError("runtime_mode must be simulation or real")
         self.config = config
         self.drone_id = drone_id
+        self.runtime_mode = runtime_mode
         self.state_topic = state_topic
         self.odometry_topic = odometry_topic
         self.lock = threading.Lock()
@@ -517,6 +521,12 @@ class WaypointMission:
             self.odom = message
             self.odom_received_at = time.monotonic()
 
+    def _planner_clock_now(self):
+        """Use the vehicle's simulated clock for planner recovery windows."""
+        if self.runtime_mode == "simulation":
+            return self.rospy.Time.now().to_sec()
+        return time.monotonic()
+
     def _planner_status_callback(self, message):
         """Consume only the selected backend's public status contract."""
         if not hasattr(message, "goal_id"):
@@ -525,10 +535,10 @@ class WaypointMission:
             return self._legacy_trajectory_callback(message)
 
         fallback_update = None
-        now = time.monotonic()
+        receipt_now = time.monotonic()
         with self.lock:
             self.planner_status = message
-            self.planner_status_received_at = now
+            self.planner_status_received_at = receipt_now
             goal_id = int(message.goal_id)
             self.last_planner_goal_id = max(self.last_planner_goal_id, goal_id)
             if self.current_goal_stamp is None or goal_id <= 0:
@@ -582,7 +592,7 @@ class WaypointMission:
                 self.current_planner_stopped_at = None
             elif state in stop_states:
                 if self.current_planner_stopped_at is None:
-                    self.current_planner_stopped_at = now
+                    self.current_planner_stopped_at = self._planner_clock_now()
         if fallback_update is not None:
             self._log_fallback(fallback_update)
 
@@ -623,7 +633,7 @@ class WaypointMission:
                 # the bounded retry path instead of waiting out the full
                 # acceptance timeout.
                 if self.current_planner_stopped_at is None:
-                    self.current_planner_stopped_at = time.monotonic()
+                    self.current_planner_stopped_at = self._planner_clock_now()
         if fallback_update is not None:
             self._log_fallback(fallback_update)
 
@@ -746,7 +756,7 @@ class WaypointMission:
     def _planner_stop_is_persistent(self, stopped_at):
         if stopped_at is None:
             return False
-        elapsed = time.monotonic() - stopped_at
+        elapsed = self._planner_clock_now() - stopped_at
         timeout = self.config["planner_recovery_timeout"]
         if elapsed >= timeout:
             return True
@@ -1311,6 +1321,9 @@ def _build_parser():
     )
     parser.add_argument("mission_file")
     parser.add_argument("--drone-id", type=int, default=0)
+    parser.add_argument(
+        "--runtime-mode", choices=("simulation", "real"), required=True
+    )
     parser.add_argument("--state-topic", default="/mavros/state")
     parser.add_argument("--odometry-topic", default="/localization/odom")
     parser.add_argument("--validate-only", action="store_true")
@@ -1374,6 +1387,7 @@ def main(argv=None):
         runner = WaypointMission(
             config,
             args.drone_id,
+            args.runtime_mode,
             state_topic=args.state_topic,
             odometry_topic=args.odometry_topic,
         )

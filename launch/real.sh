@@ -1046,6 +1046,7 @@ run_waypoint_mission() {
   if docker_exec_shell \
     "python3 -u '$container_executor' '$container_mission' \
       --drone-id 0 \
+      --runtime-mode real \
       --default-takeoff-height '$REAL_TAKEOFF_HEIGHT' \
       --disarmed-prearm-mode STABILIZED \
       --preflight-timeout '$REAL_PREFLIGHT_TIMEOUT' \
