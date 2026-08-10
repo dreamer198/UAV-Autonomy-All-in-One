@@ -9,13 +9,15 @@ Usage:
   stack.sh sim ACTION [ARGS...]
   stack.sh real ACTION [ARGS...]
   stack.sh sim-container ACTION
-  stack.sh real-container ACTION
+  stack.sh jetson-container ACTION
+  stack.sh ground-station-container ACTION
   stack.sh real-rviz
 
 Examples:
   ./launch/stack.sh sim restart
   ./launch/stack.sh sim goal 2.0 0.0 1.0 0
-  ./launch/stack.sh real-container build
+  ./launch/stack.sh jetson-container build
+  ./launch/stack.sh ground-station-container run
   ./launch/stack.sh real restart
   ./launch/stack.sh real goal 1.0 0.0 1.0
 EOF
@@ -38,8 +40,11 @@ case "$target" in
   sim-container)
     exec "$SCRIPT_DIR/sim_container.sh" "$@"
     ;;
-  real-container)
+  real-container|jetson-container)
     exec "$SCRIPT_DIR/real_container.sh" "$@"
+    ;;
+  ground-station-container)
+    exec "$SCRIPT_DIR/ground_station_container.sh" "$@"
     ;;
   real-rviz)
     exec "$SCRIPT_DIR/real_rviz.sh" "$@"

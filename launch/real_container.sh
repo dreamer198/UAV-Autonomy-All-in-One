@@ -18,6 +18,9 @@ usage() {
   cat <<'EOF'
 Usage: real_container.sh {build|run|stop|rm|restart|shell|status} [--force]
 
+This launcher owns the Jetson onboard real-flight image and container. Run it
+on the Jetson only. The ground station uses ground_station_container.sh.
+
 run is idempotent when the existing container layout is current. Commands that
 would stop, replace or remove a container refuse while a real-flight stack or
 recorder is active. --force is reserved for emergency recovery or maintenance

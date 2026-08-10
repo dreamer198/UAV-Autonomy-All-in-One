@@ -37,8 +37,9 @@ odom/cloud ───────────────────────
 
 ## 环境
 
-宿主机需要 Docker 和 tmux。Gazebo、RViz、PX4、ROS 与规划器依赖由项目镜像提供；
-图形模式需要可用的 X11。以下命令均在仓库根目录执行。
+仿真宿主机和真机 Jetson 需要 Docker 与 tmux；真机地面站需要 Docker 和可用的桌面
+图形会话。项目镜像提供 Gazebo、RViz、PX4、ROS 与规划器运行环境。以下命令均在对应
+电脑的仓库根目录执行。
 
 ## 仿真
 
@@ -81,6 +82,8 @@ SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
 ## 真机
 
 真机配置、部署、飞前检查与飞行操作统一见[真机部署指南](docs/deployment.md)。
+机载 Jetson 使用 `real_container.sh` 和 `real.sh`；地面站使用独立的轻量
+`ground_station_container.sh` 和 `real_rviz.sh`，两端不共用运行容器。
 
 ## 目录
 
@@ -89,7 +92,7 @@ SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
 | `common/` | 公共飞行命令、Mission、定位保护与 SE3 入口 |
 | `planning/` | 插件管理、公共规划消息、adapter 和隔离 workspace |
 | `simulation/` | PX4/Gazebo 仿真、场景和仿真适配 |
-| `deployment/` | Jetson 镜像、Livox/FAST-LIO 适配与真机配置 |
+| `deployment/` | Jetson 真机镜像、轻量地面站镜像、Livox/FAST-LIO 适配与配置 |
 | `launch/` | 宿主机入口脚本 |
 | `third_party/` | 固定版本的上游源码 |
 | `runtime/` | 构建结果、日志和 rosbag |

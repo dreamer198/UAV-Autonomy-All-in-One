@@ -16,12 +16,24 @@ def load_real_rviz_bridge():
     mavros_msgs = types.ModuleType("mavros_msgs")
     mavros_msgs_msg = types.ModuleType("mavros_msgs.msg")
     mavros_msgs_msg.State = object
+    std_srvs = types.ModuleType("std_srvs")
+    std_srvs_srv = types.ModuleType("std_srvs.srv")
+    std_srvs_srv.Trigger = object
+
+    class TriggerResponse:
+        def __init__(self, success=False, message=""):
+            self.success = success
+            self.message = message
+
+    std_srvs_srv.TriggerResponse = TriggerResponse
     modules = {
         "rospy": rospy,
         "geometry_msgs": geometry_msgs,
         "geometry_msgs.msg": geometry_msgs_msg,
         "mavros_msgs": mavros_msgs,
         "mavros_msgs.msg": mavros_msgs_msg,
+        "std_srvs": std_srvs,
+        "std_srvs.srv": std_srvs_srv,
     }
     path = os.path.join(
         os.path.dirname(__file__),
@@ -59,6 +71,26 @@ class RosAdapterSafetyTest(unittest.TestCase):
         minimum, maximum = bounds(0.1, 3.0, 0.33)
         self.assertAlmostEqual(minimum, 0.43)
         self.assertAlmostEqual(maximum, 2.67)
+
+    def test_rviz_bridge_ready_service_reports_completed_initialization(self):
+        response = self.rviz_bridge.RvizGoalToDiffPlanner._ready_cb(None)
+        self.assertTrue(response.success)
+        self.assertIn("initialization is complete", response.message)
+
+    def test_rviz_bridge_advertises_ready_only_after_startup_validation(self):
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "scripts",
+            "rviz_goal_to_diff_planner.py",
+        )
+        with open(path, "r", encoding="utf-8") as stream:
+            source = stream.read()
+        service_wait = source.index("rospy.wait_for_service(")
+        startup_validation = source.index("startup_error = self._goal_error_at(")
+        ready_service = source.index('rospy.Service("~ready"')
+        self.assertLess(service_wait, ready_service)
+        self.assertLess(startup_validation, ready_service)
 
 if __name__ == "__main__":
     unittest.main()

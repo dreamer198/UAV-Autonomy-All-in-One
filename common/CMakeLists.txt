@@ -7,6 +7,7 @@ find_package(catkin REQUIRED COMPONENTS
   nav_msgs
   rospy
   sim2real_planning_msgs
+  std_srvs
 )
 
 catkin_package()

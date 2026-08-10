@@ -1,0 +1,8 @@
+**
+!deployment/
+!deployment/ground_station/
+!deployment/ground_station/root.bashrc
+!planning/
+!planning/ros_pkgs/
+!planning/ros_pkgs/sim2real_planning_msgs/
+!planning/ros_pkgs/sim2real_planning_msgs/**

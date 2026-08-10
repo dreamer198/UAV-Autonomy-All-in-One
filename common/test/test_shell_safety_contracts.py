@@ -22,6 +22,91 @@ class ShellSafetyContractsTest(unittest.TestCase):
         with open(path, "r", encoding="utf-8") as stream:
             return stream.read()
 
+    def run_rviz_with_fake_docker(
+        self, entrypoint, *, bridge_ready=True, goal_dependencies=True
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bin_dir = os.path.join(temp_dir, "bin")
+            os.makedirs(bin_dir)
+            docker_log = os.path.join(temp_dir, "docker.log")
+            final_rviz_marker = os.path.join(temp_dir, "final_rviz")
+            host_python_log = os.path.join(temp_dir, "host_python.log")
+            rviz_config = os.path.join(temp_dir, "review.rviz")
+            with open(rviz_config, "w", encoding="utf-8") as stream:
+                stream.write("Panels: []\n")
+
+            fake_docker = os.path.join(bin_dir, "docker")
+            with open(fake_docker, "w", encoding="utf-8") as stream:
+                stream.write(
+                    """#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+all_args="$*"
+case "$all_args" in
+  *'.State.Running'*) printf 'true\n' ;;
+  *'.HostConfig.NetworkMode'*) printf 'host\n' ;;
+  *'python3 -c'*'mavros_msgs'*)
+    [ "$FAKE_GOAL_DEPENDENCIES" = true ] || exit 1
+    ;;
+  *'rosservice call /rviz_goal_to_diff_planner/ready'*)
+    [ "$FAKE_BRIDGE_READY" = true ] || exit 1
+    printf 'success: True\nmessage: ready\n'
+    ;;
+  *'exec rviz -d'*) : > "$FAKE_FINAL_RVIZ_MARKER" ;;
+esac
+"""
+                )
+            os.chmod(fake_docker, 0o755)
+
+            for name, body in (
+                ("ip", "exit 0\n"),
+                ("sleep", "exit 0\n"),
+                ("xhost", "exit 1\n"),
+                (
+                    "python3",
+                    'printf "called\\n" >> "$FAKE_HOST_PYTHON_LOG"\nexit 0\n',
+                ),
+            ):
+                path = os.path.join(bin_dir, name)
+                with open(path, "w", encoding="utf-8") as stream:
+                    stream.write("#!/usr/bin/env bash\n" + body)
+                os.chmod(path, 0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            env["FAKE_DOCKER_LOG"] = docker_log
+            env["FAKE_FINAL_RVIZ_MARKER"] = final_rviz_marker
+            env["FAKE_HOST_PYTHON_LOG"] = host_python_log
+            env["FAKE_BRIDGE_READY"] = str(bridge_ready).lower()
+            env["FAKE_GOAL_DEPENDENCIES"] = str(goal_dependencies).lower()
+            env["GROUND_STATION_CONTAINER"] = "review_ground_station"
+            env["JETSON_IP"] = "192.0.2.10"
+            env["LOCAL_IP"] = "192.0.2.20"
+            env["DISPLAY"] = ":99"
+            env["RVIZ_CONFIG_HOST"] = rviz_config
+            env["RVIZ_CONFIG_CONTAINER"] = "/root/review.rviz"
+            env.pop("CONTAINER_NAME", None)
+            completed = subprocess.run(
+                [os.path.join(PROJECT_ROOT, "launch", entrypoint)],
+                cwd=PROJECT_ROOT,
+                env=env,
+                check=False,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            with open(docker_log, "r", encoding="utf-8") as stream:
+                docker_calls = stream.read()
+            host_python_called = os.path.exists(host_python_log)
+            final_rviz_started = os.path.exists(final_rviz_marker)
+            return (
+                completed,
+                docker_calls,
+                host_python_called,
+                final_rviz_started,
+            )
+
     def test_sim_and_real_explicitly_enforce_single_vehicle_mode(self):
         sim = self.read("launch/sim.sh")
         real = self.read("launch/real.sh")
@@ -81,6 +166,15 @@ class ShellSafetyContractsTest(unittest.TestCase):
             "IMAGE_NAME:-uav_autonomy_real:latest",
             self.read("launch/real_container.sh"),
         )
+        ground_station = self.read("launch/ground_station_container.sh")
+        self.assertIn(
+            "GROUND_STATION_CONTAINER:-${CONTAINER_NAME:-uav_autonomy_ground_station}",
+            ground_station,
+        )
+        self.assertIn(
+            "GROUND_STATION_IMAGE:-uav_autonomy_ground_station:noetic",
+            ground_station,
+        )
 
         sim_source = self.read("launch/sim.sh")
         self.assertIn("select_owned_session_container", sim_source)
@@ -96,6 +190,8 @@ class ShellSafetyContractsTest(unittest.TestCase):
             "launch/real.sh",
             "launch/real_container.sh",
             "launch/real_bag.sh",
+            "launch/ground_station_container.sh",
+            "launch/real_rviz_common.sh",
         )
         for relative_path in launchers:
             with self.subTest(launcher=relative_path):
@@ -366,6 +462,43 @@ class ShellSafetyContractsTest(unittest.TestCase):
         ]
         self.assertIn("require_inactive_simulation", restart_body)
 
+    def test_real_deployment_separates_jetson_and_ground_station_containers(self):
+        real = self.read("launch/real_container.sh")
+        ground = self.read("launch/ground_station_container.sh")
+        rviz = self.read("launch/real_rviz_common.sh")
+        live_rviz = self.read("launch/real_rviz.sh")
+        ground_dockerfile = self.read("deployment/ground_station/Dockerfile")
+
+        self.assertIn("Run it\non the Jetson only", real)
+        self.assertIn("--network host", ground)
+        self.assertIn("SIM2REAL_RUNTIME_MODE=ground_station", ground)
+        self.assertIn("HostConfig.Privileged", ground)
+        self.assertIn('= "false"', ground)
+        self.assertNotIn("FCU_DEVICE", ground)
+        self.assertNotIn("--privileged\n", ground)
+        self.assertIn("ros-noetic-rviz", ground_dockerfile)
+        self.assertIn("ros-noetic-mavros-msgs", ground_dockerfile)
+        self.assertIn("ros-noetic-std-srvs", ground_dockerfile)
+        self.assertIn("sim2real_planning_msgs", ground_dockerfile)
+        self.assertNotIn("COPY third_party", ground_dockerfile)
+        self.assertIn("compute_image_source_hash", ground)
+        self.assertIn("ground-station-source-sha256", ground)
+        self.assertIn('--label "$IMAGE_SOURCE_LABEL=$source_hash"', ground)
+        self.assertIn(
+            "GROUND_STATION_CONTAINER:-${CONTAINER_NAME:-uav_autonomy_ground_station}",
+            rviz,
+        )
+        self.assertIn("ground_station_container.sh run", rviz)
+        self.assertIn("readonly REAL_RVIZ_ENTRYPOINT_KIND=live", live_rviz)
+        self.assertTrue(
+            os.access(
+                os.path.join(
+                    PROJECT_ROOT, "launch", "ground_station_container.sh"
+                ),
+                os.X_OK,
+            )
+        )
+
     def test_planner_builder_sources_underlay_before_ros_tool_checks(self):
         source = self.read("planning/scripts/build_planner_workspaces.sh")
         setup_source = 'source "$BASE_SETUP"'
@@ -463,14 +596,73 @@ class ShellSafetyContractsTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(master_marker))
 
     def test_real_rviz_uses_route_detection_and_cleans_up_bridge_and_xhost(self):
-        source = self.read("launch/real_rviz.sh")
+        source = self.read("launch/real_rviz_common.sh")
+        live = self.read("launch/real_rviz.sh")
+        offline = self.read("launch/real_bag_rviz.sh")
         self.assertIn('JETSON_IP="${JETSON_IP:-}"', source)
         self.assertIn('RVIZ_GOAL_Z="${RVIZ_GOAL_Z:-1.0}"', source)
         self.assertIn('ip -4 route get "$JETSON_IP"', source)
         self.assertIn("bridge_ready", source)
+        self.assertIn(
+            "rosservice call /rviz_goal_to_diff_planner/ready", source
+        )
+        self.assertNotIn(
+            "rosnode list 2>/dev/null | grep -qx /rviz_goal_to_diff_planner",
+            source,
+        )
         self.assertIn("trap cleanup EXIT", source)
         self.assertIn("xhost -SI:localuser:root", source)
         self.assertNotIn("xhost +local:docker", source)
+        self.assertNotIn("START_GOAL_BRIDGE", source)
+        self.assertNotIn("START_GOAL_BRIDGE", live)
+        self.assertNotIn("START_GOAL_BRIDGE", offline)
+        self.assertNotIn("_REAL_RVIZ_SESSION_KIND", source)
+        self.assertNotIn("_REAL_RVIZ_SESSION_KIND", live)
+        self.assertNotIn("_REAL_RVIZ_SESSION_KIND", offline)
+        self.assertIn("readonly REAL_RVIZ_ENTRYPOINT_KIND=live", live)
+        self.assertIn(
+            "readonly REAL_RVIZ_ENTRYPOINT_KIND=offline_bag", offline
+        )
+        self.assertIn(
+            "实时地面站入口始终启动目标桥，不提供关闭开关",
+            self.read("docs/deployment.md"),
+        )
+
+    def test_live_rviz_requires_completed_bridge_readiness(self):
+        completed, docker_calls, _, final_rviz_started = (
+            self.run_rviz_with_fake_docker(
+                "real_rviz.sh", bridge_ready=False
+            )
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("did not complete planner validation", completed.stdout)
+        self.assertIn(
+            "rosservice call /rviz_goal_to_diff_planner/ready", docker_calls
+        )
+        self.assertFalse(final_rviz_started)
+
+    def test_live_rviz_starts_after_completed_bridge_readiness(self):
+        completed, docker_calls, host_python_called, final_rviz_started = (
+            self.run_rviz_with_fake_docker("real_rviz.sh")
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout)
+        self.assertIn("rviz_goal_to_diff_planner.py", docker_calls)
+        self.assertTrue(host_python_called)
+        self.assertTrue(final_rviz_started)
+
+    def test_offline_rviz_never_requires_or_mutates_goal_bridge(self):
+        completed, docker_calls, host_python_called, final_rviz_started = (
+            self.run_rviz_with_fake_docker(
+                "real_bag_rviz.sh",
+                bridge_ready=False,
+                goal_dependencies=False,
+            )
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout)
+        self.assertNotIn("mavros_msgs", docker_calls)
+        self.assertNotIn("rviz_goal_to_diff_planner", docker_calls)
+        self.assertFalse(host_python_called)
+        self.assertTrue(final_rviz_started)
 
 
 if __name__ == "__main__":

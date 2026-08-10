@@ -9,6 +9,7 @@ import time
 import rospy
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.msg import State
+from std_srvs.srv import Trigger, TriggerResponse
 
 
 LOCALIZATION_FAULT_PARAM = "/sim2real/localization_fault"
@@ -124,12 +125,24 @@ class RvizGoalToDiffPlanner:
                     startup_error
                 )
             )
+        # Advertise readiness only after the planner validation service is
+        # reachable, ROS time is active, and the configured altitude has been
+        # accepted. The launcher uses this service instead of treating early
+        # ROS node registration as successful initialization.
+        self.ready_service = rospy.Service("~ready", Trigger, self._ready_cb)
         rospy.loginfo(
             "RViz goal bridge started: %s -> %s, "
             "default_z=%.3f; armed OFFBOARD is required",
             self.input_topic,
             self.output_topic,
             self.default_z,
+        )
+
+    @staticmethod
+    def _ready_cb(_request):
+        return TriggerResponse(
+            success=True,
+            message="RViz goal bridge initialization is complete",
         )
 
     def _state_cb(self, message):
@@ -264,5 +277,8 @@ if __name__ == "__main__":
     try:
         RvizGoalToDiffPlanner()
         rospy.spin()
-    except (rospy.ROSInterruptException, ValueError) as exc:
+    except rospy.ROSInterruptException:
+        pass
+    except (rospy.ROSException, ValueError) as exc:
         rospy.logerr(str(exc))
+        raise SystemExit(1)
