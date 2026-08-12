@@ -430,12 +430,23 @@ validate_container_inputs() {
     "$RUNTIME_HOST/ros_logs"
 }
 
+grant_x11_access() {
+  # A stopped container can be started from a later desktop session. X11
+  # server permissions are not part of the container and may have been
+  # revoked when an earlier RViz wrapper exited, so refresh them on every
+  # `run`, not only when Docker first creates the container.
+  [ -d /tmp/.X11-unix ] || return 0
+  command -v xhost >/dev/null 2>&1 || return 0
+  if ! DISPLAY="$DISPLAY_VALUE" xhost +SI:localuser:root >/dev/null 2>&1; then
+    warn "Could not grant the simulation container access to DISPLAY=$DISPLAY_VALUE; Gazebo GUI may be unavailable."
+    return 1
+  fi
+}
+
 create_container() {
   validate_container_inputs
 
-  if command -v xhost >/dev/null 2>&1; then
-    xhost +SI:localuser:root >/dev/null 2>&1 || true
-  fi
+  grant_x11_access || true
 
   local gpu_mode
   gpu_mode="$(resolve_gpu_mode)"
@@ -505,6 +516,7 @@ run_container() {
   need_cmd docker
   need_cmd realpath
   resolve_gpu_mode >/dev/null
+  grant_x11_access || true
 
   if container_exists; then
     ensure_image
