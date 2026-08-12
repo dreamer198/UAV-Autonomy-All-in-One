@@ -2,7 +2,31 @@
 !deployment/
 !deployment/ground_station/
 !deployment/ground_station/root.bashrc
+!deployment/ros_pkgs/
+!deployment/ros_pkgs/sim2real_ground_station/
+!deployment/ros_pkgs/sim2real_ground_station/**
 !planning/
 !planning/ros_pkgs/
 !planning/ros_pkgs/sim2real_planning_msgs/
 !planning/ros_pkgs/sim2real_planning_msgs/**
+
+# Re-included package directories must still exclude generated files.  These
+# rules intentionally come last because Docker evaluates the final match.
+**/__pycache__
+**/__pycache__/**
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.pytest_cache/**
+**/.mypy_cache
+**/.mypy_cache/**
+**/.cache
+**/.cache/**
+**/.catkin_tools
+**/.catkin_tools/**
+**/build
+**/build/**
+**/devel
+**/devel/**
+**/logs
+**/logs/**

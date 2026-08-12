@@ -35,6 +35,13 @@ class PlannerVisualization:
         self.bounds_line_width = float(
             rospy.get_param("~bounds_line_width", 0.045)
         )
+        self.publish_rate = float(rospy.get_param("~publish_rate", 1.0))
+        self.max_occupancy_points = int(
+            rospy.get_param("~max_occupancy_points", 20000)
+        )
+        self.max_inflated_points = int(
+            rospy.get_param("~max_inflated_points", 12000)
+        )
         if not self.world_frame:
             raise ValueError("~world_frame must not be empty")
         if (
@@ -42,11 +49,16 @@ class PlannerVisualization:
             or self.bounds_line_width <= 0.0
         ):
             raise ValueError("visualization line width must be positive")
+        if not math.isfinite(self.publish_rate) or self.publish_rate <= 0.0:
+            raise ValueError("visualization publish rate must be positive")
+        if self.max_occupancy_points < 1 or self.max_inflated_points < 1:
+            raise ValueError("visualization point caps must be positive")
 
         self.lock = threading.RLock()
         self.map_ready = False
         self.maps_cleared = True
         self.map_templates = {"occupancy": None, "inflated": None}
+        self.map_dirty = {"occupancy": False, "inflated": False}
 
         self.occupancy_pub = rospy.Publisher(
             rospy.get_param(
@@ -54,6 +66,7 @@ class PlannerVisualization:
             ),
             PointCloud2,
             queue_size=1,
+            latch=True,
         )
         self.inflated_pub = rospy.Publisher(
             rospy.get_param(
@@ -61,6 +74,7 @@ class PlannerVisualization:
             ),
             PointCloud2,
             queue_size=1,
+            latch=True,
         )
         self.bounds_pub = rospy.Publisher(
             rospy.get_param(
@@ -104,6 +118,9 @@ class PlannerVisualization:
             PlannerStatus,
             self.status_callback,
             queue_size=5,
+        )
+        self.publish_timer = rospy.Timer(
+            rospy.Duration(1.0 / self.publish_rate), self.publish_maps
         )
         rospy.loginfo(
             "Planner-neutral visualization ready: finite raw map points -> "
@@ -167,6 +184,22 @@ class PlannerVisualization:
         output.is_dense = True
         return output
 
+    @staticmethod
+    def bounded_cloud(message, max_points):
+        """Deterministically thin a normalized cloud without changing fields."""
+        if message.width <= max_points:
+            return message
+        stride = int(math.ceil(float(message.width) / float(max_points)))
+        records = [
+            message.data[offset : offset + message.point_step]
+            for offset in range(0, message.row_step, stride * message.point_step)
+        ]
+        output = copy.deepcopy(message)
+        output.width = len(records)
+        output.row_step = output.width * output.point_step
+        output.data = b"".join(records)
+        return output
+
     def map_callback(self, kind, message):
         try:
             output = self.normalized_cloud(message)
@@ -176,29 +209,50 @@ class PlannerVisualization:
             )
             return
         with self.lock:
-            self.map_templates[kind] = output
+            cap = (
+                self.max_occupancy_points
+                if kind == "occupancy"
+                else self.max_inflated_points
+            )
+            self.map_templates[kind] = self.bounded_cloud(output, cap)
+            self.map_dirty[kind] = True
+
+    def publish_maps(self, _event):
+        with self.lock:
             if not self.map_ready:
                 return
-            self.maps_cleared = False
-        if kind == "occupancy":
-            self.occupancy_pub.publish(output)
-        else:
-            self.inflated_pub.publish(output)
+            pending = {
+                kind: self.map_templates[kind]
+                for kind in ("occupancy", "inflated")
+                if self.map_dirty[kind] and self.map_templates[kind] is not None
+            }
+            for kind in pending:
+                self.map_dirty[kind] = False
+            if pending:
+                self.maps_cleared = False
+            # Serialize map publication with a map-ready loss.  Otherwise a
+            # timer callback could publish an old pending cloud immediately
+            # after clear_maps() latched an empty one.
+            if "occupancy" in pending:
+                self.occupancy_pub.publish(pending["occupancy"])
+            if "inflated" in pending:
+                self.inflated_pub.publish(pending["inflated"])
 
     def clear_maps(self):
         with self.lock:
             if self.maps_cleared:
                 return
             templates = dict(self.map_templates)
+            self.map_dirty = {"occupancy": False, "inflated": False}
             self.maps_cleared = True
-        if templates["occupancy"] is not None:
-            self.occupancy_pub.publish(
-                self.empty_cloud(templates["occupancy"])
-            )
-        if templates["inflated"] is not None:
-            self.inflated_pub.publish(
-                self.empty_cloud(templates["inflated"])
-            )
+            if templates["occupancy"] is not None:
+                self.occupancy_pub.publish(
+                    self.empty_cloud(templates["occupancy"])
+                )
+            if templates["inflated"] is not None:
+                self.inflated_pub.publish(
+                    self.empty_cloud(templates["inflated"])
+                )
 
     def delete_marker(self, publisher, namespace):
         marker = Marker()
@@ -262,8 +316,10 @@ class PlannerVisualization:
         with self.lock:
             lost_map = self.map_ready and not map_ready
             self.map_ready = map_ready
-        if lost_map:
-            self.clear_maps()
+            if lost_map:
+                # RLock keeps the readiness transition and latched clears in
+                # one ordered critical section.
+                self.clear_maps()
 
 
 if __name__ == "__main__":

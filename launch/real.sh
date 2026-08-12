@@ -4,6 +4,7 @@ set -Eeuo pipefail
 CONTAINER_NAME="${CONTAINER_NAME:-uav_autonomy_real}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+RUNTIME_DIR="$(realpath -m "${RUNTIME_DIR:-$PROJECT_ROOT/runtime}")"
 PLANNER_ID="${REAL_PLANNER:-}"
 PLANNER_PROFILE="${REAL_PLANNER_PROFILE:-}"
 PLANNING_PROJECT_ROOT="${REAL_PROJECT_ROOT_CONTAINER:-/opt/uav-autonomy-aio}"
@@ -23,6 +24,10 @@ ODOM_RAW_TOPIC="${ODOM_RAW_TOPIC:-/Odometry}"
 LOCALIZATION_ODOM_TOPIC="${LOCALIZATION_ODOM_TOPIC:-/localization/odom}"
 RAW_REGISTERED_CLOUD_TOPIC="${RAW_REGISTERED_CLOUD_TOPIC:-/cloud_registered}"
 LOCALIZATION_CLOUD_TOPIC="${LOCALIZATION_CLOUD_TOPIC:-/localization/cloud_registered}"
+# Keep the planner on the full-rate localization cloud.  Only this dedicated
+# visualization copy is rate-limited before it crosses to the ground station.
+GROUND_VIZ_CLOUD_TOPIC="${GROUND_VIZ_CLOUD_TOPIC:-/ground_station/cloud_registered}"
+GROUND_VIZ_CLOUD_RATE="${GROUND_VIZ_CLOUD_RATE:-1.0}"
 FCU_URL="${FCU_URL:-}"
 GCS_URL="${GCS_URL:-}"
 # T_base_fastlio_body. FAST-LIO's body is the MID-360 internal IMU origin;
@@ -33,7 +38,7 @@ MOUNT_Z="${MOUNT_Z:-0.006}"
 MOUNT_ROLL_DEG="${MOUNT_ROLL_DEG:-0.7}"
 MOUNT_PITCH_DEG="${MOUNT_PITCH_DEG:-28.1}"
 MOUNT_YAW_DEG="${MOUNT_YAW_DEG:-0.5}"
-MAVROS_TGT_SYSTEM="${MAVROS_TGT_SYSTEM:-5}"
+MAVROS_TGT_SYSTEM="${MAVROS_TGT_SYSTEM:-2}"
 REQUESTED_DRONE_ID="${DRONE_ID:-0}"
 # This deployment is deliberately single-vehicle. Every internal topic and
 # launch argument is pinned to drone_0.
@@ -41,6 +46,8 @@ DRONE_ID=0
 START_PLANNER="${START_PLANNER:-true}"
 TRAJ_CONVERTER_OUTPUT_TOPIC="${TRAJ_CONVERTER_OUTPUT_TOPIC:-/command/trajectory}"
 START_SE3_CONTROLLER="${START_SE3_CONTROLLER:-$START_PLANNER}"
+START_INTERACTIVE_GOAL="${START_INTERACTIVE_GOAL:-$START_PLANNER}"
+START_FLIGHT_COMMAND="${START_FLIGHT_COMMAND:-$START_INTERACTIVE_GOAL}"
 PLANNER_CONFIG="${PLANNER_CONFIG:-}"
 CONTROLLER_CONFIG="${CONTROLLER_CONFIG:-/root/deployment/controller.yaml}"
 SE3_NODE_NAME="${SE3_NODE_NAME:-/se3_controller_node}"
@@ -53,7 +60,7 @@ START_ROSBAG="${START_ROSBAG:-true}"
 ROSBAG_DIR="${ROSBAG_DIR:-/root/flight_bags}"
 ROSBAG_PREFIX="${ROSBAG_PREFIX:-se3_test}"
 ROSBAG_NODE_NAME="${ROSBAG_NODE_NAME:-/flight_recorder}"
-ROSBAG_TOPICS="${ROSBAG_TOPICS:-/tf /tf_static $ODOM_RAW_TOPIC $LOCALIZATION_ODOM_TOPIC $LOCALIZATION_CLOUD_TOPIC /cloud_registered_body /mavros/vision_pose/pose /livox/imu /mavros/local_position/odom /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/battery /mavros/altitude /mavros/rc/in $MAVROS_ATTITUDE_TOPIC /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local $TRAJ_CONVERTER_OUTPUT_TOPIC /desire_odom_pub /goal /planning/goal /planning/command /planning/status /planning/capabilities /planning/viz/occupancy /planning/viz/inflated_occupancy /planning/viz/planning_bounds}"
+ROSBAG_TOPICS="${ROSBAG_TOPICS:-/tf /tf_static $ODOM_RAW_TOPIC $LOCALIZATION_ODOM_TOPIC $LOCALIZATION_CLOUD_TOPIC /cloud_registered_body /mavros/vision_pose/pose /livox/imu /mavros/local_position/odom /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/extended_state /mavros/battery /mavros/altitude /mavros/rc/in $MAVROS_ATTITUDE_TOPIC /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local $TRAJ_CONVERTER_OUTPUT_TOPIC /desire_odom_pub /goal /planning/goal /planning/command /planning/status /planning/capabilities /planning/viz/occupancy /planning/viz/inflated_occupancy /planning/viz/planning_bounds /ground_station/interactive_goal/goal /ground_station/interactive_goal/cancel /ground_station/interactive_goal/status /ground_station/interactive_goal/feedback /ground_station/interactive_goal/result /ground_station/flight_command/goal /ground_station/flight_command/cancel /ground_station/flight_command/status /ground_station/flight_command/feedback /ground_station/flight_command/result}"
 ROSBAG_TOPICS_QUOTED=""
 ROSBAG_EXTRA_ARGS="${ROSBAG_EXTRA_ARGS:-}"
 ROSBAG_EXTRA_ARGS_QUOTED=""
@@ -78,13 +85,17 @@ REAL_PREFLIGHT_TIMEOUT="${REAL_PREFLIGHT_TIMEOUT:-5.0}"
 if [ "$ROSBAG_RECORD_RAW_LIDAR" = "true" ] && [[ " $ROSBAG_TOPICS " != *" /livox/lidar "* ]]; then
   ROSBAG_TOPICS+=" /livox/lidar"
 fi
-ROS_MASTER_URI="${ROS_MASTER_URI:-http://127.0.0.1:11311}"
-ROS_IP="${ROS_IP:-}"
+# 11311 is kept for the onboard panoramic-camera ROS1 bridge.  The autonomy
+# runtime owns a separate master so both stacks can remain online.
+ROS_MASTER_URI="${ROS_MASTER_URI:-http://127.0.0.1:11312}"
+ROS_IP="${ROS_IP:-192.168.1.123}"
 HOST_LOG_DIR="${HOST_LOG_DIR:-$HOME/${PROJECT_SLUG}_logs/$RUN_ID}"
 CONTAINER_ROS_LOG_DIR="${CONTAINER_ROS_LOG_DIR:-/root/flight_bags/ros_logs/$RUN_ID}"
-PROCESS_GREP_PATTERN="roscore|rosmaster|roslaunch livox_ros_driver2|livox_ros_driver2_node|roslaunch fast_lio mapping_mid360.launch|fastlio_mapping|roslaunch mavros px4.launch|mavros_node|roslaunch sim2real_common|roslaunch sim2real_planner_manager|roslaunch sim2real_deployment frame_aliases.launch|static_transform_publisher.*real_world_|planner_backend_runner.py|planner_manager.py|planner_gateway.py|planner_visualization.py|command_gateway.py|diff_backend_adapter.py|fast_backend_adapter|super_backend_adapter_node|sim2real_diff_adapter|sim2real_fast_adapter|sim2real_super_adapter|super_planner/fsm_node|fast_planner_node|traj_server|diff_planner_node|plan_manage|se3_controller_node|localization_guard.py|odom_to_base.py|odom_to_pose.py|cloud_relay.py"
-LIFECYCLE_LOCK_DIR="/tmp/uav-autonomy-aio-${UID}"
-START_LOCK="$LIFECYCLE_LOCK_DIR/real.lifecycle.lock"
+PROCESS_GREP_PATTERN="roscore|rosmaster|roslaunch livox_ros_driver2|livox_ros_driver2_node|roslaunch fast_lio mapping_mid360.launch|fastlio_mapping|roslaunch mavros px4.launch|mavros_node|roslaunch sim2real_common|roslaunch sim2real_planner_manager|roslaunch sim2real_deployment frame_aliases.launch|static_transform_publisher.*real_world_|planner_backend_runner.py|planner_manager.py|planner_gateway.py|planner_visualization.py|command_gateway.py|diff_backend_adapter.py|fast_backend_adapter|super_backend_adapter_node|sim2real_diff_adapter|sim2real_fast_adapter|sim2real_super_adapter|super_planner/fsm_node|fast_planner_node|traj_server|diff_planner_node|plan_manage|se3_controller_node|interactive_goal_server.py|flight_command_server.py|localization_guard.py|odom_to_base.py|odom_to_pose.py|cloud_relay.py|topic_tools/throttle.*ground_station/cloud_registered"
+# This exact host file is bind-mounted at /root/tmp/real.lifecycle.lock.  It is
+# intentionally not configurable: every CLI and both onboard Action servers
+# must contend for the same inode.
+START_LOCK="$RUNTIME_DIR/tmp/real.lifecycle.lock"
 START_LOCK_FD=""
 START_LOCK_DEPTH=0
 
@@ -188,6 +199,22 @@ require_bool() {
   esac
 }
 
+ros_master_port() {
+  local authority port
+  authority="${ROS_MASTER_URI#*://}"
+  authority="${authority%%/*}"
+  if [[ "$authority" =~ :([0-9]+)$ ]]; then
+    port="${BASH_REMATCH[1]}"
+  else
+    port=11311
+  fi
+  if (( port < 1 || port > 65535 )); then
+    echo "[ERROR] ROS_MASTER_URI contains an invalid port: $ROS_MASTER_URI" >&2
+    return 1
+  fi
+  printf '%s\n' "$port"
+}
+
 validate_single_vehicle_mode() {
   if [ "$REQUESTED_DRONE_ID" != "0" ]; then
     echo "[ERROR] Only one vehicle is supported; DRONE_ID must be unset or 0 (got: $REQUESTED_DRONE_ID)." >&2
@@ -200,8 +227,34 @@ validate_start_settings() {
   require_bool FASTLIO_RVIZ "$FASTLIO_RVIZ"
   require_bool START_PLANNER "$START_PLANNER"
   require_bool START_SE3_CONTROLLER "$START_SE3_CONTROLLER"
+  require_bool START_INTERACTIVE_GOAL "$START_INTERACTIVE_GOAL"
+  require_bool START_FLIGHT_COMMAND "$START_FLIGHT_COMMAND"
   require_bool START_ROSBAG "$START_ROSBAG"
   require_bool ROSBAG_RECORD_RAW_LIDAR "$ROSBAG_RECORD_RAW_LIDAR"
+  ros_master_port >/dev/null
+  if ! [[ "$GROUND_VIZ_CLOUD_TOPIC" =~ ^/([A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "[ERROR] GROUND_VIZ_CLOUD_TOPIC must be a valid absolute ROS topic." >&2
+    return 1
+  fi
+  if [ "$GROUND_VIZ_CLOUD_TOPIC" = "$LOCALIZATION_CLOUD_TOPIC" ]; then
+    echo "[ERROR] GROUND_VIZ_CLOUD_TOPIC must differ from the full-rate localization cloud." >&2
+    return 1
+  fi
+  if ! python3 -c \
+    'import math,sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value > 0.0 else 1)' \
+    "$GROUND_VIZ_CLOUD_RATE" 2>/dev/null; then
+    echo "[ERROR] GROUND_VIZ_CLOUD_RATE must be finite and positive." >&2
+    return 1
+  fi
+  if [ "$START_INTERACTIVE_GOAL" = "true" ] &&
+    { [ "$START_PLANNER" != "true" ] || [ "$START_SE3_CONTROLLER" != "true" ]; }; then
+    echo "[ERROR] START_INTERACTIVE_GOAL=true requires the planner and SE3 controller." >&2
+    return 1
+  fi
+  if [ "$START_FLIGHT_COMMAND" = "true" ] && [ "$START_SE3_CONTROLLER" != "true" ]; then
+    echo "[ERROR] START_FLIGHT_COMMAND=true requires the SE3 controller for guarded takeoff." >&2
+    return 1
+  fi
   validate_rosbag_settings
 }
 
@@ -309,6 +362,10 @@ acquire_start_lock() {
       return 1
     }
   START_LOCK_DEPTH=1
+  if ! verify_live_lifecycle_mount; then
+    release_start_lock
+    return 1
+  fi
 }
 
 release_start_lock() {
@@ -346,6 +403,33 @@ docker_container_exists() {
 
 docker_container_running() {
   [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" = "true" ]
+}
+
+verify_live_lifecycle_mount() {
+  docker_container_running || return 0
+  local host_path="$RUNTIME_DIR/tmp"
+  local host_identity container_identity
+  if [ ! -e "$host_path" ]; then
+    echo "[ERROR] Real-flight lifecycle directory is missing: $host_path" >&2
+    echo "[ERROR] Stop safely and recreate the real-flight container." >&2
+    return 1
+  fi
+  host_identity="$(stat -Lc '%d:%i' -- "$host_path" 2>/dev/null)" || {
+    echo "[ERROR] Cannot inspect the host lifecycle directory: $host_path" >&2
+    return 1
+  }
+  container_identity="$(
+    docker exec "$CONTAINER_NAME" \
+      stat -Lc '%d:%i' -- /root/tmp 2>/dev/null
+  )" || {
+    echo "[ERROR] Cannot inspect the onboard lifecycle directory /root/tmp." >&2
+    return 1
+  }
+  if [ "$container_identity" != "$host_identity" ]; then
+    echo "[ERROR] The onboard lifecycle lock mount is detached from $host_path." >&2
+    echo "[ERROR] Refusing the command; stop safely and recreate the real-flight container." >&2
+    return 1
+  fi
 }
 
 ensure_container_exists() {
@@ -642,10 +726,13 @@ cleanup_container_processes() {
       "fast_backend_adapter" \
       "super_backend_adapter_node" \
       "se3_controller_node" \
+      "interactive_goal_server.py" \
+      "flight_command_server.py" \
       "localization_guard.py" \
       "odom_to_base.py" \
       "odom_to_pose.py" \
-      "cloud_relay.py"; do
+      "cloud_relay.py" \
+      "topic_tools/throttle.*ground_station/cloud_registered"; do
       kill_matching INT "$pattern"
     done
 
@@ -675,10 +762,13 @@ cleanup_container_processes() {
       "fast_backend_adapter" \
       "super_backend_adapter_node" \
       "se3_controller_node" \
+      "interactive_goal_server.py" \
+      "flight_command_server.py" \
       "localization_guard.py" \
       "odom_to_base.py" \
       "odom_to_pose.py" \
       "cloud_relay.py" \
+      "topic_tools/throttle.*ground_station/cloud_registered" \
       "roslaunch livox_ros_driver2" \
       "roslaunch fast_lio mapping_mid360.launch" \
       "roslaunch mavros px4.launch" \
@@ -715,10 +805,13 @@ cleanup_container_processes() {
       "fast_backend_adapter" \
       "super_backend_adapter_node" \
       "se3_controller_node" \
+      "interactive_goal_server.py" \
+      "flight_command_server.py" \
       "localization_guard.py" \
       "odom_to_base.py" \
       "odom_to_pose.py" \
       "cloud_relay.py" \
+      "topic_tools/throttle.*ground_station/cloud_registered" \
       "roslaunch livox_ros_driver2" \
       "roslaunch fast_lio mapping_mid360.launch" \
       "roslaunch mavros px4.launch" \
@@ -837,7 +930,7 @@ real_stack_active() {
 mavros_state_snapshot() {
   docker_container_exists && docker_container_running || return 1
   docker exec -i "$CONTAINER_NAME" bash -lc '
-    export ROS_MASTER_URI=http://127.0.0.1:11311
+    export ROS_MASTER_URI=http://127.0.0.1:11312
     unset ROS_HOSTNAME
     source /opt/ros/noetic/setup.bash
     [ ! -f /root/catkin_ws/devel/setup.bash ] || source /root/catkin_ws/devel/setup.bash
@@ -955,6 +1048,14 @@ publish_goal() {
 
 request_land() {
   validate_real_command_settings
+  acquire_start_lock
+  local status=0
+  request_land_locked || status=$?
+  release_start_lock
+  return "$status"
+}
+
+request_land_locked() {
   require_real_control_stack
 
   if ! vehicle_is_connected; then
@@ -1108,6 +1209,13 @@ start_stack() {
   acquire_start_lock
   validate_start_settings
   resolve_ros_ip
+  # Do not let the normal stack entrypoint start a container whose generated
+  # Action classes or onboard source no longer match this checkout.  Verification
+  # is read-only; rebuilding remains an explicit maintenance operation.
+  # The start lock is already held here. The verifier is read-only and must
+  # not try to acquire the same flock in a separate process.
+  CONTAINER_NAME="$CONTAINER_NAME" RUNTIME_DIR="$RUNTIME_DIR" \
+    "$SCRIPT_DIR/real_container.sh" verify
   ensure_container_running
   local container_setup="$PLANNER_WORKSPACE_SETUP_REL"
   if [[ "$container_setup" != /* ]]; then
@@ -1151,7 +1259,10 @@ start_stack() {
   echo "[INFO] Planner plugin: $PLANNER_ID (profile=$PLANNER_PROFILE)"
 
   trap 'cleanup_failed_start "$?"' ERR
-  tmux new-session -d -s "$SESSION_NAME" -n roscore "$(docker_tmux_cmd "roscore")"
+  local master_port
+  master_port="$(ros_master_port)"
+  tmux new-session -d -s "$SESSION_NAME" -n roscore \
+    "$(docker_tmux_cmd "roscore -p $master_port")"
   tmux set-option -t "$SESSION_NAME" remain-on-exit on
   tmux set-option -t "$SESSION_NAME" history-limit 20000
   enable_window_logging "roscore"
@@ -1188,6 +1299,12 @@ start_stack() {
     "source ~/.bashrc && rosrun sim2real_deployment cloud_relay.py _input_topic:=$RAW_REGISTERED_CLOUD_TOPIC _output_topic:=$LOCALIZATION_CLOUD_TOPIC _frame_id:=world"
 
   wait_for_condition "shared registered point cloud" "timeout 5s rostopic echo -n 1 '$LOCALIZATION_CLOUD_TOPIC/header' >/dev/null"
+
+  create_window "ground_viz_cloud" \
+    "source ~/.bashrc && exec rosrun topic_tools throttle messages '$LOCALIZATION_CLOUD_TOPIC' '$GROUND_VIZ_CLOUD_RATE' '$GROUND_VIZ_CLOUD_TOPIC' __name:=ground_station_cloud_throttle"
+
+  wait_for_condition "rate-limited ground visualization cloud" \
+    "rostopic list | grep -qx '$GROUND_VIZ_CLOUD_TOPIC'"
 
   tmux new-window -t "$SESSION_NAME" -n mavros \
     "docker exec -it -e ROS_MASTER_URI='$ROS_MASTER_URI' -e ROS_IP='$ROS_IP' -e ROS_LOG_DIR='$CONTAINER_ROS_LOG_DIR' -e HOST_FCU_URL='$FCU_URL' -e HOST_GCS_URL='$GCS_URL' '$CONTAINER_NAME' bash -lc 'unset ROS_HOSTNAME && source ~/.bashrc && mkdir -p \"\$ROS_LOG_DIR\" && if [ -n \"\$HOST_FCU_URL\" ]; then export FCU_URL=\"\$HOST_FCU_URL\"; fi && if [ -n \"\$HOST_GCS_URL\" ]; then export GCS_URL=\"\$HOST_GCS_URL\"; fi && roslaunch mavros px4.launch fcu_url:=\"\$FCU_URL\" gcs_url:=\"\$GCS_URL\" tgt_system:=$MAVROS_TGT_SYSTEM'"
@@ -1232,6 +1349,26 @@ start_stack() {
     wait_for_condition "SE3 controller" "rosnode list | grep -qx '$SE3_NODE_NAME' && rostopic list | grep -qx '$MAVROS_ATTITUDE_TOPIC'"
   else
     echo "[INFO] SE3 controller startup skipped because START_SE3_CONTROLLER=false."
+  fi
+
+  if [ "$START_INTERACTIVE_GOAL" = "true" ]; then
+    create_window "interactive_goal" \
+      "source ~/.bashrc && exec rosrun sim2real_common interactive_goal_server.py _action_name:=/ground_station/interactive_goal _lock_path:=/root/tmp/real.lifecycle.lock _preflight_timeout:=$REAL_PREFLIGHT_TIMEOUT _command_timeout:=$REAL_COMMAND_TIMEOUT _takeoff_timeout:=$REAL_TAKEOFF_TIMEOUT _takeoff_tolerance:=$REAL_TAKEOFF_TOLERANCE _takeoff_stable_time:=$REAL_TAKEOFF_STABLE_TIME _takeoff_max_vertical_speed:=$REAL_TAKEOFF_MAX_VERTICAL_SPEED _odometry_topic:=$LOCALIZATION_ODOM_TOPIC _controller_node:=$SE3_NODE_NAME _attitude_setpoint_topic:=$MAVROS_ATTITUDE_TOPIC"
+
+    wait_for_condition "guarded interactive-goal action" \
+      "rosnode list | grep -qx '/interactive_goal_server' && rostopic list | grep -qx '/ground_station/interactive_goal/status'"
+  else
+    echo "[INFO] Interactive ground-station goal action skipped because START_INTERACTIVE_GOAL=false."
+  fi
+
+  if [ "$START_FLIGHT_COMMAND" = "true" ]; then
+    create_window "flight_command" \
+      "source ~/.bashrc && exec rosrun sim2real_common flight_command_server.py _action_name:=/ground_station/flight_command _lock_path:=/root/tmp/real.lifecycle.lock _preflight_timeout:=$REAL_PREFLIGHT_TIMEOUT _command_timeout:=$REAL_COMMAND_TIMEOUT _takeoff_timeout:=$REAL_TAKEOFF_TIMEOUT _takeoff_tolerance:=$REAL_TAKEOFF_TOLERANCE _takeoff_stable_time:=$REAL_TAKEOFF_STABLE_TIME _takeoff_max_vertical_speed:=$REAL_TAKEOFF_MAX_VERTICAL_SPEED _odometry_topic:=$LOCALIZATION_ODOM_TOPIC _controller_node:=$SE3_NODE_NAME _attitude_setpoint_topic:=$MAVROS_ATTITUDE_TOPIC"
+
+    wait_for_condition "guarded takeoff/landing action" \
+      "rosnode list | grep -qx '/flight_command_server' && rostopic list | grep -qx '/ground_station/flight_command/status'"
+  else
+    echo "[INFO] Ground-station Takeoff/Land action skipped because START_FLIGHT_COMMAND=false."
   fi
 
   if [ "$START_ROSBAG" = "true" ]; then
@@ -1297,7 +1434,7 @@ stop_stack() {
   fi
 
   if tmux_has_session; then
-    for window_name in se3_controller planner localization_guard odom_to_pose mavros cloud_adapter odom_to_base fast_lio mid360 frame_aliases roscore; do
+    for window_name in flight_command interactive_goal se3_controller planner localization_guard odom_to_pose mavros ground_viz_cloud cloud_adapter odom_to_base fast_lio mid360 frame_aliases roscore; do
       if tmux_has_window "$window_name"; then
         tmux send-keys -t "$SESSION_NAME:$window_name" C-c
       fi
@@ -1338,6 +1475,9 @@ status_stack() {
   if docker_container_exists; then
     docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format 'table {{.Names}}\t{{.Status}}'
     docker_container_running || healthy=false
+    if ! verify_live_lifecycle_mount; then
+      healthy=false
+    fi
   else
     echo "[ERROR] Docker container '$CONTAINER_NAME' does not exist."
     healthy=false
@@ -1369,6 +1509,16 @@ status_stack() {
     echo "[INFO] Planner status:"
     docker_exec_shell \
       "timeout 4 rostopic echo -n 1 /planning/status 2>/dev/null || true"
+    if [ "$START_INTERACTIVE_GOAL" = "true" ] && ! docker_exec_shell \
+      "rostopic list | grep -qx '/ground_station/interactive_goal/status'"; then
+      echo "[ERROR] Interactive-goal Action status is unavailable." >&2
+      healthy=false
+    fi
+    if [ "$START_FLIGHT_COMMAND" = "true" ] && ! docker_exec_shell \
+      "rostopic list | grep -qx '/ground_station/flight_command/status'"; then
+      echo "[ERROR] Takeoff/Land Action status is unavailable." >&2
+      healthy=false
+    fi
   else
     echo
     echo "[INFO] tmux session '$SESSION_NAME' is not running."

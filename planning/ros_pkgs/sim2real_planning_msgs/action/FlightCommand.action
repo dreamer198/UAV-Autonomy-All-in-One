@@ -1,0 +1,27 @@
+# A guarded lifecycle command from the fixed single-UAV ground station.
+uint8 TAKEOFF=1
+uint8 LAND=2
+uint8 command
+float64 takeoff_height
+---
+uint16 OK=0
+uint16 BUSY=1
+uint16 INVALID_REQUEST=2
+uint16 LINK_UNAVAILABLE=3
+uint16 STATE_STALE=4
+uint16 STATE_REJECTED=5
+uint16 TAKEOFF_FAILED=6
+uint16 LAND_FAILED=7
+uint16 PREEMPTED=8
+bool success
+uint16 error_code
+string message
+---
+uint8 VALIDATING=1
+uint8 ARMING=2
+uint8 TAKING_OFF=3
+uint8 ENTERING_OFFBOARD=4
+uint8 REQUESTING_LAND=5
+uint8 COMPLETE=6
+uint8 stage
+string message

@@ -98,11 +98,13 @@ BASE_SIM_WORKSPACE="${SIM_BASE_WORKSPACE_CONTAINER:-/opt/simulation_ws}"
 SOURCE_HOST="${SIM_SOURCE_HOST:-$PROJECT_ROOT/third_party/Diff-Planner-PX4}"
 SESSION_NAME="${SIM_SESSION_NAME:-diff_planner_sim}"
 RUN_ID="${SIM_RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
-RUNTIME_HOST="${SIM_RUNTIME_HOST:-$PROJECT_ROOT/runtime/simulation}"
+RUNTIME_HOST="$(realpath -m "${SIM_RUNTIME_HOST:-$PROJECT_ROOT/runtime/simulation}")"
 HOST_LOG_DIR="${SIM_HOST_LOG_DIR:-$RUNTIME_HOST/runs/$RUN_ID/tmux}"
 LIFECYCLE_LOCK_DIR="/tmp/uav-autonomy-aio-${UID}"
 SESSION_MARKER="$LIFECYCLE_LOCK_DIR/simulation-${SESSION_NAME}.owner"
-START_LOCK="$LIFECYCLE_LOCK_DIR/simulation.lifecycle.lock"
+# This exact host file is visible as $DEV_RUNTIME/simulation.lifecycle.lock in
+# the development container. It is intentionally not configurable.
+START_LOCK="$RUNTIME_HOST/simulation.lifecycle.lock"
 START_LOCK_FD=""
 START_LOCK_DEPTH=0
 START_CREATED_SESSION=false
@@ -129,6 +131,8 @@ SPAWN_PITCH="0.0"
 SPAWN_YAW="0.0"
 START_PLANNER="${SIM_START_PLANNER:-true}"
 START_SE3="${SIM_START_SE3:-true}"
+START_INTERACTIVE_GOAL="${SIM_START_INTERACTIVE_GOAL:-true}"
+START_FLIGHT_COMMAND="${SIM_START_FLIGHT_COMMAND:-$START_INTERACTIVE_GOAL}"
 START_GOAL_BRIDGE="${SIM_START_GOAL_BRIDGE:-true}"
 START_RVIZ="${SIM_START_RVIZ:-true}"
 CLOUD_FILTER_ENABLE="${SIM_CLOUD_FILTER_ENABLE:-false}"
@@ -166,7 +170,7 @@ START_ROSBAG="${SIM_START_ROSBAG:-true}"
 ROSBAG_DIR="${SIM_ROSBAG_DIR:-$DEV_RUNTIME/flight_bags}"
 ROSBAG_PREFIX="${SIM_ROSBAG_PREFIX:-se3_test}"
 ROSBAG_NODE_NAME="${SIM_ROSBAG_NODE_NAME:-/flight_recorder}"
-ROSBAG_TOPICS="${SIM_ROSBAG_TOPICS:-/clock /tf /tf_static /gazebo/model_states /mavros/local_position/odom /localization/odom /localization/cloud_registered /livox/imu /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/battery /mavros/altitude /mavros/rc/in /mavros/setpoint_raw/attitude /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local /command/trajectory /desire_odom_pub /goal /planning/goal /planning/command /planning/status /planning/capabilities /planning/viz/occupancy /planning/viz/inflated_occupancy /planning/viz/planning_bounds /planning/viz/active_goal /planning/viz/executed_path}"
+ROSBAG_TOPICS="${SIM_ROSBAG_TOPICS:-/clock /tf /tf_static /gazebo/model_states /mavros/local_position/odom /localization/odom /localization/cloud_registered /livox/imu /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/extended_state /mavros/battery /mavros/altitude /mavros/rc/in /mavros/setpoint_raw/attitude /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local /command/trajectory /desire_odom_pub /goal /planning/goal /planning/command /planning/status /planning/capabilities /planning/viz/occupancy /planning/viz/inflated_occupancy /planning/viz/planning_bounds /planning/viz/active_goal /planning/viz/executed_path /ground_station/interactive_goal/goal /ground_station/interactive_goal/cancel /ground_station/interactive_goal/status /ground_station/interactive_goal/feedback /ground_station/interactive_goal/result /ground_station/flight_command/goal /ground_station/flight_command/cancel /ground_station/flight_command/status /ground_station/flight_command/feedback /ground_station/flight_command/result}"
 ROSBAG_TOPICS_QUOTED=""
 ROSBAG_EXTRA_ARGS="${SIM_ROSBAG_EXTRA_ARGS:-}"
 ROSBAG_EXTRA_ARGS_QUOTED=""
@@ -368,12 +372,21 @@ validate_bool_config() {
   require_bool SIM_GAZEBO_GUI "$GAZEBO_GUI"
   require_bool SIM_START_PLANNER "$START_PLANNER"
   require_bool SIM_START_SE3 "$START_SE3"
+  require_bool SIM_START_INTERACTIVE_GOAL "$START_INTERACTIVE_GOAL"
+  require_bool SIM_START_FLIGHT_COMMAND "$START_FLIGHT_COMMAND"
   require_bool SIM_START_GOAL_BRIDGE "$START_GOAL_BRIDGE"
   require_bool SIM_START_RVIZ "$START_RVIZ"
   require_bool SIM_CLOUD_FILTER_ENABLE "$CLOUD_FILTER_ENABLE"
   require_bool SIM_REQUIRE_ARMED_GOAL "$REQUIRE_ARMED_GOAL"
   require_bool SIM_START_ROSBAG "$START_ROSBAG"
   require_bool SIM_ROSBAG_RECORD_RAW_LIDAR "$ROSBAG_RECORD_RAW_LIDAR"
+  if [ "$START_INTERACTIVE_GOAL" = "true" ] &&
+    { [ "$START_PLANNER" != "true" ] || [ "$START_SE3" != "true" ]; }; then
+    die "SIM_START_INTERACTIVE_GOAL=true requires planner and SE3 startup."
+  fi
+  if [ "$START_FLIGHT_COMMAND" = "true" ] && [ "$START_SE3" != "true" ]; then
+    die "SIM_START_FLIGHT_COMMAND=true requires SE3 startup for guarded takeoff."
+  fi
   [[ "$ROSBAG_NODE_NAME" =~ ^/[A-Za-z][A-Za-z0-9_]*$ ]] ||
     die "SIM_ROSBAG_NODE_NAME must be a top-level ROS node name such as /flight_recorder."
   local arg quoted topic
@@ -1109,6 +1122,24 @@ start_stack() {
     info "SE3 startup skipped (SIM_START_SE3=false)."
   fi
 
+  if [ "$START_INTERACTIVE_GOAL" = "true" ]; then
+    create_window interactive_goal "$DEV_CONTAINER" \
+      "exec rosrun sim2real_common interactive_goal_server.py _action_name:=/ground_station/interactive_goal _lock_path:=$DEV_RUNTIME/simulation.lifecycle.lock _preflight_timeout:=$PREFLIGHT_TIMEOUT _command_timeout:=$COMMAND_TIMEOUT _takeoff_timeout:=$TAKEOFF_TIMEOUT _takeoff_tolerance:=$TAKEOFF_TOLERANCE _takeoff_stable_time:=$TAKEOFF_STABLE_TIME _takeoff_max_vertical_speed:=$TAKEOFF_MAX_VERTICAL_SPEED _takeoff_altitude_field:=$TAKEOFF_ALTITUDE_FIELD _disarmed_prearm_mode:=$DISARMED_PREARM_MODE _px4_hover_thrust:=$PX4_HOVER_THRUST _odometry_topic:=/localization/odom _controller_node:=/se3_controller_node _attitude_setpoint_topic:=/mavros/setpoint_raw/attitude"
+    wait_for_condition "guarded interactive-goal action" "$DEV_CONTAINER" \
+      "rosnode list | grep -qx '/interactive_goal_server' && rostopic list | grep -qx '/ground_station/interactive_goal/status'" interactive_goal
+  else
+    info "Interactive ground-station goal action skipped (SIM_START_INTERACTIVE_GOAL=false)."
+  fi
+
+  if [ "$START_FLIGHT_COMMAND" = "true" ]; then
+    create_window flight_command "$DEV_CONTAINER" \
+      "exec rosrun sim2real_common flight_command_server.py _action_name:=/ground_station/flight_command _lock_path:=$DEV_RUNTIME/simulation.lifecycle.lock _preflight_timeout:=$PREFLIGHT_TIMEOUT _command_timeout:=$COMMAND_TIMEOUT _takeoff_timeout:=$TAKEOFF_TIMEOUT _takeoff_tolerance:=$TAKEOFF_TOLERANCE _takeoff_stable_time:=$TAKEOFF_STABLE_TIME _takeoff_max_vertical_speed:=$TAKEOFF_MAX_VERTICAL_SPEED _takeoff_altitude_field:=$TAKEOFF_ALTITUDE_FIELD _disarmed_prearm_mode:=$DISARMED_PREARM_MODE _px4_hover_thrust:=$PX4_HOVER_THRUST _odometry_topic:=/localization/odom _controller_node:=/se3_controller_node _attitude_setpoint_topic:=/mavros/setpoint_raw/attitude"
+    wait_for_condition "guarded takeoff/landing action" "$DEV_CONTAINER" \
+      "rosnode list | grep -qx '/flight_command_server' && rostopic list | grep -qx '/ground_station/flight_command/status'" flight_command
+  else
+    info "Ground-station Takeoff/Land action skipped (SIM_START_FLIGHT_COMMAND=false)."
+  fi
+
   if [ "$START_GOAL_BRIDGE" = "true" ]; then
     create_window goal_bridge "$DEV_CONTAINER" \
       "exec roslaunch sim2real_simulation goal_bridge.launch goal_z:=$RVIZ_GOAL_Z frame_id:=world"
@@ -1197,7 +1228,7 @@ vehicle_is_connected() {
     "timeout 4 rostopic echo -n 1 /mavros/state | grep -q 'connected: True'" >/dev/null 2>&1
 }
 
-request_land() {
+request_land_locked() {
   ensure_prereqs
   if ! container_running "$DEV_CONTAINER"; then
     warn "Simulation container is not running; landing request skipped."
@@ -1231,6 +1262,14 @@ custom_mode: 'AUTO.LAND'\" >/dev/null"
     waited=$((waited + 2))
   done
   info "Simulated vehicle landed and disarmed."
+}
+
+request_land() {
+  acquire_start_lock
+  local status=0
+  request_land_locked "$@" || status=$?
+  release_start_lock
+  return "$status"
 }
 
 stop_stack() {
@@ -1268,7 +1307,7 @@ stop_stack() {
 
   if [ "$has_session" = "true" ]; then
     info "Stopping simulation session: $SESSION_NAME"
-    for window_name in rviz goal_bridge se3 planner localization_guard localization sitl roscore; do
+    for window_name in rviz goal_bridge flight_command interactive_goal se3 planner localization_guard localization sitl roscore; do
       if tmux_has_window "$window_name"; then
         tmux send-keys -t "$SESSION_NAME:$window_name" C-c
       fi
@@ -1279,21 +1318,21 @@ stop_stack() {
 
   if [ "$owned_stack" = "true" ]; then
     kill_matching "$DEV_CONTAINER" INT \
-      "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
+      "se3_controller_node" "interactive_goal_server.py" "flight_command_server.py" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
       "pointcloud_to_world.py" "sim_odometry_adapter.py" "stable_environment_viz.py" "flight_visualization.py" "planner_backend_runner.py" "planner_manager.py" "planner_gateway.py" "planner_visualization.py" "command_gateway.py" \
       "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "super_backend_adapter_node" "sim2real_super_adapter" "super_planner/fsm_node" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
     kill_matching "$SIMULATOR_CONTAINER" INT \
       "outdoor_mid360.launch" "mavros_node" "gzserver" "gzclient" "PX4-Autopilot.*px4" "rosmaster" "roscore"
     sleep 2
     kill_matching "$DEV_CONTAINER" TERM \
-      "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
+      "se3_controller_node" "interactive_goal_server.py" "flight_command_server.py" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
       "pointcloud_to_world.py" "sim_odometry_adapter.py" "stable_environment_viz.py" "flight_visualization.py" "planner_backend_runner.py" "planner_manager.py" "planner_gateway.py" "planner_visualization.py" "command_gateway.py" \
       "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "super_backend_adapter_node" "sim2real_super_adapter" "super_planner/fsm_node" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
     kill_matching "$SIMULATOR_CONTAINER" TERM \
       "outdoor_mid360.launch" "mavros_node" "gzserver" "gzclient" "PX4-Autopilot.*px4" "rosmaster" "roscore"
     sleep 2
     kill_matching "$DEV_CONTAINER" KILL \
-      "se3_controller_node" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
+      "se3_controller_node" "interactive_goal_server.py" "flight_command_server.py" "localization_guard.py" "roslaunch sim2real_common" "roslaunch sim2real_simulation" "roslaunch sim2real_planner_manager" \
       "pointcloud_to_world.py" "sim_odometry_adapter.py" "stable_environment_viz.py" "flight_visualization.py" "planner_backend_runner.py" "planner_manager.py" "planner_gateway.py" "planner_visualization.py" "command_gateway.py" \
       "diff_backend_adapter.py" "fast_backend_adapter" "sim2real_diff_adapter" "sim2real_fast_adapter" "super_backend_adapter_node" "sim2real_super_adapter" "super_planner/fsm_node" "fast_planner_node" "traj_server" "diff_planner_node" "rviz_2d_goal_bridge.py" "rviz"
     kill_matching "$SIMULATOR_CONTAINER" KILL \
@@ -1356,10 +1395,22 @@ status_stack() {
       "for package in sim2real_planning_msgs sim2real_planner_manager se3_controller sim2real_common sim2real_simulation; do printf '%s=' \"\$package\"; rospack find \"\$package\"; done"
     info "Core ROS nodes:"
     ros_exec "$DEV_CONTAINER" \
-      "rosnode list | grep -E 'sitl|gazebo|mavros|planner|traj_server|se3_controller|pointcloud|stable_environment|flight_visualization|goal_bridge|flight_recorder|rviz' || true"
+      "rosnode list | grep -E 'sitl|gazebo|mavros|planner|traj_server|se3_controller|interactive_goal|flight_command|pointcloud|stable_environment|flight_visualization|goal_bridge|flight_recorder|rviz' || true"
     info "Planner status:"
     ros_exec "$DEV_CONTAINER" \
       "timeout 4 rostopic echo -n 1 /planning/status 2>/dev/null || true"
+    if [ "$START_INTERACTIVE_GOAL" = "true" ] && ! ros_exec \
+      "$DEV_CONTAINER" \
+      "rostopic list | grep -qx '/ground_station/interactive_goal/status'"; then
+      warn "Interactive-goal Action status is unavailable."
+      healthy=false
+    fi
+    if [ "$START_FLIGHT_COMMAND" = "true" ] && ! ros_exec \
+      "$DEV_CONTAINER" \
+      "rostopic list | grep -qx '/ground_station/flight_command/status'"; then
+      warn "Takeoff/Land Action status is unavailable."
+      healthy=false
+    fi
     if rosbag_record_process_running; then
       info "rosbag recorder is active: $(current_rosbag_output_prefix 2>/dev/null || echo unknown-prefix)"
     else
@@ -1381,7 +1432,7 @@ attach_stack() {
   exec tmux attach-session -t "$SESSION_NAME"
 }
 
-arm_vehicle() {
+arm_vehicle_locked() {
   ensure_prereqs
   need_cmd python3
   require_running_dev_container
@@ -1408,7 +1459,15 @@ arm_vehicle() {
     < "$ARM_EXECUTOR_HOST"
 }
 
-publish_goal() {
+arm_vehicle() {
+  acquire_start_lock
+  local status=0
+  arm_vehicle_locked "$@" || status=$?
+  release_start_lock
+  return "$status"
+}
+
+publish_goal_locked() {
   if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
     die "Usage: $0 goal X Y Z [YAW_DEG]"
   fi
@@ -1445,7 +1504,15 @@ publish_goal() {
     < "$GOAL_EXECUTOR_HOST"
 }
 
-run_waypoint_mission() {
+publish_goal() {
+  acquire_start_lock
+  local status=0
+  publish_goal_locked "$@" || status=$?
+  release_start_lock
+  return "$status"
+}
+
+run_waypoint_mission_locked() {
   [ "$#" -eq 1 ] || die "Usage: $0 mission FILE"
   local mission_file="$1"
   need_cmd python3
@@ -1506,6 +1573,14 @@ run_waypoint_mission() {
     return "$mission_rc"
   fi
   info "Shared mission completed successfully."
+}
+
+run_waypoint_mission() {
+  acquire_start_lock
+  local status=0
+  run_waypoint_mission_locked "$@" || status=$?
+  release_start_lock
+  return "$status"
 }
 
 shell_dev() {

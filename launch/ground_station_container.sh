@@ -2,17 +2,18 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_HASH_HELPER="$PROJECT_ROOT/launch/container_source_hash.sh"
 DOCKERFILE="$PROJECT_ROOT/deployment/ground_station/Dockerfile"
 IMAGE_NAME="${GROUND_STATION_IMAGE:-uav_autonomy_ground_station:noetic}"
 CONTAINER_NAME="${GROUND_STATION_CONTAINER:-${CONTAINER_NAME:-uav_autonomy_ground_station}}"
 DISPLAY_VALUE="${DISPLAY:-:0}"
 EXTRA_DOCKER_ARGS="${GROUND_STATION_EXTRA_DOCKER_ARGS:-}"
-IMAGE_LAYOUT_VERSION="v1"
+IMAGE_LAYOUT_VERSION="v2"
 IMAGE_SOURCE_LABEL="io.uav-autonomy-aio.ground-station-source-sha256"
 
 usage() {
   cat <<'EOF'
-Usage: ground_station_container.sh {build|run|stop|recreate|rm|shell|status|verify}
+Usage: ground_station_container.sh {build|run|stop|recreate|rm|shell|status|verify-layout|verify}
 
 Builds and manages the lightweight Linux/X11 ground-station container used by
 real_rviz.sh.  It never maps an FCU or lidar device and does not contain the
@@ -40,6 +41,8 @@ need_cmd() {
 ensure_prereqs() {
   need_cmd docker
   need_cmd sha256sum
+  need_cmd tar
+  [ -f "$SOURCE_HASH_HELPER" ] || die "Container source-hash helper is missing: $SOURCE_HASH_HELPER"
 }
 
 append_extra_args() {
@@ -81,19 +84,21 @@ image_layout_current() {
 
 compute_image_source_hash() {
   local deployment_source="deployment/ground_station"
+  local ground_station_source="deployment/ros_pkgs/sim2real_ground_station"
   local message_source="planning/ros_pkgs/sim2real_planning_msgs"
   [ -d "$PROJECT_ROOT/$deployment_source" ] ||
     die "Ground-station deployment source is missing: $PROJECT_ROOT/$deployment_source"
   [ -d "$PROJECT_ROOT/$message_source" ] ||
     die "Ground-station message source is missing: $PROJECT_ROOT/$message_source"
-  (
-    cd "$PROJECT_ROOT"
-    find "$deployment_source" "$message_source" -type f -print0 |
-      sort -z |
-      xargs -0 sha256sum |
-      sha256sum |
-      awk '{print $1}'
-  )
+  [ -d "$PROJECT_ROOT/$ground_station_source" ] ||
+    die "Ground-station RViz package is missing: $PROJECT_ROOT/$ground_station_source"
+  # shellcheck source=launch/container_source_hash.sh
+  source "$SOURCE_HASH_HELPER"
+  compute_container_source_hash \
+    "$PROJECT_ROOT" \
+    "$deployment_source" \
+    "$ground_station_source" \
+    "$message_source"
 }
 
 build_image() {
@@ -130,19 +135,28 @@ container_layout_current() {
 }
 
 verify_environment() {
-  container_exists || die "Ground-station container '$CONTAINER_NAME' does not exist. Run '$0 run' first."
+  verify_layout
   container_running || die "Ground-station container '$CONTAINER_NAME' is not running. Run '$0 run' first."
-  container_layout_current ||
-    die "Ground-station container '$CONTAINER_NAME' is stale. Run '$0 recreate'."
   docker exec "$CONTAINER_NAME" bash -lc '
     set -e
     source /root/.bashrc
     command -v rviz >/dev/null
     command -v rosservice >/dev/null
+    fc-match -f "%{family}\n" "WenQuanYi Micro Hei:lang=zh-cn" | grep -q "WenQuanYi Micro Hei"
     rospack find sim2real_planning_msgs >/dev/null
-    python3 -c '\''from mavros_msgs.msg import State; from sim2real_planning_msgs.msg import PlannerGoal, PlannerStatus; from sim2real_planning_msgs.srv import ValidateGoal; from std_srvs.srv import Trigger'\''
+    rospack find sim2real_ground_station >/dev/null
+    python3 -c '\''import numpy, tf2_ros; from rviz import bindings as rviz; assert rviz.VisualizationFrame; from mavros_msgs.msg import State; from nav_msgs.msg import Odometry; from sensor_msgs import point_cloud2; from sensor_msgs.msg import PointCloud2; from sim2real_planning_msgs.msg import FlightCommandAction, InteractiveGoalAction, PlannerGoal, PlannerStatus; from sim2real_planning_msgs.srv import ValidateGoal; from std_srvs.srv import Trigger; from visualization_msgs.msg import Marker'\''
   ' || die "Ground-station ROS/RViz environment verification failed. Rebuild the image."
   info "Ground-station container verified: $CONTAINER_NAME"
+}
+
+verify_layout() {
+  image_layout_current ||
+    die "Ground-station image '$IMAGE_NAME' is missing or stale. Run '$0 recreate'."
+  container_exists ||
+    die "Ground-station container '$CONTAINER_NAME' does not exist. Run '$0 run' first."
+  container_layout_current ||
+    die "Ground-station container '$CONTAINER_NAME' is stale. Run '$0 recreate'."
 }
 
 create_container() {
@@ -251,6 +265,10 @@ main() {
     rm) remove_container ;;
     shell) shell_container ;;
     status) status_container ;;
+    verify-layout)
+      ensure_prereqs
+      verify_layout
+      ;;
     verify)
       ensure_prereqs
       verify_environment

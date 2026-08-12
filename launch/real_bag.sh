@@ -52,7 +52,7 @@ detect_ros_ip() {
 
 docker_ros() {
   docker exec "$CONTAINER_NAME" bash -lc \
-    "export ROS_MASTER_URI=http://127.0.0.1:11311; source /opt/ros/noetic/setup.bash; source /root/catkin_ws/devel/setup.bash; $1"
+    "export ROS_MASTER_URI=http://127.0.0.1:11312; source /opt/ros/noetic/setup.bash; source /root/catkin_ws/devel/setup.bash; $1"
 }
 
 master_running() {
@@ -60,13 +60,13 @@ master_running() {
 }
 
 flight_nodes_running() {
-  docker_ros "rosnode list 2>/dev/null | grep -Eq '^/(mavros(/|$)|planning/backends/super/(planner|adapter)$|se3_controller_node$|drone_0_|fastlio_mapping$|livox_lidar_publisher|localization_guard$|odom_to_base$|odom_to_pose$|cloud_relay$|trajectory_msg_converter$|flight_recorder$)'"
+  docker_ros "rosnode list 2>/dev/null | grep -Eq '^/(mavros(/|$)|planning/backends/super/(planner|adapter)$|se3_controller_node$|interactive_goal_server$|flight_command_server$|drone_0_|fastlio_mapping$|livox_lidar_publisher|localization_guard$|odom_to_base$|odom_to_pose$|cloud_relay$|trajectory_msg_converter$|flight_recorder$)'"
 }
 
 flight_processes_running() {
   container_running || return 1
   docker top "$CONTAINER_NAME" -eo args 2>/dev/null |
-    grep -Eq 'mavros_node|se3_controller_node|diff_planner_node|super_backend_adapter_node|super_planner/fsm_node|traj_server|fastlio_mapping|livox_ros_driver2_node|localization_guard\.py|trajectory_msg_converter\.py|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
+    grep -Eq 'mavros_node|se3_controller_node|interactive_goal_server\.py|flight_command_server\.py|diff_planner_node|super_backend_adapter_node|super_planner/fsm_node|traj_server|fastlio_mapping|livox_ros_driver2_node|localization_guard\.py|trajectory_msg_converter\.py|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
 }
 
 write_master_marker() {
@@ -266,7 +266,7 @@ docker_pane_command() {
   shift
   local command arg_q
   printf -v command \
-    'docker exec -e ROS_MASTER_URI=http://127.0.0.1:11311 -e ROS_IP=%q %q bash -lc %q bash' \
+    'docker exec -e ROS_MASTER_URI=http://127.0.0.1:11312 -e ROS_IP=%q %q bash -lc %q bash' \
     "$ROS_IP" "$CONTAINER_NAME" "$inner_cmd"
   for arg in "$@"; do
     printf -v arg_q ' %q' "$arg"
@@ -335,9 +335,9 @@ play_bag() {
     master_token="real_bag_$$_$(date +%s%N)"
     write_master_marker "$master_token"
     printf -v pane_cmd \
-      'docker exec -e ROS_MASTER_URI=http://127.0.0.1:11311 -e ROS_IP=%q -e OFFLINE_BAG_MASTER_TOKEN=%q %q bash -lc %q' \
+      'docker exec -e ROS_MASTER_URI=http://127.0.0.1:11312 -e ROS_IP=%q -e OFFLINE_BAG_MASTER_TOKEN=%q %q bash -lc %q' \
       "$ROS_IP" "$master_token" "$CONTAINER_NAME" \
-      'source /opt/ros/noetic/setup.bash; source /root/catkin_ws/devel/setup.bash; exec roscore'
+      'source /opt/ros/noetic/setup.bash; source /root/catkin_ws/devel/setup.bash; exec roscore -p 11312'
     tmux new-session -d -s "$SESSION_NAME" -n roscore "$pane_cmd"
     master_owned=true
   fi

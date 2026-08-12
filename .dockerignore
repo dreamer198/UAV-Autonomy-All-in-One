@@ -5,6 +5,8 @@ README.md
 runtime
 planning/workspaces
 **/__pycache__
+**/*.pyc
+**/*.pyo
 **/.pytest_cache
 **/.mypy_cache
 **/.cache

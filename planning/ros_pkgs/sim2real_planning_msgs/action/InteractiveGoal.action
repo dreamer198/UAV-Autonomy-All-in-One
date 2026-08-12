@@ -1,0 +1,27 @@
+# A guarded target request from the fixed single-UAV ground station.
+geometry_msgs/PoseStamped target
+float64 takeoff_height
+bool auto_arm_if_grounded
+---
+uint16 OK=0
+uint16 BUSY=1
+uint16 INVALID_GOAL=2
+uint16 LINK_UNAVAILABLE=3
+uint16 STATE_STALE=4
+uint16 NOT_ON_GROUND=5
+uint16 MODE_REJECTED=6
+uint16 ARM_FAILED=7
+uint16 GOAL_FAILED=8
+uint16 PREEMPTED=9
+bool success
+uint16 error_code
+string message
+---
+uint8 VALIDATING=1
+uint8 ARMING=2
+uint8 TAKING_OFF=3
+uint8 ENTERING_OFFBOARD=4
+uint8 SENDING_GOAL=5
+uint8 COMPLETE=6
+uint8 stage
+string message

@@ -83,7 +83,11 @@ SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
 
 真机配置、部署、飞前检查与飞行操作统一见[真机部署指南](docs/deployment.md)。
 机载 Jetson 使用 `real_container.sh` 和 `real.sh`；地面站使用独立的轻量
-`ground_station_container.sh` 和 `real_rviz.sh`，两端不共用运行容器。
+`ground_station_container.sh` 和 `real_rviz.sh`，两端不共用运行容器。嵌入
+`swarm-uav-mapping` 的三维地面站使用 `embedded_rviz.sh`和受保护的
+`/ground_station/interactive_goal`、`/ground_station/flight_command` Action。
+RViz 工具栏在 `2D Nav Goal` 后提供 `Takeoff`、`Land`：独立起飞完成后进入
+OFFBOARD 原地悬停，独立降落只请求并确认 PX4 `AUTO.LAND`。
 
 ## 目录
 

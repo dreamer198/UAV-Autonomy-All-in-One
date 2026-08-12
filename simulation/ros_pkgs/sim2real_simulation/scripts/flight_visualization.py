@@ -37,7 +37,7 @@ class FlightVisualization:
             "~active_goal_marker_topic", "/planning/viz/active_goal"
         )
         self.path_line_width = float(
-            rospy.get_param("~path_line_width", 0.055)
+            rospy.get_param("~path_line_width", 0.085)
         )
         self.history = FlightPathHistory(
             min_distance=rospy.get_param("~path_min_distance", 0.03),
@@ -142,8 +142,8 @@ class FlightVisualization:
         marker.action = Marker.ADD
         marker.pose.orientation.w = 1.0
         marker.scale.x = self.path_line_width
-        marker.color.r = 0.05
-        marker.color.g = 0.95
+        marker.color.r = 0.15
+        marker.color.g = 0.90
         marker.color.b = 1.0
         marker.color.a = 1.0
         marker.points = [Point(x=x, y=y, z=z) for x, y, z in points]

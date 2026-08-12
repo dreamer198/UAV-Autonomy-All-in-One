@@ -1,26 +1,8 @@
 Panels:
-  - Class: rviz/Displays
-    Help Height: 70
-    Name: Displays
-    Property Tree Widget:
-      Expanded:
-        - /Global Options1
-        - /Sensors1
-        - /Mapping1
-        - /Planning1
-      Splitter Ratio: 0.5
-    Tree Height: 620
-  - Class: rviz/Selection
-    Name: Selection
-  - Class: rviz/Tool Properties
-    Expanded:
-      - /2D Nav Goal1
-    Name: Tool Properties
-    Splitter Ratio: 0.58
-  - Class: rviz/Views
-    Expanded:
-      - /Current View1
-    Name: Views
+  - Class: sim2real_ground_station/InteractiveGoalPanel
+    Goal Height: 1.5
+    Name: Target Control
+    Takeoff Height: 1.5
 Visualization Manager:
   Class: ""
   Displays:
@@ -44,6 +26,32 @@ Visualization Manager:
       Value: true
     - Class: rviz/Group
       Displays:
+        - Alpha: 0.9
+          Autocompute Intensity Bounds: true
+          Autocompute Value Bounds:
+            Max Value: 3
+            Min Value: 0
+            Value: true
+          Axis: Z
+          Channel Name: intensity
+          Class: rviz/PointCloud2
+          Color: 205; 210; 215
+          Color Transformer: FlatColor
+          Decay Time: 0
+          Enabled: true
+          Invert Rainbow: false
+          Name: Persistent obstacles
+          Position Transformer: XYZ
+          Queue Size: 2
+          Selectable: false
+          Size (Pixels): 4
+          Size (m): 0.04
+          Style: Points
+          Topic: /planning/viz/environment
+          Unreliable: false
+          Use Fixed Frame: true
+          Use rainbow: false
+          Value: true
         - Alpha: 0.9
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
@@ -87,13 +95,13 @@ Visualization Manager:
               Value: false
             Value: false
           Enabled: true
-          Keep: 100
-          Name: Vehicle odometry
-          Position Tolerance: 0.05
+          Keep: 1
+          Name: UAV pose
+          Position Tolerance: 0.02
           Shape:
             Alpha: 1
-            Axes Length: 0.35
-            Axes Radius: 0.035
+            Axes Length: 0.55
+            Axes Radius: 0.045
             Color: 255; 255; 255
             Head Length: 0.25
             Head Radius: 0.08
@@ -123,7 +131,7 @@ Visualization Manager:
           Enabled: true
           Name: Observed obstacles
           Position Transformer: XYZ
-          Queue Size: 5
+          Queue Size: 3
           Selectable: false
           Size (Pixels): 5
           Size (m): 0.065
@@ -133,6 +141,7 @@ Visualization Manager:
           Use Fixed Frame: true
           Value: true
         - Alpha: 0.95
+          Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
             Max Value: 3.2
             Min Value: 0.36
@@ -140,7 +149,7 @@ Visualization Manager:
           Axis: Z
           Channel Name: intensity
           Class: rviz/PointCloud2
-          Color: 80; 190; 220
+          Color: 255; 255; 255
           Color Transformer: AxisColor
           Decay Time: 0
           Enabled: true
@@ -149,7 +158,7 @@ Visualization Manager:
           Min Color: 45; 105; 255
           Name: Safety clearance
           Position Transformer: XYZ
-          Queue Size: 5
+          Queue Size: 3
           Selectable: false
           Size (Pixels): 4
           Size (m): 0.06
@@ -163,6 +172,22 @@ Visualization Manager:
       Name: Mapping
     - Class: rviz/Group
       Displays:
+        - Class: rviz/Marker
+          Enabled: true
+          Marker Topic: /planning/viz/active_goal
+          Name: Active planner goal
+          Namespaces:
+            active_planner_goal: true
+          Queue Size: 2
+          Value: true
+        - Class: rviz/Marker
+          Enabled: true
+          Marker Topic: /planning/viz/executed_path
+          Name: Actual flight trajectory
+          Namespaces:
+            measured_flight_path: true
+          Queue Size: 2
+          Value: true
         - Class: rviz/Marker
           Enabled: true
           Marker Topic: /planning/viz/backend/global_trajectory
@@ -196,7 +221,7 @@ Visualization Manager:
     - Class: rviz/FocusCamera
     - Class: rviz/Measure
     - Class: rviz/SetGoal
-      Topic: /sim2real/rviz_goal
+      Topic: /ground_station/goal_candidate
   Value: true
   Views:
     Current:
@@ -221,16 +246,10 @@ Visualization Manager:
       Yaw: 0.78
     Saved: ~
 Window Geometry:
-  Displays:
-    collapsed: false
   Height: 900
   Hide Left Dock: false
   Hide Right Dock: false
-  Selection:
-    collapsed: false
-  Tool Properties:
-    collapsed: false
-  Views:
+  Target Control:
     collapsed: false
   Width: 1440
   X: 40

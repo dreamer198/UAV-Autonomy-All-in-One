@@ -1,7 +1,6 @@
 # 真机部署指南：Jetson 与地面站
 
-本文面向单机真机部署，说明两台电脑各自运行什么、首次如何安装，以及每次飞行和
-离线回放的标准操作顺序。所有命令均从仓库根目录执行。
+本文面向单机真机部署，说明两台电脑各自运行什么、首次如何安装，以及每次飞行和离线回放的标准操作顺序。所有命令均从仓库根目录执行。
 
 > **安全提示**：`start/stop/restart` 用于管理 ROS 栈；解锁和起飞使用 `arm`，降落使用
 > `land`。飞机仍处于 armed（已解锁）状态，或活动栈的 MAVROS 状态无法确认时，
@@ -15,10 +14,11 @@
 | 电脑 | 运行内容 | 容器管理 | 日常入口 |
 |---|---|---|---|
 | 机载 Jetson | Livox、FAST-LIO、规划器、SE3、MAVROS、rosbag | `./launch/real_container.sh` | `./launch/real.sh`、`./launch/real_bag.sh` |
-| 地面站 | 实时 RViz、受保护的 `2D Nav Goal` 转发、离线回放显示 | `./launch/ground_station_container.sh` | `./launch/real_rviz.sh`、`./launch/real_bag_rviz.sh` |
+| 地面站 | 实时/嵌入式 RViz、交互目标面板、离线回放显示 | `./launch/ground_station_container.sh` | `./launch/real_rviz.sh`、`./launch/embedded_rviz.sh`、`./launch/real_bag_rviz.sh` |
 
-实时地面站入口始终启动目标桥，不提供关闭开关。离线回放使用独立的显示入口
-`./launch/real_bag_rviz.sh`。
+交互目标 Action 由 Jetson 真机栈启动，地面站 RViz 只负责显示、确认和
+发送请求。`embedded_rviz.sh` 供 `swarm-uav-mapping` 嵌入三维模式使用；
+离线回放使用独立入口 `./launch/real_bag_rviz.sh`。
 
 系统数据流如下：
 
@@ -35,19 +35,19 @@ MID-360 → Livox 驱动 → FAST-LIO
 
 ### 网络
 
-Jetson、地面站和 QGC 所在网络必须按实际拓扑配置。下文统一使用以下示例地址：
+Jetson、地面站和 QGC 所在网络必须按实际拓扑配置。当前单机联调固定使用：
 
-| 设备 | 示例地址 |
+| 设备 | 有线地址 |
 |---|---|
-| Jetson | `172.20.10.5` |
-| 地面站 | `172.20.10.3` |
+| Jetson | `192.168.1.123` |
+| 地面站 | `192.168.1.124` |
 
 部署前确认：
 
 1. Jetson 和地面站可以通过上述地址双向通信；
 2. Jetson 启动 ROS 时公布的是地面站可访问的地址；
-3. 若启用了防火墙，允许两台主机之间的 ROS 1 双向通信，包括 11311 和节点使用的
-   动态端口；
+3. 若启用了防火墙，允许两台主机之间的 ROS 1 双向通信，包括自主飞行栈的
+   `11312` 和节点使用的动态端口；现有全景相机/桥接栈继续使用 `11311`；
 4. Jetson 的雷达网卡和 MID-360 位于同一有线子网。
 
 三个容易混淆的变量分别表示：
@@ -169,7 +169,8 @@ FCU_DEVICE=/dev/ttyACM0 ./launch/real_container.sh run
 ./launch/ground_station_container.sh verify
 ```
 
-`build` 构建地面站镜像，`run` 创建或启动容器，`verify` 检查 RViz 和目标桥依赖。
+`build` 构建地面站镜像，`run` 创建或启动容器，`verify` 检查 RViz、
+交互目标面板和 Action 消息依赖。
 
 地面站容器直接使用宿主机网络连接 Jetson，并通过桌面图形会话显示 RViz。
 
@@ -186,9 +187,9 @@ FCU_DEVICE=/dev/ttyACM0 ./launch/real_container.sh run
 
 ```bash
 FCU_URL='/dev/ttyACM0:921600' \
-GCS_URL='udp://:14555@172.20.10.3:14550' \
-ROS_IP=172.20.10.5 \
-MAVROS_TGT_SYSTEM=5 \
+GCS_URL='udp://:14555@192.168.1.124:14550' \
+ROS_IP=192.168.1.123 \
+MAVROS_TGT_SYSTEM=2 \
 ./launch/real.sh --planner diff start
 ```
 
@@ -197,7 +198,7 @@ MAVROS_TGT_SYSTEM=5 \
 | `--planner` | 本次运行使用的规划器 |
 | `FCU_URL` | MAVROS 使用的容器内串口和波特率 |
 | `GCS_URL` | MAVROS 到 QGC 的 UDP 链路 |
-| `ROS_IP` | 地面站能够访问的 Jetson 地址；远程 RViz 场景建议显式设置 |
+| `ROS_IP` | Jetson 对地面站公布的地址；默认 `192.168.1.123`，维护时可显式覆盖 |
 | `MAVROS_TGT_SYSTEM` | 必须等于 PX4 的 `MAV_SYS_ID` |
 
 命令前设置的 `FCU_URL`、`GCS_URL`、`ROS_IP`、`MAVROS_TGT_SYSTEM` 和 `MOUNT_*`
@@ -211,8 +212,7 @@ MAVROS_TGT_SYSTEM=5 \
 ```
 
 启动器依次启动坐标系别名、Livox、FAST-LIO、里程计/点云适配、MAVROS、
-外部视觉位姿桥、定位保护、所选规划器、SE3 和 rosbag。任一关键阶段失败都会清理
-本次启动产生的部分进程。
+外部视觉位姿桥、定位保护、所选规划器、SE3 和 rosbag。任一关键阶段失败都会清理本次启动产生的部分进程。
 
 ## 飞前检查
 
@@ -247,30 +247,45 @@ rosrun tf tf_echo world base_link
 
 ## 地面站实时 RViz
 
-确认 Jetson 真机栈已正常启动后，在地面站执行：
+确认 Jetson 真机栈已正常启动，且以下两个 Action status 话题均已存在后，
+可以单独打开 RViz：
+
+- `/ground_station/interactive_goal/status`
+- `/ground_station/flight_command/status`
 
 ```bash
-JETSON_IP=172.20.10.5 \
-RVIZ_GOAL_Z=1.5 \
 ./launch/real_rviz.sh
 ```
 
-| 参数 | 含义 |
-|---|---|
-| `JETSON_IP` | 地面站能够访问的 Jetson 地址，必须设置 |
-| `LOCAL_IP` | 地面站在该链路上的地址；省略时按到 Jetson 的路由自动探测 |
-| `RVIZ_GOAL_Z` | 所有 `2D Nav Goal` 使用的固定高度，必须是正数 |
+`JETSON_IP`/`LOCAL_IP` 默认分别为 `192.168.1.123`/`192.168.1.124`，
+`ROS_MASTER_PORT` 默认为 `11312`，维护时可显式覆盖。`swarm-uav-mapping` 使用不带伪终端的
+`./launch/embedded_rviz.sh`，取得 X11 窗口 ID 后嵌入其三维模式。
 
-RViz 的 `2D Nav Goal` 箭头位置提供 x/y，箭头方向提供终点 yaw，目标桥补上
-`RVIZ_GOAL_Z` 后转发到 `/goal`。实时入口始终启动目标桥；只有同时满足以下条件才会
-真正发布目标：
+嵌入窗口隐藏 RViz 侧栏；工具栏保留 `2D Nav Goal`，并在其后依次显示
+`Takeoff`、`Land`。`2D Nav Goal` 只生成候选 x/y/yaw，随后弹窗设置目标高度
+和必要时的起飞高度，范围均为 0.5–2.5 m，默认 1.5 m。请求通过
+`/ground_station/interactive_goal` Action 提交，并显示校验、解锁、
+`AUTO.TAKEOFF`、OFFBOARD 交接和目标发布结果。
 
-- PX4 已 armed 且处于 OFFBOARD；
-- 定位和规划器已就绪；
-- `/planning/validate_goal` 校验通过。
+- 已解锁且处于 OFFBOARD：校验后直接发送；
+- 已解锁但不在 OFFBOARD：拒绝，不自动切换模式；
+- 未解锁：必须有新鲜的 MAVROS 状态且明确为 `ON_GROUND`，再经过默认
+  选中“取消”的二次确认，才会自动解锁、起飞、交接 OFFBOARD 并发送目标。
 
-`real_rviz.sh` 会等目标桥完成启动校验并发布就绪服务后才打开 RViz。如果初始化失败，
-脚本会直接退出，避免出现“RViz 已打开但目标永远无法发送”的假正常状态。
+机载端在解锁前调用 `/planning/validate_goal`，并与 `real.sh arm/goal/mission`
+以及工具栏起飞/降落共用同一个生命周期文件锁。目标被接受后保持 OFFBOARD，
+不自动降落；界面提示“目标已接受”只表示规划器已接收目标，不表示已经到达。
+
+`Takeoff` 通过 `/ground_station/flight_command` 发送独立起飞命令。它仅在收到
+新鲜 MAVROS 状态、飞行器未解锁且明确为 `ON_GROUND` 时启用；确认后执行解锁、
+PX4 `AUTO.TAKEOFF`，到达 0.5–2.5 m 范围内设置的高度后进入经过验证的
+OFFBOARD 悬停，不会发布规划目标。完成后可再使用 `2D Nav Goal`。
+
+`Land` 也通过 `/ground_station/flight_command`，仅在无人机已解锁、明确处于
+空中且由本系统自主模式控制时启用。机载端反复请求并以新鲜
+`/mavros/state.mode == AUTO.LAND` 为成功判据；不会强制反解锁，也不会把遥控器
+接管的 `STABILIZED`/`POSCTL` 覆盖成自动降落。成功提示表示 PX4 已接受自动降落
+模式，操作者仍须观察至实际落地并停止旋翼。
 
 ## 飞行命令
 
@@ -399,10 +414,11 @@ RViz 显示。地面站通过专用离线入口连接该回放环境。
 | 修改内容 | 生效方式 |
 |---|---|
 | `MOUNT_*`、`launch/real.sh` 运行参数 | 落地解除武装后重启真机栈 |
-| Livox 配置、真机载体配置 | 容器直接挂载宿主文件；重启真机栈 |
+| Livox 配置、真机载体配置 | 先重建 Jetson 镜像和容器，再重启真机栈；镜像源码哈希也覆盖这些 Docker COPY 输入 |
 | Jetson 镜像内的 ROS 包、规划器、消息、Dockerfile、公共或规划器控制器配置 | 重建 Jetson 镜像和容器 |
-| `deployment/ground_station/`、`sim2real_planning_msgs` | 重建地面站镜像和容器 |
-| RViz 配置、目标桥 Python 脚本 | 重新运行 RViz 入口；文件会在每次启动时复制 |
+| `deployment/ground_station/`、`sim2real_ground_station`、`sim2real_planning_msgs` | 重建地面站镜像和容器 |
+| RViz 配置 | 重建 Jetson 镜像（机载默认副本）；地面站端配置会在每次启动时复制，只需重新运行 RViz 入口 |
+| `embedded_rviz.py`、`interactive_goal_ui.py` | 重建地面站镜像和容器，再重新运行 RViz 入口 |
 
 #### 重建 Jetson
 
@@ -423,8 +439,8 @@ FCU_DEVICE=/dev/ttyACM0 ./launch/real_container.sh restart
 ./launch/ground_station_container.sh verify
 ```
 
-`run` 会检查地面站镜像是否包含当前内容的 `deployment/ground_station/` 和
-`sim2real_planning_msgs`；内容不一致时会提示重建容器。
+`run` 会检查地面站镜像是否包含当前内容的 `deployment/ground_station/`、
+`sim2real_ground_station` 和 `sim2real_planning_msgs`；内容不一致时会提示重建容器。
 
 ### 临时规划器配置
 
@@ -444,9 +460,9 @@ Diff、Fast Kino/Topo 与 SUPER 的配置格式分别以本节表中的默认文
 
 地面站源码或容器使用的镜像已经变化。按[重建地面站](#重建地面站)更新镜像和容器。
 
-### 实时 RViz 因目标桥未就绪而退出
+### 实时 RViz 因机载 Action 未就绪而退出
 
-这通常表示 Jetson 上的规划器尚未就绪、`/planning/validate_goal` 不可用，或桥接器的启动目标校验失败。先在 Jetson 执行：
+这通常表示 Jetson 上的规划器尚未就绪，或目标、起降 Action 中至少一个没有启动。先在 Jetson 执行：
 
 ```bash
 ./launch/real.sh status
@@ -459,9 +475,11 @@ Diff、Fast Kino/Topo 与 SUPER 的配置格式分别以本节表中的默认文
 rostopic echo -n1 /planning/status
 rosservice info /planning/validate_goal
 rostopic echo -n1 /mavros/state
+rostopic info /ground_station/interactive_goal/status
+rostopic info /ground_station/flight_command/status
 ```
 
-该检查确保实时 RViz 打开后具备安全发送目标的条件。
+该检查确保实时 RViz 打开后具备安全发送目标、起飞和降落的条件。
 
 ### 地面站无法连接 Jetson
 

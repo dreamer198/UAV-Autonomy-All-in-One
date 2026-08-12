@@ -7,8 +7,14 @@ import tempfile
 import unittest
 
 
+PACKAGE_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")
+)
 PROJECT_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")
+    os.environ.get(
+        "SIM2REAL_PROJECT_ROOT",
+        os.path.join(PACKAGE_ROOT, ".."),
+    )
 )
 
 
@@ -22,8 +28,49 @@ class ShellSafetyContractsTest(unittest.TestCase):
         with open(path, "r", encoding="utf-8") as stream:
             return stream.read()
 
+    def run_real_container_with_fake_docker(self, action, docker_body):
+        launcher = os.path.join(PROJECT_ROOT, "launch", "real_container.sh")
+        if not os.path.isfile(launcher):
+            self.skipTest("repository real-container launcher is not mounted")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bin_dir = os.path.join(temp_dir, "bin")
+            runtime_dir = os.path.join(temp_dir, "runtime")
+            docker_log = os.path.join(temp_dir, "docker.log")
+            os.makedirs(bin_dir)
+            fake_docker = os.path.join(bin_dir, "docker")
+            with open(fake_docker, "w", encoding="utf-8") as stream:
+                stream.write(
+                    "#!/usr/bin/env bash\n"
+                    "set -eu\n"
+                    "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n"
+                    + docker_body
+                )
+            os.chmod(fake_docker, 0o755)
+            env = os.environ.copy()
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            env["FAKE_DOCKER_LOG"] = docker_log
+            env["RUNTIME_DIR"] = runtime_dir
+            env["CONTAINER_NAME"] = "fake_real_container"
+            env["REAL_SESSION_NAME"] = "fake_real_session"
+            completed = subprocess.run(
+                [launcher, action],
+                cwd=PROJECT_ROOT,
+                env=env,
+                check=False,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            with open(docker_log, "r", encoding="utf-8") as stream:
+                docker_calls = stream.read()
+            runtime_children = []
+            if os.path.isdir(runtime_dir):
+                runtime_children = os.listdir(runtime_dir)
+            return completed, docker_calls, runtime_children
+
     def run_rviz_with_fake_docker(
-        self, entrypoint, *, bridge_ready=True, goal_dependencies=True
+        self, entrypoint, *, action_ready=True, goal_dependencies=True
     ):
         with tempfile.TemporaryDirectory() as temp_dir:
             bin_dir = os.path.join(temp_dir, "bin")
@@ -43,14 +90,21 @@ set -eu
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 all_args="$*"
 case "$all_args" in
+  *'io.uav-autonomy-aio.ground-station-layout'*) printf 'v2\n' ;;
+  *'io.uav-autonomy-aio.ground-station-source-sha256'*) printf '%s\n' "$FAKE_GROUND_SOURCE_HASH" ;;
+  *'image inspect'*'{{.Id}}'*) printf 'sha256:ground-station-test-image\n' ;;
+  *'container inspect'*'{{.Image}}'*) printf 'sha256:ground-station-test-image\n' ;;
   *'.State.Running'*) printf 'true\n' ;;
+  *'.HostConfig.Init'*) printf 'true\n' ;;
   *'.HostConfig.NetworkMode'*) printf 'host\n' ;;
+  *'.HostConfig.IpcMode'*) printf 'host\n' ;;
+  *'.HostConfig.Privileged'*) printf 'false\n' ;;
+  *'.Config.Env'*) printf 'SIM2REAL_RUNTIME_MODE=ground_station\n' ;;
   *'python3 -c'*'mavros_msgs'*)
     [ "$FAKE_GOAL_DEPENDENCIES" = true ] || exit 1
     ;;
-  *'rosservice call /rviz_goal_to_diff_planner/ready'*)
-    [ "$FAKE_BRIDGE_READY" = true ] || exit 1
-    printf 'success: True\nmessage: ready\n'
+  *'/ground_station/interactive_goal/status'*)
+    [ "$FAKE_ACTION_READY" = true ] || exit 1
     ;;
   *'exec rviz -d'*) : > "$FAKE_FINAL_RVIZ_MARKER" ;;
 esac
@@ -77,14 +131,34 @@ esac
             env["FAKE_DOCKER_LOG"] = docker_log
             env["FAKE_FINAL_RVIZ_MARKER"] = final_rviz_marker
             env["FAKE_HOST_PYTHON_LOG"] = host_python_log
-            env["FAKE_BRIDGE_READY"] = str(bridge_ready).lower()
+            env["FAKE_ACTION_READY"] = str(action_ready).lower()
             env["FAKE_GOAL_DEPENDENCIES"] = str(goal_dependencies).lower()
+            hash_completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; compute_container_source_hash "$2" "${@:3}"',
+                    "bash",
+                    os.path.join(
+                        PROJECT_ROOT, "launch", "container_source_hash.sh"
+                    ),
+                    PROJECT_ROOT,
+                    "deployment/ground_station",
+                    "deployment/ros_pkgs/sim2real_ground_station",
+                    "planning/ros_pkgs/sim2real_planning_msgs",
+                ],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            )
+            env["FAKE_GROUND_SOURCE_HASH"] = hash_completed.stdout.strip()
             env["GROUND_STATION_CONTAINER"] = "review_ground_station"
             env["JETSON_IP"] = "192.0.2.10"
             env["LOCAL_IP"] = "192.0.2.20"
             env["DISPLAY"] = ":99"
             env["RVIZ_CONFIG_HOST"] = rviz_config
             env["RVIZ_CONFIG_CONTAINER"] = "/root/review.rviz"
+            env["RVIZ_LOCK_PATH"] = os.path.join(temp_dir, "ground_rviz.lock")
             env.pop("CONTAINER_NAME", None)
             completed = subprocess.run(
                 [os.path.join(PROJECT_ROOT, "launch", entrypoint)],
@@ -372,13 +446,16 @@ esac
         for expected in (
             "require_safe_real_stop",
             "mavros_state_snapshot",
+            'ROS_MASTER_URI="${ROS_MASTER_URI:-http://127.0.0.1:11312}"',
+            'MAVROS_TGT_SYSTEM="${MAVROS_TGT_SYSTEM:-2}"',
+            'docker_tmux_cmd "roscore -p $master_port"',
             "armed: True",
             "/mavros/state cannot be verified",
             "stop [--force]",
             "restart [--force]",
             "acquire_start_lock",
             "stop_stack true",
-            'START_LOCK="$LIFECYCLE_LOCK_DIR/real.lifecycle.lock"',
+            'START_LOCK="$RUNTIME_DIR/tmp/real.lifecycle.lock"',
             "Another real-flight lifecycle or autonomous command",
             "Real-flight state changed while rosbag was shutting down",
         ):
@@ -387,6 +464,7 @@ esac
         for function_name in (
             "arm_vehicle",
             "publish_goal",
+            "request_land",
             "run_waypoint_mission",
             "stop_stack",
         ):
@@ -394,6 +472,91 @@ esac
             body = source[start : source.find("\n}", start) + 2]
             self.assertIn("acquire_start_lock", body)
             self.assertIn("release_start_lock", body)
+        self.assertIn("verify_live_lifecycle_mount", source)
+        acquire_start = source[
+            source.index("acquire_start_lock()") : source.index(
+                "release_start_lock()"
+            )
+        ]
+        self.assertIn("verify_live_lifecycle_mount", acquire_start)
+        self.assertIn("stat -Lc '%d:%i'", source)
+        self.assertIn("stat -Lc '%d:%i' -- /root/tmp", source)
+        self.assertIn(
+            "/ground_station/interactive_goal/status", source
+        )
+        self.assertIn("/ground_station/flight_command/status", source)
+
+        interactive_goal = self.read(
+            "common/scripts/interactive_goal_server.py"
+        )
+        self.assertIn(
+            '"/root/tmp/real.lifecycle.lock"', interactive_goal
+        )
+        self.assertIn("fcntl.LOCK_EX | fcntl.LOCK_NB", interactive_goal)
+
+        real_launcher = self.read("launch/real.sh")
+        self.assertIn(
+            'GROUND_VIZ_CLOUD_TOPIC="${GROUND_VIZ_CLOUD_TOPIC:-/ground_station/cloud_registered}"',
+            real_launcher,
+        )
+        self.assertIn(
+            'GROUND_VIZ_CLOUD_RATE="${GROUND_VIZ_CLOUD_RATE:-1.0}"',
+            real_launcher,
+        )
+        self.assertIn("rosrun topic_tools throttle messages", real_launcher)
+        self.assertIn("ground_station_cloud_throttle", real_launcher)
+        self.assertIn('MAVROS_TGT_SYSTEM="${MAVROS_TGT_SYSTEM:-2}"', real_launcher)
+
+    def test_embedded_rviz_bypasses_the_window_manager(self):
+        source = self.read(
+            "deployment/ros_pkgs/sim2real_ground_station/scripts/embedded_rviz.py"
+        )
+        dockerfile = self.read("deployment/ground_station/Dockerfile")
+        launcher = self.read("launch/ground_station_container.sh")
+        self.assertIn("Qt.FramelessWindowHint", source)
+        self.assertIn("Qt.X11BypassWindowManagerHint", source)
+        self.assertIn("RVIZ_XID=", source)
+        self.assertLess(
+            source.index("reader.readFile(config, args.config)"),
+            source.index("RVIZ_XID="),
+        )
+        self.assertNotIn('QAction("Target"', source)
+        self.assertNotIn('"2D Nav Goal": "Set Goal"', source)
+        self.assertIn("fonts-wqy-microhei", dockerfile)
+        self.assertIn("WenQuanYi Micro Hei", source)
+        self.assertIn("app.setFont(font)", source)
+        self.assertIn("fc-match", launcher)
+        self.assertIn("SCRIPT_DIRECTORY", source)
+        self.assertIn("sys.path.insert(0, SCRIPT_DIRECTORY)", source)
+
+        goal_ui = self.read(
+            "deployment/ros_pkgs/sim2real_ground_station/scripts/interactive_goal_ui.py"
+        )
+        self.assertIn('cancel_text = "取消起飞"', goal_ui)
+        self.assertIn("self._flight_client.cancel_goal()", goal_ui)
+        self.assertIn("progress.setCancelButton(None)", goal_ui)
+        progress_body = goal_ui[
+            goal_ui.index("def _open_flight_progress") : goal_ui.index(
+                "def _cancel_takeoff"
+            )
+        ]
+        self.assertEqual(progress_body.count("progress.setCancelButton(None)"), 1)
+        self.assertGreater(
+            progress_body.index("progress.setCancelButton(None)"),
+            progress_body.index("else:"),
+        )
+
+    def test_live_rviz_helpers_are_owned_by_the_embedding_session(self):
+        source = self.read("launch/real_rviz_common.sh")
+        self.assertIn(
+            'stop_ground_rviz_helpers "$RVIZ_PROCESS_TOKEN"', source
+        )
+        self.assertGreaterEqual(
+            source.count('_ground_rviz_session_token:="$helper_token"'), 2
+        )
+        self.assertGreaterEqual(
+            source.count('"$RVIZ_PROCESS_TOKEN"'), 4
+        )
 
     def test_sim_stop_and_status_respect_stack_ownership_and_health(self):
         source = self.read("launch/sim.sh")
@@ -403,7 +566,7 @@ esac
             "no simulation owner session or marker exists; leaving it untouched",
             "local healthy=true",
             '[ "$healthy" = "true" ]',
-            'START_LOCK="$LIFECYCLE_LOCK_DIR/simulation.lifecycle.lock"',
+            'START_LOCK="$RUNTIME_HOST/simulation.lifecycle.lock"',
             "first_simulation_owner_marker",
             "has no repository ownership marker",
         ):
@@ -415,6 +578,13 @@ esac
             ownership_branch.index('if [ -f "$SESSION_MARKER" ]'),
             ownership_branch.index("elif tmux_has_session"),
         )
+        status_branch = source[
+            source.index("status_stack()") : source.index("attach_stack()")
+        ]
+        self.assertIn(
+            "/ground_station/interactive_goal/status", status_branch
+        )
+        self.assertIn("/ground_station/flight_command/status", status_branch)
 
     def test_simulated_land_sends_and_checks_setbool_true(self):
         source = self.read("launch/sim.sh")
@@ -450,7 +620,15 @@ esac
         self.assertIn("require_inactive_real_stack", real)
         self.assertIn("PX4 reports armed", real)
         self.assertIn("container_layout_current", real)
+        self.assertIn("live_bind_mount_current", real)
+        self.assertIn("stat -Lc '%d:%i'", real)
+        self.assertIn(
+            'live_bind_mount_current "$RUNTIME_DIR/tmp" /root/tmp', real
+        )
         self.assertIn("--init", real)
+        self.assertIn(
+            '--label "$IMAGE_SOURCE_LABEL=$source_hash"', real
+        )
         self.assertIn("require_inactive_simulation", sim)
         self.assertIn("active_simulation_detected", sim)
         for source in (real, sim):
@@ -461,6 +639,52 @@ esac
             sim.index("    restart)") : sim.index("    recreate)")
         ]
         self.assertIn("require_inactive_simulation", restart_body)
+        real_start = self.read("launch/real.sh")
+        start_body = real_start[
+            real_start.index("start_stack()") : real_start.index(
+                "stop_stack()"
+            )
+        ]
+        verify_call = '"$SCRIPT_DIR/real_container.sh" verify'
+        self.assertIn(verify_call, start_body)
+        self.assertLess(
+            start_body.index(verify_call),
+            start_body.index("ensure_container_running"),
+        )
+
+    def test_real_verify_rejects_a_stale_source_label_without_mutating(self):
+        completed, docker_calls, runtime_children = (
+            self.run_real_container_with_fake_docker(
+                "verify",
+                """
+case "$*" in
+  *'io.sim2real.planner-workspaces'*) printf 'v2\n' ;;
+  *'io.uav-autonomy-aio.real-source-sha256'*) printf 'stale-source\n' ;;
+esac
+""",
+            )
+        )
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("missing or stale", completed.stdout)
+        self.assertNotIn("build ", docker_calls)
+        self.assertEqual([], runtime_children)
+
+    def test_real_build_is_rejected_before_docker_build_when_stack_active(self):
+        completed, docker_calls, _runtime_children = (
+            self.run_real_container_with_fake_docker(
+                "build",
+                """
+case "$*" in
+  *'container inspect -f {{.State.Running}}'*) printf 'true\n' ;;
+  *'top fake_real_container'*) printf 'python3 /root/flight_command_server.py\n' ;;
+  *'exec -i fake_real_container'*) exit 1 ;;
+esac
+""",
+            )
+        )
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("while the real stack or recorder is active", completed.stdout)
+        self.assertNotIn("build ", docker_calls)
 
     def test_real_deployment_separates_jetson_and_ground_station_containers(self):
         real = self.read("launch/real_container.sh")
@@ -478,6 +702,9 @@ esac
         self.assertNotIn("--privileged\n", ground)
         self.assertIn("ros-noetic-rviz", ground_dockerfile)
         self.assertIn("ros-noetic-mavros-msgs", ground_dockerfile)
+        self.assertIn("python3-numpy", ground_dockerfile)
+        self.assertIn("ros-noetic-tf2-ros", ground_dockerfile)
+        self.assertIn("ros-noetic-visualization-msgs", ground_dockerfile)
         self.assertIn("ros-noetic-std-srvs", ground_dockerfile)
         self.assertIn("sim2real_planning_msgs", ground_dockerfile)
         self.assertNotIn("COPY third_party", ground_dockerfile)
@@ -517,6 +744,19 @@ esac
         self.assertIn(
             '[[ "$workspace" == "$WORKSPACE_ROOT/"*_ws ]]', source
         )
+
+    def test_fast_planner_node_waits_for_generated_message_headers(self):
+        source = self.read(
+            "third_party/Fast-Planner/fast_planner/plan_manage/CMakeLists.txt"
+        )
+        target_start = source.index("add_executable(fast_planner_node")
+        target_end = source.index("target_link_libraries(fast_planner_node")
+        target_definition = source[target_start:target_end]
+        self.assertIn("add_dependencies(fast_planner_node", target_definition)
+        self.assertIn(
+            "${${PROJECT_NAME}_EXPORTED_TARGETS}", target_definition
+        )
+        self.assertIn("${catkin_EXPORTED_TARGETS}", target_definition)
 
     def test_outdoor_scene_publish_is_bounded_and_read_only_actions_do_not_generate(self):
         source = self.read("launch/outdoor_bag_sim.sh")
@@ -595,22 +835,40 @@ esac
             self.assertTrue(os.path.isfile(playback_marker))
             self.assertTrue(os.path.isfile(master_marker))
 
-    def test_real_rviz_uses_route_detection_and_cleans_up_bridge_and_xhost(self):
+    def test_real_rviz_uses_fixed_wired_link_and_guarded_action(self):
         source = self.read("launch/real_rviz_common.sh")
         live = self.read("launch/real_rviz.sh")
         offline = self.read("launch/real_bag_rviz.sh")
-        self.assertIn('JETSON_IP="${JETSON_IP:-}"', source)
-        self.assertIn('RVIZ_GOAL_Z="${RVIZ_GOAL_Z:-1.0}"', source)
-        self.assertIn('ip -4 route get "$JETSON_IP"', source)
-        self.assertIn("bridge_ready", source)
+        self.assertIn('JETSON_IP="${JETSON_IP:-192.168.1.123}"', source)
+        self.assertIn('LOCAL_IP="${LOCAL_IP:-192.168.1.124}"', source)
+        self.assertIn('ROS_MASTER_PORT="${ROS_MASTER_PORT:-11312}"', source)
+        self.assertIn("action_ready", source)
+        self.assertNotIn("visualization_ready", source)
         self.assertIn(
-            "rosservice call /rviz_goal_to_diff_planner/ready", source
+            "/ground_station/interactive_goal/status", source
         )
-        self.assertNotIn(
-            "rosnode list 2>/dev/null | grep -qx /rviz_goal_to_diff_planner",
-            source,
-        )
+        self.assertIn("master_has_publishers", source)
+        self.assertIn("socket.setdefaulttimeout(2.0)", source)
+        self.assertIn("RVIZ_HELPER_START_DELAY", source)
+        self.assertIn("sleep \"$RVIZ_HELPER_START_DELAY\"", source)
+        self.assertIn("_input_topic:=/ground_station/cloud_registered", source)
+        for expected in (
+            "stable_environment_viz.py",
+            "flight_visualization.py",
+            "__name:=ground_rviz_environment",
+            "__name:=ground_rviz_flight_visualization",
+            "/planning/viz/environment",
+            "/planning/viz/active_goal",
+            "/planning/viz/executed_path",
+        ):
+            self.assertIn(expected, source)
+        self.assertNotIn("rviz_goal_to_diff_planner", source)
+        self.assertIn("ground_rviz.lock", source)
         self.assertIn("trap cleanup EXIT", source)
+        self.assertIn("timeout 5 docker exec", source)
+        self.assertIn("stop_ground_rviz_helpers", source)
+        self.assertIn("/proc/[0-9]*/cmdline", source)
+        self.assertNotIn("timeout 3 rosnode kill", source)
         self.assertIn("xhost -SI:localuser:root", source)
         self.assertNotIn("xhost +local:docker", source)
         self.assertNotIn("START_GOAL_BRIDGE", source)
@@ -623,44 +881,70 @@ esac
         self.assertIn(
             "readonly REAL_RVIZ_ENTRYPOINT_KIND=offline_bag", offline
         )
-        self.assertIn(
-            "实时地面站入口始终启动目标桥，不提供关闭开关",
-            self.read("docs/deployment.md"),
-        )
+        self.assertIn("/ground_station/interactive_goal", source)
 
-    def test_live_rviz_requires_completed_bridge_readiness(self):
+        panel = self.read(
+            "deployment/ros_pkgs/sim2real_ground_station/src/interactive_goal_panel.cpp"
+        )
+        self.assertIn("confirmation.setDefaultButton(QMessageBox::Cancel)", panel)
+        self.assertIn("LANDED_STATE_ON_GROUND", panel)
+        self.assertIn('state.mode != "OFFBOARD"', panel)
+
+    def test_live_rviz_requires_onboard_action_readiness(self):
         completed, docker_calls, _, final_rviz_started = (
             self.run_rviz_with_fake_docker(
-                "real_rviz.sh", bridge_ready=False
+                "real_rviz.sh", action_ready=False
             )
         )
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("did not complete planner validation", completed.stdout)
+        self.assertIn("ground-station actions are unavailable", completed.stdout)
         self.assertIn(
-            "rosservice call /rviz_goal_to_diff_planner/ready", docker_calls
+            "/ground_station/interactive_goal/status", docker_calls
         )
+        self.assertIn("/ground_station/flight_command/status", docker_calls)
         self.assertFalse(final_rviz_started)
 
-    def test_live_rviz_starts_after_completed_bridge_readiness(self):
+    def test_live_rviz_starts_after_action_readiness(self):
         completed, docker_calls, host_python_called, final_rviz_started = (
             self.run_rviz_with_fake_docker("real_rviz.sh")
         )
         self.assertEqual(0, completed.returncode, completed.stdout)
-        self.assertIn("rviz_goal_to_diff_planner.py", docker_calls)
-        self.assertTrue(host_python_called)
+        self.assertNotIn("rviz_goal_to_diff_planner.py", docker_calls)
+        self.assertIn("/ground_station/interactive_goal/status", docker_calls)
+        self.assertIn("/ground_station/flight_command/status", docker_calls)
+        self.assertIn("stable_environment_viz.py", docker_calls)
+        self.assertIn("flight_visualization.py", docker_calls)
+        action_check = next(
+            line
+            for line in docker_calls.splitlines()
+            if "python3 - http://" in line
+            and "/ground_station/interactive_goal/status" in line
+        )
+        helper_start = next(
+            line
+            for line in docker_calls.splitlines()
+            if line.startswith("exec -d")
+            and "RVIZ_HELPER_START_DELAY" in line
+        )
+        self.assertLess(
+            docker_calls.index(action_check), docker_calls.index(helper_start)
+        )
+        self.assertFalse(host_python_called)
         self.assertTrue(final_rviz_started)
 
     def test_offline_rviz_never_requires_or_mutates_goal_bridge(self):
         completed, docker_calls, host_python_called, final_rviz_started = (
             self.run_rviz_with_fake_docker(
                 "real_bag_rviz.sh",
-                bridge_ready=False,
+                action_ready=False,
                 goal_dependencies=False,
             )
         )
         self.assertEqual(0, completed.returncode, completed.stdout)
         self.assertNotIn("mavros_msgs", docker_calls)
         self.assertNotIn("rviz_goal_to_diff_planner", docker_calls)
+        self.assertNotIn("stable_environment_viz.py", docker_calls)
+        self.assertNotIn("flight_visualization.py", docker_calls)
         self.assertFalse(host_python_called)
         self.assertTrue(final_rviz_started)
 

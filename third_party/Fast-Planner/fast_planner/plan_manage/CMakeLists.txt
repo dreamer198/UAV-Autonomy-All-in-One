@@ -61,6 +61,10 @@ add_executable(fast_planner_node
   src/topo_replan_fsm.cpp
   src/planner_manager.cpp
   )
+add_dependencies(fast_planner_node
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+  )
 target_link_libraries(fast_planner_node 
   ${catkin_LIBRARIES}
   )

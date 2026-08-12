@@ -10,12 +10,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 SHELL ["/bin/bash", "-lc"]
 
-ARG UBUNTU_PORTS_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
+ARG UBUNTU_PORTS_MIRROR=http://mirrors.aliyun.com/ubuntu-ports
 ARG NLOPT_DEBIAN_VERSION=2.6.1-8ubuntu2
 
 RUN sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" /etc/apt/sources.list \
  && apt-get -o Acquire::Retries=5 update \
- && apt-get install -y \
+ && apt-get -o Acquire::Retries=5 --fix-missing install -y \
     build-essential \
     cmake \
     curl \
@@ -44,6 +44,8 @@ RUN sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" /et
     python3-yaml \
     rsync \
     ros-noetic-cv-bridge \
+    ros-noetic-actionlib \
+    ros-noetic-actionlib-msgs \
     ros-noetic-ddynamic-reconfigure \
     ros-noetic-dynamic-reconfigure \
     ros-noetic-eigen-conversions \
@@ -85,8 +87,8 @@ COPY third_party/Diff-Planner-PX4 /opt/uav-autonomy-aio/third_party/Diff-Planner
 COPY third_party/Fast-Planner /opt/uav-autonomy-aio/third_party/Fast-Planner
 COPY third_party/SUPER /opt/uav-autonomy-aio/third_party/SUPER
 COPY common /opt/uav-autonomy-aio/common
-COPY simulation/ros_pkgs /opt/uav-autonomy-aio/simulation/ros_pkgs
-COPY deployment/ros_pkgs /opt/uav-autonomy-aio/deployment/ros_pkgs
+COPY deployment/ros_pkgs/sim2real_deployment \
+     /opt/uav-autonomy-aio/deployment/ros_pkgs/sim2real_deployment
 COPY planning /opt/uav-autonomy-aio/planning
 
 COPY deployment/config/rviz/jetson_real_stack.rviz /root/jetson_real_stack.rviz
@@ -127,12 +129,13 @@ RUN source /opt/ros/noetic/setup.bash \
 
 # Build public/control, Diff, Fast, and SUPER in independent catkin domains. Only the
 # interface and control setup files are sourced by /root/.bashrc at runtime.
+ARG BUILD_JOBS=2
 RUN /opt/uav-autonomy-aio/planning/scripts/build_planner_workspaces.sh \
       --project-root /opt/uav-autonomy-aio \
       --workspace-root /opt/uav-autonomy-aio/planning/workspaces \
       --underlay /root/localization_ws/devel \
       --flavor deployment \
-      --jobs "$(nproc)" \
+      --jobs "$BUILD_JOBS" \
  && mkdir -p /root/catkin_ws/devel \
  && ln -s /opt/uav-autonomy-aio/planning/workspaces/control_ws/devel/setup.bash \
       /root/catkin_ws/devel/setup.bash

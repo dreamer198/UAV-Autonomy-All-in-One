@@ -180,6 +180,90 @@ class PersistentVoxelMapTest(unittest.TestCase):
             manager["Views"]["Current"]["Target Frame"], "world"
         )
 
+    def test_real_rviz_exposes_the_same_human_facing_layers(self):
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "..",
+            "..",
+            "deployment",
+            "config",
+            "rviz",
+            "jetson_real_stack.rviz",
+        )
+        with open(path, "r", encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+
+        manager = config["Visualization Manager"]
+        groups = {
+            display["Name"]: display
+            for display in manager["Displays"]
+            if display.get("Class") == "rviz/Group"
+        }
+        sensor_layers = {
+            display["Name"]: display
+            for display in groups["Sensors"]["Displays"]
+        }
+        self.assertEqual(
+            sensor_layers["Persistent obstacles"]["Topic"],
+            "/planning/viz/environment",
+        )
+        self.assertIs(
+            sensor_layers["Persistent obstacles"]["Enabled"], True
+        )
+        self.assertIs(sensor_layers["Registered cloud"]["Enabled"], False)
+
+        vehicle_pose = sensor_layers["UAV pose"]
+        self.assertIs(vehicle_pose["Enabled"], True)
+        self.assertEqual(vehicle_pose["Topic"], "/localization/odom")
+        self.assertEqual(vehicle_pose["Shape"]["Value"], "Axes")
+
+        mapping = {
+            display["Name"]: display
+            for display in groups["Mapping"]["Displays"]
+        }
+        observed = mapping["Observed obstacles"]
+        self.assertEqual(observed["Color"], "185; 75; 255")
+        inflated = mapping["Safety clearance"]
+        self.assertIs(inflated["Enabled"], True)
+        self.assertGreaterEqual(float(inflated["Alpha"]), 0.9)
+        self.assertEqual(inflated["Color Transformer"], "AxisColor")
+        self.assertEqual(inflated["Style"], "Points")
+        self.assertIs(inflated["Use rainbow"], True)
+        panels = config["Panels"]
+        self.assertEqual(len(panels), 1)
+        self.assertEqual(
+            panels[0]["Class"],
+            "sim2real_ground_station/InteractiveGoalPanel",
+        )
+        self.assertEqual(
+            manager["Global Options"]["Background Color"], "24; 27; 31"
+        )
+        self.assertEqual(manager["Global Options"]["Frame Rate"], 30)
+
+        planning = {
+            display["Name"]: display
+            for display in groups["Planning"]["Displays"]
+        }
+        for name, topic in (
+            ("Active planner goal", "/planning/viz/active_goal"),
+            ("Actual flight trajectory", "/planning/viz/executed_path"),
+            (
+                "Backend initial path",
+                "/planning/viz/backend/global_trajectory",
+            ),
+            ("Backend trajectory", "/planning/viz/backend/trajectory"),
+        ):
+            self.assertIs(planning[name]["Enabled"], True)
+            self.assertEqual(planning[name]["Marker Topic"], topic)
+
+        self.assertEqual(manager["Global Options"]["Fixed Frame"], "world")
+        self.assertEqual(
+            manager["Tools"][-1]["Topic"],
+            "/ground_station/goal_candidate",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

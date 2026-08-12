@@ -1,0 +1,11 @@
+<library path="lib/libsim2real_ground_station">
+  <class
+      name="sim2real_ground_station/InteractiveGoalPanel"
+      type="sim2real_ground_station::InteractiveGoalPanel"
+      base_class_type="rviz::Panel">
+    <description>
+      Validates an RViz goal candidate and sends it through the onboard guarded
+      arm, native-takeoff, OFFBOARD, and planner-goal action.
+    </description>
+  </class>
+</library>
