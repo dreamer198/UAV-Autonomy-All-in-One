@@ -651,6 +651,14 @@ esac
         )
         self.assertIn("require_inactive_simulation", sim)
         self.assertIn("active_simulation_detected", sim)
+        self.assertIn("grant_x11_access", sim)
+        self.assertIn(
+            'DISPLAY="$DISPLAY_VALUE" xhost +SI:localuser:root', sim
+        )
+        sim_run_body = sim[
+            sim.index("run_container() {") : sim.index("stop_container() {")
+        ]
+        self.assertIn("grant_x11_access", sim_run_body)
         for source in (real, sim):
             self.assertIn("--force", source)
             self.assertIn("read -r -a parsed", source)
