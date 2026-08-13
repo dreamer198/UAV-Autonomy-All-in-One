@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Emit one JSON telemetry stream for the local Qt ground station.
+"""Emit MAVROS telemetry as JSON for the Ubuntu 22.04 Qt ground station.
 
-This helper deliberately runs inside the simulation container so the Qt
-application does not need ROS Noetic Python packages on the host.
+This program runs in the lightweight ROS Noetic ground-station container.  It
+keeps rospy and ROS 1 message dependencies out of the host application and is
+usable with either the remote real master or the isolated local simulation.
 """
 
 import argparse
@@ -130,7 +131,11 @@ class GroundStationTelemetry:
         remaining_time = 0
         if battery is not None:
             raw_percentage = finite(battery.percentage, 1.0)
-            percentage = raw_percentage * 100.0 if raw_percentage <= 1.0 else raw_percentage
+            percentage = (
+                raw_percentage * 100.0
+                if raw_percentage <= 1.0
+                else raw_percentage
+            )
             voltage = finite(battery.voltage)
             current = finite(battery.current)
 
@@ -173,15 +178,21 @@ class GroundStationTelemetry:
             "gps_fix_type": gps_fix_type,
         }
         try:
-            print(json.dumps(payload, ensure_ascii=False, allow_nan=False), flush=True)
+            print(
+                json.dumps(payload, ensure_ascii=False, allow_nan=False),
+                flush=True,
+            )
         except (TypeError, ValueError) as exc:
-            print("telemetry serialization failed: {}".format(exc), file=sys.stderr)
+            print(
+                "telemetry serialization failed: {}".format(exc),
+                file=sys.stderr,
+            )
 
 
 def main():
     parser = argparse.ArgumentParser()
-    # The token is intentionally retained in /proc/cmdline so the launching Qt
-    # process can remove only its own helper after a docker-exec disconnect.
+    # The token remains in /proc/cmdline so the Qt process can clean up only
+    # the helper instance that it owns.
     parser.add_argument("--session-token", required=True)
     parser.add_argument("--fallback-latitude", type=float, default=47.397742)
     parser.add_argument("--fallback-longitude", type=float, default=8.545594)

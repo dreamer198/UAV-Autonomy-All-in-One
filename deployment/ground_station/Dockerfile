@@ -66,7 +66,8 @@ RUN source /root/.bashrc \
  && fc-match -f '%{family}\n' 'WenQuanYi Micro Hei:lang=zh-cn' | grep -q 'WenQuanYi Micro Hei' \
  && rospack find sim2real_planning_msgs >/dev/null \
  && rospack find sim2real_ground_station >/dev/null \
- && python3 -c 'import numpy, tf2_ros; from rviz import bindings as rviz; assert rviz.VisualizationFrame; from mavros_msgs.msg import State; from nav_msgs.msg import Odometry; from sensor_msgs import point_cloud2; from sensor_msgs.msg import PointCloud2; from sim2real_planning_msgs.msg import FlightCommandAction, InteractiveGoalAction, PlannerGoal, PlannerStatus; from sim2real_planning_msgs.srv import ValidateGoal; from visualization_msgs.msg import Marker'
+ && python3 -c 'import numpy, tf2_ros; from rviz import bindings as rviz; assert rviz.VisualizationFrame; from mavros_msgs.msg import ExtendedState, State; from nav_msgs.msg import Odometry; from sensor_msgs import point_cloud2; from sensor_msgs.msg import BatteryState, NavSatFix, PointCloud2; from sim2real_planning_msgs.msg import FlightCommandAction, InteractiveGoalAction, PlannerGoal, PlannerStatus; from sim2real_planning_msgs.srv import ValidateGoal; from visualization_msgs.msg import Marker' \
+ && test -x /root/ground_station_ws/devel/lib/sim2real_ground_station/ground_station_telemetry.py
 
 WORKDIR /root
 CMD ["tail", "-f", "/dev/null"]

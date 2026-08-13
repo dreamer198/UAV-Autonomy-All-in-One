@@ -9,11 +9,13 @@ find_package(catkin REQUIRED COMPONENTS
   actionlib
   geometry_msgs
   mavros_msgs
+  nav_msgs
   pluginlib
   python_qt_binding
   roscpp
   rospy
   rviz
+  sensor_msgs
   sim2real_planning_msgs
 )
 find_package(Qt5 REQUIRED COMPONENTS Widgets)
@@ -24,11 +26,13 @@ catkin_package(
     actionlib
     geometry_msgs
     mavros_msgs
+    nav_msgs
     pluginlib
     python_qt_binding
     roscpp
     rospy
     rviz
+    sensor_msgs
     sim2real_planning_msgs
 )
 
@@ -51,6 +55,7 @@ target_link_libraries(${PROJECT_NAME}
 
 catkin_install_python(PROGRAMS
   scripts/embedded_rviz.py
+  scripts/ground_station_telemetry.py
   scripts/interactive_goal_ui.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

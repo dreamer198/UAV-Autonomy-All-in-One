@@ -173,6 +173,9 @@ FCU_DEVICE=/dev/ttyACM0 ./launch/real_container.sh run
 交互目标面板和 Action 消息依赖。
 
 地面站容器直接使用宿主机网络连接 Jetson，并通过桌面图形会话显示 RViz。
+容器内的 `ground_station_telemetry.py` 可订阅 MAVROS 状态并向宿主 Qt 程序输出
+JSON，因此 `swarm-uav-mapping --aio-real` 不依赖 ROS2 `onboard_msgs` 或
+`domain_bridge`。
 
 ## 启动真机栈
 

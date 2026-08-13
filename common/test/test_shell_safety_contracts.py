@@ -948,6 +948,35 @@ esac
         self.assertFalse(host_python_called)
         self.assertTrue(final_rviz_started)
 
+    def test_ground_station_image_installs_mavros_telemetry_helper(self):
+        helper = self.read(
+            "deployment/ros_pkgs/sim2real_ground_station/scripts/"
+            "ground_station_telemetry.py"
+        )
+        cmake = self.read(
+            "deployment/ros_pkgs/sim2real_ground_station/CMakeLists.txt"
+        )
+        launcher = self.read("launch/ground_station_container.sh")
+        dockerfile = self.read("deployment/ground_station/Dockerfile")
+
+        self.assertIn("scripts/ground_station_telemetry.py", cmake)
+        for topic in (
+            '"/mavros/state"',
+            '"/mavros/extended_state"',
+            '"/localization/odom"',
+            '"/mavros/battery"',
+            '"/mavros/global_position/global"',
+        ):
+            self.assertIn(topic, helper)
+        self.assertIn("if state is None:", helper)
+        self.assertNotIn("state is None or odometry is None", helper)
+        installed_path = (
+            "/root/ground_station_ws/devel/lib/"
+            "sim2real_ground_station/ground_station_telemetry.py"
+        )
+        self.assertIn(installed_path, launcher)
+        self.assertIn(installed_path, dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

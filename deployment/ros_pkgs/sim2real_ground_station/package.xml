@@ -11,11 +11,13 @@
   <depend>actionlib</depend>
   <depend>geometry_msgs</depend>
   <depend>mavros_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>pluginlib</depend>
   <depend>python_qt_binding</depend>
   <depend>roscpp</depend>
   <depend>rospy</depend>
   <depend>rviz</depend>
+  <depend>sensor_msgs</depend>
   <depend>sim2real_planning_msgs</depend>
 
   <export>
