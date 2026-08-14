@@ -167,8 +167,8 @@ class OdomToBase:
         mx = rospy.get_param("~mount_x", env_float("MOUNT_X", 0.109))
         my = rospy.get_param("~mount_y", env_float("MOUNT_Y", 0.024))
         mz = rospy.get_param("~mount_z", env_float("MOUNT_Z", 0.006))
-        roll_deg = rospy.get_param("~mount_roll_deg", env_float("MOUNT_ROLL_DEG", 0.7))
-        pitch_deg = rospy.get_param("~mount_pitch_deg", env_float("MOUNT_PITCH_DEG", 28.1))
+        roll_deg = rospy.get_param("~mount_roll_deg", env_float("MOUNT_ROLL_DEG", 0.0))
+        pitch_deg = rospy.get_param("~mount_pitch_deg", env_float("MOUNT_PITCH_DEG", 34.9))
         yaw_deg = rospy.get_param("~mount_yaw_deg", env_float("MOUNT_YAW_DEG", 0.5))
 
         self.r_base_sensor = rpy_to_rot(

@@ -156,6 +156,7 @@ class SharedArmExecutor:
         self.position_setpoint_received_at = 0.0
         self.preflight_position_setpoint_count = 0
         self.attitude_setpoint_count = 0
+        self.attitude_setpoint_received_at = 0.0
         self.original_altitude_acceptance_radius = None
         self.altitude_acceptance_radius_changed = False
         self.started_at = time.monotonic()
@@ -236,6 +237,7 @@ class SharedArmExecutor:
     def _attitude_setpoint_callback(self, _message):
         with self.condition:
             self.attitude_setpoint_count += 1
+            self.attitude_setpoint_received_at = time.monotonic()
             self.condition.notify_all()
 
     def request_abort(self):
@@ -789,6 +791,7 @@ class SharedArmExecutor:
         already_offboard = state is not None and state.mode == "OFFBOARD"
         with self.condition:
             attitude_baseline = self.attitude_setpoint_count
+            position_baseline = self.position_setpoint_count
 
         if not already_offboard:
             self._wait_for_fresh_hold_setpoints()
@@ -807,6 +810,11 @@ class SharedArmExecutor:
                         "PX4 state is not connected and armed before OFFBOARD"
                     )
                 if state.mode == "OFFBOARD":
+                    # Only setpoints published after PX4 confirms OFFBOARD can
+                    # prove that the controller kept its local-position hold
+                    # alive through the mode transition.
+                    with self.condition:
+                        position_baseline = self.position_setpoint_count
                     break
                 if state.mode not in AUTOMATIC_TAKEOFF_MODES:
                     raise ArmExecutorError(
@@ -828,15 +836,23 @@ class SharedArmExecutor:
                     )
                 )
 
-        attitude_deadline = time.monotonic() + self.args.preflight_timeout
+        control_deadline = time.monotonic() + self.args.preflight_timeout
         while True:
             self._check_abort()
             self._check_localization_health()
             now = time.monotonic()
             with self.condition:
+                enough_position_setpoints = (
+                    self.position_setpoint_count - position_baseline
+                    >= self.args.position_setpoint_samples
+                    and now - self.position_setpoint_received_at
+                    <= self.args.odom_timeout
+                )
                 enough_attitude_setpoints = (
                     self.attitude_setpoint_count - attitude_baseline
                     >= self.args.attitude_setpoint_samples
+                    and now - self.attitude_setpoint_received_at
+                    <= self.args.odom_timeout
                 )
                 state = self.state
                 state_received_at = self.state_received_at
@@ -848,17 +864,30 @@ class SharedArmExecutor:
                 or state.mode != "OFFBOARD"
             ):
                 raise ArmExecutorError(
-                    "PX4 left armed OFFBOARD before SE3 output was verified",
+                    "PX4 left armed OFFBOARD before its control stream was verified",
                     EXIT_MANUAL_TAKEOVER,
                 )
-            if enough_attitude_setpoints:
+            # A newly completed native takeoff must enter OFFBOARD using the
+            # PX4 local-position hold stream.  Raw SE3 attitude output is
+            # intentionally deferred until a planner trajectory exists.  If
+            # this process was invoked while already in OFFBOARD, accept either
+            # the position-hold stream or an already-running SE3 trajectory.
+            control_stream_ready = enough_position_setpoints or (
+                already_offboard and enough_attitude_setpoints
+            )
+            if control_stream_ready:
                 break
-            remaining = attitude_deadline - time.monotonic()
+            remaining = control_deadline - time.monotonic()
             if remaining <= 0.0:
+                expected = (
+                    "PX4 local-position hold"
+                    if not already_offboard
+                    else "PX4 local-position hold or SE3 attitude/thrust"
+                )
                 raise ArmExecutorError(
-                    "{} fresh SE3 attitude/thrust setpoints were not observed "
-                    "after OFFBOARD".format(
-                        self.args.attitude_setpoint_samples
+                    "sustained {} setpoints were not observed after "
+                    "OFFBOARD".format(
+                        expected
                     )
                 )
             with self.condition:
@@ -867,13 +896,13 @@ class SharedArmExecutor:
         now = time.monotonic()
         if takeoff_settled_at is None:
             self.rospy.loginfo(
-                "Vehicle was already armed in OFFBOARD; fresh SE3 output "
-                "verified in %.2f s.",
+                "Vehicle was already armed in OFFBOARD; a fresh position or "
+                "attitude control stream was verified in %.2f s.",
                 now - self.started_at,
             )
         else:
             self.rospy.loginfo(
-                "OFFBOARD hold and SE3 output verified %.2f s after native "
+                "OFFBOARD PX4 local-position hold verified %.2f s after native "
                 "takeoff settled (%.2f s total).",
                 now - takeoff_settled_at,
                 now - self.started_at,
@@ -991,7 +1020,8 @@ class SharedArmExecutor:
             self._restore_altitude_acceptance_radius()
             self._enter_and_verify_offboard(takeoff_settled_at)
             self.rospy.loginfo(
-                "Arm command complete: vehicle is hovering in armed OFFBOARD."
+                "Arm command complete: vehicle is hovering in armed OFFBOARD "
+                "using PX4 local-position hold."
             )
             return EXIT_SUCCESS
         except ArmExecutorError as exc:

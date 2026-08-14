@@ -1,0 +1,21 @@
+<launch>
+  <node pkg="se3_controller" type="se3_controller_node"
+        name="se3_controller_node" output="screen">
+    <param name="odometry_topic" value="/localization/odom" />
+    <param name="local_odometry_topic" value="/mavros/local_position/odom" />
+    <param name="command_publisher_node" value="/se3_handoff_behavior" />
+    <param name="auto_request_offboard" value="false" />
+    <param name="auto_request_arm" value="false" />
+    <param name="align_attitude_with_imu" value="true" />
+    <param name="trajectory_command_timeout" value="0.08" />
+    <param name="attitude_handoff_duration" value="0.5" />
+    <param name="max_attitude_alignment_error_deg" value="10.0" />
+    <param name="hover_percent" value="0.5" />
+    <param name="min_output_thrust" value="0.2" />
+    <param name="max_output_thrust" value="0.9" />
+  </node>
+
+  <test test-name="se3_handoff_behavior"
+        pkg="se3_controller" type="test_se3_handoff_ros.py"
+        time-limit="20" />
+</launch>

@@ -35,8 +35,8 @@ GCS_URL="${GCS_URL:-}"
 MOUNT_X="${MOUNT_X:-0.109}"
 MOUNT_Y="${MOUNT_Y:-0.024}"
 MOUNT_Z="${MOUNT_Z:-0.006}"
-MOUNT_ROLL_DEG="${MOUNT_ROLL_DEG:-0.7}"
-MOUNT_PITCH_DEG="${MOUNT_PITCH_DEG:-28.1}"
+MOUNT_ROLL_DEG="${MOUNT_ROLL_DEG:-0.0}"
+MOUNT_PITCH_DEG="${MOUNT_PITCH_DEG:-34.9}"
 MOUNT_YAW_DEG="${MOUNT_YAW_DEG:-0.5}"
 MAVROS_TGT_SYSTEM="${MAVROS_TGT_SYSTEM:-2}"
 REQUESTED_DRONE_ID="${DRONE_ID:-0}"
@@ -60,7 +60,7 @@ START_ROSBAG="${START_ROSBAG:-true}"
 ROSBAG_DIR="${ROSBAG_DIR:-/root/flight_bags}"
 ROSBAG_PREFIX="${ROSBAG_PREFIX:-se3_test}"
 ROSBAG_NODE_NAME="${ROSBAG_NODE_NAME:-/flight_recorder}"
-ROSBAG_TOPICS="${ROSBAG_TOPICS:-/tf /tf_static $ODOM_RAW_TOPIC $LOCALIZATION_ODOM_TOPIC $LOCALIZATION_CLOUD_TOPIC /cloud_registered_body /mavros/vision_pose/pose /livox/imu /mavros/local_position/odom /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/extended_state /mavros/battery /mavros/altitude /mavros/rc/in $MAVROS_ATTITUDE_TOPIC /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local $TRAJ_CONVERTER_OUTPUT_TOPIC /desire_odom_pub /goal /planning/goal /planning/command /planning/status /planning/capabilities /planning/viz/occupancy /planning/viz/inflated_occupancy /planning/viz/planning_bounds /ground_station/interactive_goal/goal /ground_station/interactive_goal/cancel /ground_station/interactive_goal/status /ground_station/interactive_goal/feedback /ground_station/interactive_goal/result /ground_station/flight_command/goal /ground_station/flight_command/cancel /ground_station/flight_command/status /ground_station/flight_command/feedback /ground_station/flight_command/result}"
+ROSBAG_TOPICS="${ROSBAG_TOPICS:-/tf /tf_static $ODOM_RAW_TOPIC $LOCALIZATION_ODOM_TOPIC $LOCALIZATION_CLOUD_TOPIC /cloud_registered_body /mavros/odometry/out /livox/imu /mavros/local_position/odom /mavros/local_position/pose /mavros/imu/data /mavros/state /mavros/extended_state /mavros/battery /mavros/altitude /mavros/rc/in $MAVROS_ATTITUDE_TOPIC /mavros/setpoint_raw/target_attitude /mavros/setpoint_position/local $TRAJ_CONVERTER_OUTPUT_TOPIC /desire_odom_pub /goal /planning/goal /planning/command /planning/status /planning/capabilities /planning/viz/occupancy /planning/viz/inflated_occupancy /planning/viz/planning_bounds /ground_station/interactive_goal/goal /ground_station/interactive_goal/cancel /ground_station/interactive_goal/status /ground_station/interactive_goal/feedback /ground_station/interactive_goal/result /ground_station/flight_command/goal /ground_station/flight_command/cancel /ground_station/flight_command/status /ground_station/flight_command/feedback /ground_station/flight_command/result}"
 ROSBAG_TOPICS_QUOTED=""
 ROSBAG_EXTRA_ARGS="${ROSBAG_EXTRA_ARGS:-}"
 ROSBAG_EXTRA_ARGS_QUOTED=""
@@ -91,7 +91,7 @@ ROS_MASTER_URI="${ROS_MASTER_URI:-http://127.0.0.1:11312}"
 ROS_IP="${ROS_IP:-192.168.1.123}"
 HOST_LOG_DIR="${HOST_LOG_DIR:-$HOME/${PROJECT_SLUG}_logs/$RUN_ID}"
 CONTAINER_ROS_LOG_DIR="${CONTAINER_ROS_LOG_DIR:-/root/flight_bags/ros_logs/$RUN_ID}"
-PROCESS_GREP_PATTERN="roscore|rosmaster|roslaunch livox_ros_driver2|livox_ros_driver2_node|roslaunch fast_lio mapping_mid360.launch|fastlio_mapping|roslaunch mavros px4.launch|mavros_node|roslaunch sim2real_common|roslaunch sim2real_planner_manager|roslaunch sim2real_deployment frame_aliases.launch|static_transform_publisher.*real_world_|planner_backend_runner.py|planner_manager.py|planner_gateway.py|planner_visualization.py|command_gateway.py|diff_backend_adapter.py|fast_backend_adapter|super_backend_adapter_node|sim2real_diff_adapter|sim2real_fast_adapter|sim2real_super_adapter|super_planner/fsm_node|fast_planner_node|traj_server|diff_planner_node|plan_manage|se3_controller_node|interactive_goal_server.py|flight_command_server.py|localization_guard.py|odom_to_base.py|odom_to_pose.py|cloud_relay.py|topic_tools/throttle.*ground_station/cloud_registered"
+PROCESS_GREP_PATTERN="roscore|rosmaster|roslaunch livox_ros_driver2|livox_ros_driver2_node|roslaunch fast_lio mapping_mid360.launch|fastlio_mapping|roslaunch mavros px4.launch|mavros_node|roslaunch sim2real_common|roslaunch sim2real_planner_manager|roslaunch sim2real_deployment frame_aliases.launch|static_transform_publisher.*real_world_|planner_backend_runner.py|planner_manager.py|planner_gateway.py|planner_visualization.py|command_gateway.py|diff_backend_adapter.py|fast_backend_adapter|super_backend_adapter_node|sim2real_diff_adapter|sim2real_fast_adapter|sim2real_super_adapter|super_planner/fsm_node|fast_planner_node|traj_server|diff_planner_node|plan_manage|se3_controller_node|interactive_goal_server.py|flight_command_server.py|localization_guard.py|odom_to_base.py|odom_to_mavros.py|odom_to_pose.py|cloud_relay.py|topic_tools/throttle.*ground_station/cloud_registered"
 # This exact host file is bind-mounted at /root/tmp/real.lifecycle.lock.  It is
 # intentionally not configurable: every CLI and both onboard Action servers
 # must contend for the same inode.
@@ -730,6 +730,7 @@ cleanup_container_processes() {
       "flight_command_server.py" \
       "localization_guard.py" \
       "odom_to_base.py" \
+      "odom_to_mavros.py" \
       "odom_to_pose.py" \
       "cloud_relay.py" \
       "topic_tools/throttle.*ground_station/cloud_registered"; do
@@ -766,6 +767,7 @@ cleanup_container_processes() {
       "flight_command_server.py" \
       "localization_guard.py" \
       "odom_to_base.py" \
+      "odom_to_mavros.py" \
       "odom_to_pose.py" \
       "cloud_relay.py" \
       "topic_tools/throttle.*ground_station/cloud_registered" \
@@ -809,6 +811,7 @@ cleanup_container_processes() {
       "flight_command_server.py" \
       "localization_guard.py" \
       "odom_to_base.py" \
+      "odom_to_mavros.py" \
       "odom_to_pose.py" \
       "cloud_relay.py" \
       "topic_tools/throttle.*ground_station/cloud_registered" \
@@ -1276,7 +1279,7 @@ start_stack() {
     "source ~/.bashrc && roslaunch sim2real_deployment frame_aliases.launch"
 
   wait_for_condition "static frame aliases" \
-    "rosnode list | grep -qx '/real_world_camera_init_tf' && rosnode list | grep -qx '/real_world_map_tf'"
+    "rosnode list | grep -qx '/real_world_camera_init_tf' && rosnode list | grep -qx '/real_world_odom_tf'"
 
   create_window "mid360" \
     "source /opt/ros/noetic/setup.bash && source ~/livox_ws/devel/setup.bash && roslaunch livox_ros_driver2 $LIVOX_LAUNCH"
@@ -1312,10 +1315,18 @@ start_stack() {
 
   wait_for_condition "MAVROS connection" "rostopic list | grep -q '^/mavros/state$' && timeout 3s rostopic echo -n 1 /mavros/state | grep -q 'connected: True'"
 
-  create_window "odom_to_pose" \
-    "source ~/.bashrc && rosrun sim2real_deployment odom_to_pose.py _odom_topic:=$LOCALIZATION_ODOM_TOPIC _pose_topic:=/mavros/vision_pose/pose _frame_id:=map _publish_rate:=30.0 _max_input_age:=0.2 _use_input_stamp:=true"
+  wait_for_condition "MAVROS external-odometry frame transforms" \
+    "timeout 5s rosrun tf tf_echo odom_ned world 2>&1 | grep -q 'Translation:' && timeout 5s rosrun tf tf_echo base_link_frd base_link 2>&1 | grep -q 'Translation:'"
 
-  wait_for_condition "vision pose bridge" "rostopic list | grep -q '^/mavros/vision_pose/pose$'"
+  # FAST-LIO starts in an arbitrary local heading.  MAVROS' odometry plugin
+  # emits MAVLink ODOMETRY with MAV_FRAME_LOCAL_FRD, allowing PX4 EKF2 to
+  # rotate that local frame into its earth frame.  VISION_POSITION_ESTIMATE
+  # would incorrectly label the same measurements as magnetic NED.
+  create_window "external_odom" \
+    "source ~/.bashrc && rosrun sim2real_deployment odom_to_mavros.py _input_topic:=$LOCALIZATION_ODOM_TOPIC _output_topic:=/mavros/odometry/out _expected_frame_id:=world _expected_child_frame_id:=base_link _max_input_age:=0.2"
+
+  wait_for_condition "MAVROS LOCAL_FRD external odometry bridge" \
+    "rosnode list | grep -qx '/external_odometry_bridge' && sample=\$(timeout 5s rostopic echo -n 1 /mavros/odometry/out 2>/dev/null) && grep -q 'frame_id: \"world\"' <<<\"\$sample\" && grep -q 'child_frame_id: \"base_link\"' <<<\"\$sample\" && rostopic info /mavros/odometry/out 2>/dev/null | grep -Eq '^[[:space:]]*\\*[[:space:]]+/mavros([[:space:](]|$)'"
 
   # This exact stack-lifetime guard also runs in simulation. A localization
   # outage or impossible odometry value is latched until a full stack restart;
@@ -1434,7 +1445,7 @@ stop_stack() {
   fi
 
   if tmux_has_session; then
-    for window_name in flight_command interactive_goal se3_controller planner localization_guard odom_to_pose mavros ground_viz_cloud cloud_adapter odom_to_base fast_lio mid360 frame_aliases roscore; do
+    for window_name in flight_command interactive_goal se3_controller planner localization_guard external_odom mavros ground_viz_cloud cloud_adapter odom_to_base fast_lio mid360 frame_aliases roscore; do
       if tmux_has_window "$window_name"; then
         tmux send-keys -t "$SESSION_NAME:$window_name" C-c
       fi
@@ -1517,6 +1528,11 @@ status_stack() {
     if [ "$START_FLIGHT_COMMAND" = "true" ] && ! docker_exec_shell \
       "rostopic list | grep -qx '/ground_station/flight_command/status'"; then
       echo "[ERROR] Takeoff/Land Action status is unavailable." >&2
+      healthy=false
+    fi
+    if ! docker_exec_shell \
+      "rosnode list | grep -qx '/external_odometry_bridge' && timeout 4s rostopic echo -n 1 /mavros/odometry/out/header >/dev/null 2>&1 && rostopic info /mavros/odometry/out 2>/dev/null | grep -Eq '^[[:space:]]*\\*[[:space:]]+/mavros([[:space:](]|$)'"; then
+      echo "[ERROR] MAVROS LOCAL_FRD external odometry bridge is unavailable." >&2
       healthy=false
     fi
   else

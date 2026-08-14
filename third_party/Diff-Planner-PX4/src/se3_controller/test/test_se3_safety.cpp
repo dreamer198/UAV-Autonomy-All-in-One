@@ -196,8 +196,11 @@ TEST_F(Se3SafetyTest, SameEstimatorCanBypassAsynchronousAttitudeAlignment)
   Desired_State_t desired;
   Controller_Output_t aligned_output;
   Controller_Output_t direct_output;
+  const Eigen::Quaterniond alignment =
+      (imu.q * odom.q.inverse()).normalized();
   ASSERT_TRUE(controller.calControl(
-      odom, imu, desired, aligned_output, 0.2, 0.2, 0.01, true));
+      odom, imu, desired, aligned_output, 0.2, 0.2, 0.01, true,
+      alignment));
   controller.resetIntegral();
   ASSERT_TRUE(controller.calControl(
       odom, imu, desired, direct_output, 0.2, 0.2, 0.01, false));
@@ -206,6 +209,64 @@ TEST_F(Se3SafetyTest, SameEstimatorCanBypassAsynchronousAttitudeAlignment)
       std::abs(aligned_output.q.z()), std::sin(half_yaw), 1e-9);
   EXPECT_NEAR(std::abs(direct_output.q.z()), 0.0, 1e-9);
   EXPECT_NEAR(std::abs(direct_output.q.w()), 1.0, 1e-9);
+}
+
+TEST_F(Se3SafetyTest, ExternalWorldYawIsAlignedIntoTheFcuAttitudeFrame)
+{
+  SE3_CONTROLLER controller;
+  controller.init(0.5, 0.8, 0.0, 0.9, true, false);
+  ASSERT_TRUE(controller.setup(
+      Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+      Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+      100.0, 100.0, 100.0, 1000.0, 1000.0, 1000.0));
+
+  ros::Time::setNow(ros::Time(60.0));
+  nav_msgs::OdometryPtr odom_msg = validOdom(60.0);
+  const double half_world_yaw = -M_PI / 4.0;
+  odom_msg->pose.pose.orientation.z = std::sin(half_world_yaw);
+  odom_msg->pose.pose.orientation.w = std::cos(half_world_yaw);
+  Odom_Data_t odom;
+  Imu_Data_t imu;
+  ASSERT_TRUE(odom.feed(odom_msg, true, false));
+  ASSERT_TRUE(imu.feed(validImu(60.0), true));
+
+  Desired_State_t desired(odom);
+  Controller_Output_t output;
+  const Eigen::Quaterniond alignment =
+      (imu.q * odom.q.inverse()).normalized();
+  ASSERT_TRUE(controller.calControl(
+      odom, imu, desired, output, 0.2, 0.2, 0.01, true,
+      alignment));
+
+  // FAST-LIO's -90 degree world yaw is a frame offset, not a command to turn
+  // the vehicle. Dynamic alignment maps the hold attitude back to the current
+  // identity FCU attitude.
+  EXPECT_NEAR(std::abs(output.q.x()), 0.0, 1e-9);
+  EXPECT_NEAR(std::abs(output.q.y()), 0.0, 1e-9);
+  EXPECT_NEAR(std::abs(output.q.z()), 0.0, 1e-9);
+  EXPECT_NEAR(std::abs(output.q.w()), 1.0, 1e-9);
+}
+
+TEST_F(Se3SafetyTest, AttitudeHandoffStartsExactlyAtMeasuredAttitude)
+{
+  const Eigen::Quaterniond start(
+      Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitX()));
+  const Eigen::Quaterniond target(
+      Eigen::AngleAxisd(-1.2, Eigen::Vector3d::UnitZ()));
+
+  const Eigen::Quaterniond first =
+      se3_safety::interpolateAttitude(start, target, 0.0);
+  const Eigen::Quaterniond last =
+      se3_safety::interpolateAttitude(start, target, 1.0);
+  EXPECT_NEAR(std::abs(first.dot(start)), 1.0, 1e-12);
+  EXPECT_NEAR(std::abs(last.dot(target)), 1.0, 1e-12);
+  EXPECT_NEAR(se3_safety::interpolateScalar(0.5, 0.8, 0.0), 0.5, 1e-12);
+  EXPECT_NEAR(se3_safety::interpolateScalar(0.5, 0.8, 1.0), 0.8, 1e-12);
+  EXPECT_NEAR(
+      se3_safety::quaternionAngularDistance(start, start), 0.0, 1e-12);
 }
 
 int main(int argc, char **argv)

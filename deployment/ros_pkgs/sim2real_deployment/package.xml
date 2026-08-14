@@ -2,7 +2,7 @@
 <package format="2">
   <name>sim2real_deployment</name>
   <version>0.1.0</version>
-  <description>Real-flight FAST-LIO localization adapters and PX4 vision pose bridge.</description>
+  <description>Real-flight FAST-LIO localization adapters and PX4 external odometry bridge.</description>
   <maintainer email="dreamer198@users.noreply.github.com">dreamer198</maintainer>
   <license>BSD-3-Clause</license>
 

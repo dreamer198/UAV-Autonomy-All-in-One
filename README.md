@@ -89,7 +89,8 @@ SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
 `swarm-uav-mapping` 的三维地面站使用 `embedded_rviz.sh`和受保护的
 `/ground_station/interactive_goal`、`/ground_station/flight_command` Action。
 RViz 工具栏在 `2D Nav Goal` 后提供 `Takeoff`、`Land`：独立起飞完成后进入
-OFFBOARD 原地悬停，独立降落只请求并确认 PX4 `AUTO.LAND`。
+OFFBOARD 原地悬停，在收到首个目标前由 PX4 本地位置环保持位置和航向；
+收到轨迹后再平滑切入 SE3 姿态控制。独立降落只请求并确认 PX4 `AUTO.LAND`。
 
 ## 目录
 

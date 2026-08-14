@@ -46,6 +46,10 @@ class GoalExecutorTest(unittest.TestCase):
         EXECUTOR._validate_args(parser, args)
         self.assertFalse(args.allow_disarmed)
         self.assertEqual(args.attitude_setpoint_samples, 10)
+        self.assertEqual(args.position_setpoint_samples, 10)
+        self.assertEqual(
+            args.position_setpoint_topic, "/mavros/setpoint_position/local"
+        )
         self.assertEqual(args.goal_subscribers, 1)
         self.assertEqual(args.state_timeout, 3.0)
         self.assertEqual(args.planner_status_topic, "/planning/status")
@@ -70,6 +74,29 @@ class GoalExecutorTest(unittest.TestCase):
             executor._readiness_reason(time.monotonic()),
             "waiting for fresh MAVROS state",
         )
+
+    def test_position_hold_authorizes_goal_before_se3_attitude_handoff(self):
+        executor = EXECUTOR.SharedGoalExecutor.__new__(
+            EXECUTOR.SharedGoalExecutor
+        )
+        executor.args = SimpleNamespace(
+            position_setpoint_samples=10,
+            attitude_setpoint_samples=10,
+            stream_gap_timeout=0.5,
+        )
+        now = time.monotonic()
+        executor.position_setpoint_count = 10
+        executor.position_setpoint_received_at = now
+        executor.attitude_setpoint_count = 0
+        executor.attitude_setpoint_received_at = 0.0
+        self.assertTrue(executor._control_stream_ready(now))
+
+        executor.position_setpoint_received_at = now - 1.0
+        self.assertFalse(executor._control_stream_ready(now))
+
+        executor.attitude_setpoint_count = 10
+        executor.attitude_setpoint_received_at = now
+        self.assertTrue(executor._control_stream_ready(now))
 
 
 if __name__ == "__main__":

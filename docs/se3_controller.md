@@ -6,15 +6,15 @@
 selected planner → planner_gateway → /command/trajectory
                                       │
                                       ▼
-                                    SE3
-                                      │
-                                      ▼
-                       /mavros/setpoint_raw/attitude → PX4
+ /localization/odom (world) → SE3
+                              ├─ waiting for a trajectory → PX4 local-position hold
+                              └─ fresh trajectory accepted → SE3 attitude/thrust → PX4
 ```
 
 | 输入 | 作用 |
 |---|---|
-| `/mavros/local_position/odom` | 当前位姿、速度和角速度 |
+| `/localization/odom` | SE3 位置闭环反馈；`world -> base_link`，与规划器同坐标系 |
+| `/mavros/local_position/odom` | PX4 本地位置保持；`map -> base_link`，不用作规划坐标 |
 | `/mavros/imu/data` | 当前姿态和线加速度 |
 | `/mavros/state` | 连接、解锁和飞行模式 |
 | `/command/trajectory` | 期望位置、速度、加速度和 yaw |
@@ -22,15 +22,16 @@ selected planner → planner_gateway → /command/trajectory
 | 输出话题 | 作用 |
 |---|---|
 | `/mavros/setpoint_raw/attitude` | 姿态四元数和归一化推力 |
-| `/mavros/setpoint_position/local` | OFFBOARD 交接前的位置 setpoint |
+| `/mavros/setpoint_position/local` | 起飞后等待首个轨迹时的 PX4 本地位置保持；轨迹超时时也回退到此保持 |
 | `/desire_odom_pub` | 控制器实际采用的期望状态 |
 
 控制器还提供 `/land`（`std_srvs/SetBool`）服务。只有 `data=true` 才会进入降落
 流程并循环请求 PX4 `AUTO.LAND`；该服务不会强制解除武装。
 
-控制定时器的标称周期为 10 ms。控制器使用 ENU，并固定将 MAVROS odom 的
-`twist.linear` 视为机体系速度，再用当前姿态旋转到世界系参与反馈。代码不会读取
-`child_frame_id` 自动判断速度坐标系，因此输入必须遵守这一约定。
+控制定时器的标称周期为 10 ms。控制器使用 ENU，并固定将
+`/localization/odom.twist.linear` 视为机体系速度，再用当前姿态旋转到
+`world` 参与反馈。代码不会根据 `child_frame_id` 自动判断速度坐标系，
+因此输入必须遵守这一约定。
 
 ## 模式和命令门禁
 
@@ -38,7 +39,11 @@ selected planner → planner_gateway → /command/trajectory
 因此 SE3 不主动解锁或进入 OFFBOARD。`sim.sh arm`、`real.sh arm` 和 Mission
 执行器负责 PX4 原生起飞与模式交接。
 
-进入 OFFBOARD 后，控制器先保持当前位置，直到收到合法轨迹。轨迹必须：
+从 `AUTO.TAKEOFF` 进入 OFFBOARD 后，控制器仍持续发布 PX4 本地位置设定值，
+保持切换瞬间的 `map` 位置和航向。此时不发布原始姿态/推力。收到第一条
+合法 `world` 轨迹时，控制器锁存当前 IMU 与 FAST-LIO `world` 之间的姿态
+对齐，并在 `attitude_handoff_duration` 时间内从当前实测姿态/悬停推力平滑切入
+SE3 姿态控制。轨迹必须：
 
 - 来自 `/planner_gateway`；
 - 在 armed/OFFBOARD 下接收；
@@ -46,14 +51,21 @@ selected planner → planner_gateway → /command/trajectory
 - 包含有限的位置、速度、可选加速度和有效姿态四元数；
 - 在里程计、IMU、MAVROS 状态有效时接收。
 
-`trajectory_command_timeout` 默认为 `0.08 s`。命令流中断后，控制器把移动 setpoint
-替换为当前位置零速度保持；后续合法命令可以恢复跟踪。离开 OFFBOARD、解除武装或
-MAVROS state、里程计、IMU 失效都会清除旧轨迹状态。
+`trajectory_command_timeout` 默认为 `0.08 s`。命令流中断后，控制器停止原始
+姿态/推力，锁定当前 PX4 `map` 位姿并回到本地位置保持；后续合法命令可以
+重新平滑接管。离开 OFFBOARD、解除武装或 MAVROS state、任一里程计、IMU 失效
+都会清除旧轨迹状态。
+
+`world` 是 FAST-LIO 每次启动形成的任意局部坐标系，`map` 是 PX4/MAVROS 本地
+坐标系；两者的 yaw 可以相差任意角度，不能发布 `world -> map` 静态单位变换。
+它们之间的实时对齐只用于把 SE3 期望姿态映射到飞控姿态坐标，且在每次
+原始姿态接管时锁存一次，不会在高频控制循环中随异步样本抖动。
 
 输入失效时：
 
 - MAVROS 状态失效：停止姿态/推力输出，由 PX4 OFFBOARD-loss failsafe 处理；
-- 里程计或 IMU 失效且状态仍可信：停止输出并请求 `AUTO.LOITER`；
+- `world` 里程计、PX4 本地里程计或 IMU 失效且状态仍可信：
+  停止姿态输出并请求 `AUTO.LOITER`；
 - 公共定位保护确认定位故障：锁存故障并请求 `AUTO.LAND`。
 
 ## 控制链路
@@ -179,8 +191,9 @@ Planner 地图边界决定能否规划，SE3 围栏监控实际位置，两者�
 
 | 数据 | 用途 |
 |---|---|
-| `/desire_odom_pub` 与 `/mavros/local_position/odom` | 期望与实际误差 |
-| `/localization/odom` 与 MAVROS odom | 定位适配与 PX4 EKF 一致性 |
+| `/desire_odom_pub` 与 `/localization/odom` | 同一 `world` 坐标系中的期望与实际误差 |
+| `/localization/odom` 与 `/mavros/local_position/odom` | 定位适配与 PX4 EKF 一致性；不能直接相减两坐标系的 x/y |
+| `/mavros/setpoint_position/local` | Takeoff 后等待目标及轨迹超时时的 PX4 本地位置保持 |
 | `/mavros/setpoint_raw/attitude` | 姿态、推力和饱和 |
 | `/command/trajectory` | gateway 发出的 SE3 输入；是否被控制器接受还需结合状态与日志判断 |
 | `/mavros/state` | OFFBOARD、解锁和人工接管时刻 |
@@ -191,10 +204,13 @@ Planner 地图边界决定能否规划，SE3 围栏监控实际位置，两者�
 ## 排错顺序
 
 1. `/mavros/state` 是否连接、armed 且为 OFFBOARD；
-2. MAVROS state、odom 和 IMU 是否持续更新且时间戳有效；
-3. `/command/trajectory` 是否持续更新；
-4. `/desire_odom_pub` 是否符合当前目标；
-5. `/mavros/setpoint_raw/attitude` 是否持续发布且推力未饱和；
-6. PX4 是否已进入 `AUTO.LOITER`、`AUTO.LAND`，或触发 OFFBOARD/EKF failsafe。
+2. MAVROS state、两个 odom 和 IMU 是否持续更新且时间戳有效；
+3. 独立 Takeoff 完成但尚未发目标时，应只有持续的
+   `/mavros/setpoint_position/local`，不应出现 `/mavros/setpoint_raw/attitude`；
+4. 发送目标后，`/command/trajectory` 是否持续更新，以及姿态输出是否在
+   `attitude_handoff_duration` 内从当前姿态平滑接管；
+5. `/desire_odom_pub` 是否与 `/localization/odom` 同为 `world`并符合当前目标；
+6. `/mavros/setpoint_raw/attitude` 的推力是否未饱和；
+7. PX4 是否已进入 `AUTO.LOITER`、`AUTO.LAND`，或触发 OFFBOARD/EKF failsafe。
 
 真机调参必须在有净空的场地进行，飞手全程准备遥控接管，并保持 rosbag 录制。

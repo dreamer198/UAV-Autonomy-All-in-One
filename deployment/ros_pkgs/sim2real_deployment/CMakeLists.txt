@@ -21,10 +21,12 @@ catkin_install_python(PROGRAMS
   scripts/cloud_relay.py
   scripts/livox_custom_to_pointcloud2.py
   scripts/odom_to_base.py
+  scripts/odom_to_mavros.py
   scripts/odom_to_pose.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test/test_odom_to_mavros.py)
   catkin_add_nosetests(test/test_odom_to_pose.py)
 endif()

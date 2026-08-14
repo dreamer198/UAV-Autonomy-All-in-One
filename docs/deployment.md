@@ -24,11 +24,12 @@
 
 ```text
 MID-360 → Livox 驱动 → FAST-LIO
-                        ├─> /localization/odom ─────────────┬─> 所选规划器
-                        │                                  └─> MAVROS 视觉位姿 → PX4
+                        ├─> /localization/odom ─────────────┬─> 所选规划器 / SE3
+                        │                                  └─> MAVROS ODOMETRY → PX4 EKF2
                         └─> /localization/cloud_registered ───> 所选规划器
 
 所选规划器 → 规划器网关 → SE3 → MAVROS 姿态设定值 → PX4
+无规划轨迹时                         └─> MAVROS 本地位置保持 → PX4
 ```
 
 ## 部署前准备
@@ -101,8 +102,8 @@ Jetson 宿主机需要：
 export MOUNT_X=0.109
 export MOUNT_Y=0.024
 export MOUNT_Z=0.006
-export MOUNT_ROLL_DEG=0.7
-export MOUNT_PITCH_DEG=28.1
+export MOUNT_ROLL_DEG=0.0
+export MOUNT_PITCH_DEG=34.9
 export MOUNT_YAW_DEG=0.5
 ```
 
@@ -232,10 +233,12 @@ rostopic hz /livox/lidar
 rostopic hz /livox/imu
 rostopic hz /localization/odom
 rostopic hz /localization/cloud_registered
-rostopic hz /mavros/vision_pose/pose
+rostopic hz /mavros/odometry/out
+rostopic info /mavros/odometry/out
 rostopic echo -n1 /planning/status
 rostopic echo -n1 /mavros/state
 rosrun tf tf_echo world base_link
+rosrun tf tf_echo odom_ned world
 ```
 
 起飞前必须确认：
@@ -243,10 +246,36 @@ rosrun tf tf_echo world base_link
 1. Livox 点云和 IMU 连续；
 2. `/localization/odom` 时间戳持续前进，位置、速度、尺度和方向正确；
 3. 注册点云位于 `world`，并与同一时刻的里程计和障碍对齐；
-4. PX4 已连接并正确采用 external vision；
-5. `/planning/status` 为 READY，`odom_ready`、`map_ready` 为 true；
-6. 目标、Mission、规划器地图边界和控制器围栏符合现场；
-7. 外参、悬停推力、failsafe 和遥控接管已经在当前机体上验证。
+4. `/mavros/odometry/out` 的发布者为 `/external_odometry_bridge`、订阅者包含
+   `/mavros`，且 `odom_ned <- world`、`base_link_frd <- base_link` 两个 TF 连通；
+5. PX4 已连接并正确采用 external vision；
+6. `/planning/status` 为 READY，`odom_ready`、`map_ready` 为 true；
+7. 目标、Mission、规划器地图边界和控制器围栏符合现场；
+8. 外参、悬停推力、failsafe 和遥控接管已经在当前机体上验证。
+
+真机定位必须通过 MAVROS odometry 插件进入 PX4。该插件发送
+`MAVLink ODOMETRY`，父坐标系为 `MAV_FRAME_LOCAL_FRD`，因此 FAST-LIO 每次
+启动时形成的任意局部航向会由 EKF2 旋转到飞控地球坐标系。不要把
+`/localization/odom` 改接到 `/mavros/vision_pose/pose`：PX4 1.16 会把
+`VISION_POSITION_ESTIMATE` 无条件标记为 NED；若 FAST-LIO 的局部 x 轴没有
+恰好对准北向，会使位置反馈方向与飞控航向不一致并破坏定点闭环。
+
+QGC 的 MAVLink Inspector 中，由飞控组件 1 发出的 `ODOMETRY` 仍会显示
+`frame_id=1`（`MAV_FRAME_LOCAL_NED`）以及 z 向下。这是 PX4 对外发布自身
+NED 状态的正常形式，不能用它判断传入 PX4 的 MID360 坐标系。验证输入链路
+应查看 `/mavros/odometry/out`、上述 TF 和 PX4 EKF 状态。
+
+当前 PX4 1.16 真机配置保持 `EKF2_EV_CTRL=3`，即只启用 Horizontal position
+和 Vertical position：
+
+- 不启用 `3D velocity`。当前 FAST-LIO `/Odometry` 不提供可直接融合的三维
+  线速度，误启用会把无效或近零速度当成观测值；
+- 不启用 `Yaw`。在 `MAV_FRAME_LOCAL_FRD` 下，EKF2 即使不融合 external-vision
+  yaw，也会使用外部姿态与飞控姿态的差值对齐两个位置坐标系，同时保留飞控
+  当前航向源；
+- 若以后要改用激光里程计航向作为主航向源，必须独立验证航向稳定性、方差、
+  静止和电机运行工况，再评估 `EKF2_EV_CTRL=11`，不能在首次定位修复中同时
+  改动。
 
 ## 地面站实时 RViz
 
@@ -282,7 +311,9 @@ rosrun tf tf_echo world base_link
 `Takeoff` 通过 `/ground_station/flight_command` 发送独立起飞命令。它仅在收到
 新鲜 MAVROS 状态、飞行器未解锁且明确为 `ON_GROUND` 时启用；确认后执行解锁、
 PX4 `AUTO.TAKEOFF`，到达 0.5–2.5 m 范围内设置的高度后进入经过验证的
-OFFBOARD 悬停，不会发布规划目标。完成后可再使用 `2D Nav Goal`。
+OFFBOARD 悬停，不会发布规划目标。此阶段由 PX4 本地位置环保持切换瞬间的
+位置和航向，SE3 不发原始姿态/推力。使用 `2D Nav Goal` 产生首条有效轨迹后，
+再通过锁存的 FAST-LIO-world 到飞控姿态对齐，在 1.5 s 内平滑切入 SE3 控制。
 
 `Land` 也通过 `/ground_station/flight_command`，仅在无人机已解锁、明确处于
 空中且由本系统自主模式控制时启用。机载端反复请求并以新鲜
@@ -301,7 +332,8 @@ REAL_TAKEOFF_HEIGHT=1.5 ./launch/real.sh arm
 ```
 
 默认起飞高度为 `1.0 m`。该命令检查 MAVROS、定位、SE3 和控制指令预热，随后解锁、
-执行 PX4 `AUTO.TAKEOFF`，到达相对 Home 的目标高度后进入经过验证的 OFFBOARD 悬停。
+执行 PX4 `AUTO.TAKEOFF`，到达相对 Home 的目标高度后进入经过验证的 OFFBOARD
+本地位置悬停。在收到首条规划轨迹前不启用 SE3 原始姿态控制。
 进入 OFFBOARD 悬停后，系统开始接受规划目标。
 
 ### 单目标

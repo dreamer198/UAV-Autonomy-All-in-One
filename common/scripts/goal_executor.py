@@ -88,6 +88,8 @@ class SharedGoalExecutor:
         self.planner_status_received_at = 0.0
         self.attitude_setpoint_count = 0
         self.attitude_setpoint_received_at = 0.0
+        self.position_setpoint_count = 0
+        self.position_setpoint_received_at = 0.0
         self.started_at = time.monotonic()
 
         rospy.Subscriber(
@@ -108,6 +110,13 @@ class SharedGoalExecutor:
             tcp_nodelay=True,
         )
         if not args.allow_disarmed:
+            rospy.Subscriber(
+                args.position_setpoint_topic,
+                PoseStamped,
+                self._position_setpoint_callback,
+                queue_size=max(20, args.position_setpoint_samples),
+                tcp_nodelay=True,
+            )
             rospy.Subscriber(
                 args.attitude_setpoint_topic,
                 AttitudeTarget,
@@ -151,6 +160,34 @@ class SharedGoalExecutor:
             self.attitude_setpoint_count += 1
             self.attitude_setpoint_received_at = now
             self.condition.notify_all()
+
+    def _position_setpoint_callback(self, _message):
+        now = time.monotonic()
+        with self.condition:
+            if (
+                self.position_setpoint_received_at > 0.0
+                and now - self.position_setpoint_received_at
+                > self.args.stream_gap_timeout
+            ):
+                self.position_setpoint_count = 0
+            self.position_setpoint_count += 1
+            self.position_setpoint_received_at = now
+            self.condition.notify_all()
+
+    def _control_stream_ready(self, now):
+        position_ready = (
+            self.position_setpoint_count >= self.args.position_setpoint_samples
+            and self.position_setpoint_received_at > 0.0
+            and now - self.position_setpoint_received_at
+            <= self.args.stream_gap_timeout
+        )
+        attitude_ready = (
+            self.attitude_setpoint_count >= self.args.attitude_setpoint_samples
+            and self.attitude_setpoint_received_at > 0.0
+            and now - self.attitude_setpoint_received_at
+            <= self.args.stream_gap_timeout
+        )
+        return position_ready or attitude_ready
 
     def request_abort(self):
         with self.condition:
@@ -261,13 +298,11 @@ class SharedGoalExecutor:
         if not self.planner_status.map_ready:
             return "waiting for selected planner map readiness"
         if not self.args.allow_disarmed:
-            if (
-                self.attitude_setpoint_count
-                < self.args.attitude_setpoint_samples
-                or now - self.attitude_setpoint_received_at
-                > self.args.stream_gap_timeout
-            ):
-                return "waiting for sustained SE3 attitude/thrust output"
+            if not self._control_stream_ready(now):
+                return (
+                    "waiting for sustained PX4 local-position hold or SE3 "
+                    "attitude/thrust output"
+                )
         if self.goal_pub.get_num_connections() < self.args.goal_subscribers:
             return "waiting for Planner goal subscribers"
         return ""
@@ -371,12 +406,17 @@ def _build_parser():
         "--attitude-setpoint-topic",
         default="/mavros/setpoint_raw/attitude",
     )
+    parser.add_argument(
+        "--position-setpoint-topic",
+        default="/mavros/setpoint_position/local",
+    )
     parser.add_argument("--controller-node", default="/se3_controller_node")
     parser.add_argument("--preflight-timeout", type=float, default=5.0)
     parser.add_argument("--state-timeout", type=float, default=3.0)
     parser.add_argument("--odom-timeout", type=float, default=0.5)
     parser.add_argument("--stream-gap-timeout", type=float, default=0.5)
     parser.add_argument("--attitude-setpoint-samples", type=int, default=10)
+    parser.add_argument("--position-setpoint-samples", type=int, default=10)
     parser.add_argument("--goal-subscribers", type=int, default=1)
     parser.add_argument("--planner-status-timeout", type=float, default=0.5)
     parser.add_argument("--delivery-wait", type=float, default=0.05)
@@ -411,6 +451,8 @@ def _validate_args(parser, args):
         parser.error("--drone-id must be non-negative")
     if args.attitude_setpoint_samples <= 0:
         parser.error("--attitude-setpoint-samples must be positive")
+    if args.position_setpoint_samples <= 0:
+        parser.error("--position-setpoint-samples must be positive")
     if args.goal_subscribers <= 0:
         parser.error("--goal-subscribers must be positive")
     if not args.frame_id:

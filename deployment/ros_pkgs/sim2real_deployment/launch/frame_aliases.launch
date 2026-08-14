@@ -4,8 +4,20 @@
         name="real_world_camera_init_tf"
         args="0 0 0 0 0 0 1 world camera_init" />
 
-  <!-- MAVROS vision input uses map while the shared localization contract uses world. -->
+  <!--
+    The MAVROS odometry plugin transforms this local ROS frame to odom_ned,
+    then sends MAVLink ODOMETRY as MAV_FRAME_LOCAL_FRD.  Keeping the explicit
+    identity alias lets MAVROS rotate the arbitrary FAST-LIO heading into the
+    PX4 EKF earth frame instead of treating it as magnetic NED.
+  -->
   <node pkg="tf2_ros" type="static_transform_publisher"
-        name="real_world_map_tf"
-        args="0 0 0 0 0 0 1 world map" />
+        name="real_world_odom_tf"
+        args="0 0 0 0 0 0 1 world odom" />
+
+  <!--
+    Do not publish world == map.  FAST-LIO world has an arbitrary startup
+    heading, while MAVROS map is PX4's earth-aligned local frame.  They differ
+    by a runtime rotation (about 93 degrees on the current vehicle) and must
+    never be represented by a static identity transform.
+  -->
 </launch>

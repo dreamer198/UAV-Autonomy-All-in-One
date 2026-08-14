@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <queue>
 #include <Eigen/Dense>
 #include <sensor_msgs/Imu.h>
@@ -52,6 +53,69 @@ inline bool isFreshAt(const ros::Time &receive_stamp,
 		}
 	}
 	return true;
+}
+
+inline double smoothStep(const double progress)
+{
+	if (!std::isfinite(progress) || progress <= 0.0)
+	{
+		return 0.0;
+	}
+	if (progress >= 1.0)
+	{
+		return 1.0;
+	}
+	return progress * progress * (3.0 - 2.0 * progress);
+}
+
+inline Eigen::Quaterniond interpolateAttitude(
+	const Eigen::Quaterniond &start,
+	const Eigen::Quaterniond &target,
+	const double progress)
+{
+	if (!isQuaternionValid(start) || !isQuaternionValid(target))
+	{
+		return Eigen::Quaterniond::Identity();
+	}
+
+	Eigen::Quaterniond normalized_start = start.normalized();
+	Eigen::Quaterniond normalized_target = target.normalized();
+	// q and -q describe the same rotation. Select the nearer representation so
+	// the OFFBOARD handoff can never take the long way around.
+	if (normalized_start.dot(normalized_target) < 0.0)
+	{
+		normalized_target.coeffs() *= -1.0;
+	}
+	Eigen::Quaterniond result = normalized_start.slerp(
+		smoothStep(progress), normalized_target);
+	result.normalize();
+	return result;
+}
+
+inline double quaternionAngularDistance(
+	const Eigen::Quaterniond &first,
+	const Eigen::Quaterniond &second)
+{
+	if (!isQuaternionValid(first) || !isQuaternionValid(second))
+	{
+		return std::numeric_limits<double>::infinity();
+	}
+	const double dot = std::abs(first.normalized().dot(second.normalized()));
+	const double clamped_dot = std::max(0.0, std::min(1.0, dot));
+	return 2.0 * std::acos(clamped_dot);
+}
+
+inline double interpolateScalar(
+	const double start,
+	const double target,
+	const double progress)
+{
+	if (!std::isfinite(start) || !std::isfinite(target))
+	{
+		return std::numeric_limits<double>::quiet_NaN();
+	}
+	const double blend = smoothStep(progress);
+	return start + (target - start) * blend;
 }
 } // namespace se3_safety
 
@@ -472,7 +536,9 @@ public:
 					double odom_timeout_sec = 0.2,
 					double imu_timeout_sec = 0.2,
 					double control_dt_sec = kCtrlDt_,
-					bool align_attitude_with_imu = true){
+					bool apply_attitude_alignment = true,
+					const Eigen::Quaterniond &attitude_alignment =
+						Eigen::Quaterniond::Identity()){
 		if(!odom_data.isFresh(odom_timeout_sec) ||
 		   !imu_data.isFresh(imu_timeout_sec) ||
 		   !desired_state.isValid() ||
@@ -541,15 +607,20 @@ public:
 			resetIntegral();
 			return false;
 		}
-		// External odometry can use an attitude reference that differs from the
-		// FCU IMU, in which case the legacy dynamic alignment is useful.  When
-		// odometry and IMU come from the same MAVROS estimator, however, their
-		// different publication rates make "latest IMU * latest odom^-1"
-		// oscillate even though the desired attitude is continuous.  Let the
-		// vehicle/plugin configuration select the appropriate contract.
-		output.q = align_attitude_with_imu
-			? imu_data.q * odom_data.q.inverse() * desired_odom.q
-			: desired_odom.q;
+			// The node latches the transform from the external odometry world to
+			// the FCU attitude frame while the vehicle is in PX4 position hold.
+			// Never recompute it from asynchronous latest samples in this control
+			// loop: doing so injects odom/IMU timing jitter directly into the
+			// commanded attitude.
+			if (apply_attitude_alignment &&
+				!se3_safety::isQuaternionValid(attitude_alignment))
+			{
+				resetIntegral();
+				return false;
+			}
+			output.q = apply_attitude_alignment
+				? attitude_alignment.normalized() * desired_odom.q
+				: desired_odom.q;
 		if (!se3_safety::isQuaternionValid(output.q))
 		{
 			resetIntegral();

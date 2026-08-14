@@ -20,7 +20,15 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     arming_client_ = nh_.serviceClient<mavros_msgs::CommandBool>("/mavros/cmd/arming");
     land_service_ = nh_.advertiseService("/land", &se3Ctrl::landCallback, this);
 
-    odom_sub_ = nh_.subscribe<nav_msgs::Odometry>("/mavros/local_position/odom", 10, &se3Ctrl::OdomCallback, this);
+    nh_.param<std::string>(
+        "odometry_topic", odometry_topic_, "/localization/odom");
+    nh_.param<std::string>(
+        "local_odometry_topic", local_odometry_topic_,
+        "/mavros/local_position/odom");
+    odom_sub_ = nh_.subscribe<nav_msgs::Odometry>(
+        odometry_topic_, 10, &se3Ctrl::OdomCallback, this);
+    local_odom_sub_ = nh_.subscribe<nav_msgs::Odometry>(
+        local_odometry_topic_, 10, &se3Ctrl::LocalOdomCallback, this);
     imu_sub_ = nh_.subscribe<sensor_msgs::Imu>("/mavros/imu/data", 10, &se3Ctrl::IMUCallback, this);
     state_sub_ = nh_.subscribe<mavros_msgs::State>("/mavros/state", 10, &se3Ctrl::StateCallback, this);
     multiDOFJoint_sub_ = nh_.subscribe("/command/trajectory", 10, &se3Ctrl::multiDOFJointCallback, this);
@@ -42,6 +50,11 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     nh_.param<double>("state_timeout", state_timeout_, 2.0);
     nh_.param<double>(
         "trajectory_command_timeout", trajectory_command_timeout_, 0.08);
+    nh_.param<double>(
+        "attitude_handoff_duration", attitude_handoff_duration_, 1.5);
+    nh_.param<double>(
+        "max_attitude_alignment_error_deg",
+        max_attitude_alignment_error_deg_, 10.0);
     nh_.param<std::string>(
         "command_publisher_node", command_publisher_node_,
         "/planner_gateway");
@@ -77,6 +90,23 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
             "using 0.08 s.",
             trajectory_command_timeout_);
         trajectory_command_timeout_ = 0.08;
+    }
+    if (!std::isfinite(attitude_handoff_duration_) ||
+        attitude_handoff_duration_ < 0.5) {
+        ROS_WARN(
+            "[se3_controller] Invalid attitude_handoff_duration=%.3f; "
+            "using 1.5 s.",
+            attitude_handoff_duration_);
+        attitude_handoff_duration_ = 1.5;
+    }
+    if (!std::isfinite(max_attitude_alignment_error_deg_) ||
+        max_attitude_alignment_error_deg_ < 1.0 ||
+        max_attitude_alignment_error_deg_ > 45.0) {
+        ROS_WARN(
+            "[se3_controller] Invalid max_attitude_alignment_error_deg=%.3f; "
+            "using 10.0 deg.",
+            max_attitude_alignment_error_deg_);
+        max_attitude_alignment_error_deg_ = 10.0;
     }
     if (command_publisher_node_.empty() ||
         command_publisher_node_.front() != '/') {
@@ -144,6 +174,7 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
         ROS_WARN("[se3_controller] Invalid int_limit_z; using 0.0.");
         int_limit_z_ = 0.0;
     }
+    attitude_handoff_start_thrust_ = hover_percent_;
 
     enu_frame_ = true;
     vel_in_body_ = true;
@@ -179,13 +210,18 @@ se3Ctrl::se3Ctrl(const ros::NodeHandle &nh):nh_(nh)
     ROS_INFO(
         "[se3_controller] attitude reference: %s",
         align_attitude_with_imu_
-            ? "dynamic IMU-to-odometry alignment"
-            : "direct desired attitude (shared MAVROS estimator)");
+            ? "latched IMU-to-external-world alignment"
+            : "direct desired attitude (already in the FCU frame)");
     ROS_INFO(
         "[se3_controller] input timeouts: state=%.3f odom=%.3f imu=%.3f "
         "trajectory=%.3f s",
         state_timeout_, odom_timeout_, imu_timeout_,
         trajectory_command_timeout_);
+    ROS_INFO(
+        "[se3_controller] frames: control odometry=%s, PX4 local hold=%s, "
+        "attitude handoff=%.2f s, alignment limit=%.1f deg",
+        odometry_topic_.c_str(), local_odometry_topic_.c_str(),
+        attitude_handoff_duration_, max_attitude_alignment_error_deg_);
 
     se3_controller_.init(hover_percent_, max_hover_percent_, min_output_thrust_, max_output_thrust_, enu_frame_, vel_in_body_);
     if (!se3_controller_.setup(kp_p_, kp_v_, kp_a_, kp_q_, kp_w_,
@@ -232,20 +268,28 @@ void se3Ctrl::execFSMCallback(const ros::TimerEvent &e){
             node_state_ = LANDED;
             break;
         }
-        if (!hasFreshOdom() || !hasFreshImu()) {
+        if (!hasFreshOdom() || !hasFreshLocalOdom() || !hasFreshImu()) {
             ROS_ERROR_THROTTLE(
                 1.0,
-                "[se3_controller] No fresh valid odometry/IMU; not publishing an OFFBOARD warmup setpoint or requesting OFFBOARD/arm.");
+                "[se3_controller] No fresh valid world odometry, PX4 local odometry, or IMU; not publishing an OFFBOARD warmup setpoint or requesting OFFBOARD/arm.");
             break;
         }
-        pubLocalPose(odom_data_.p);
+        local_hold_position_ = local_odom_data_.p;
+        local_hold_orientation_ = local_odom_data_.q.normalized();
+        has_local_hold_position_ = true;
+        pubLocalPose(local_hold_position_, local_hold_orientation_);
         setDesiredStateToCurrentOdom();
         trigger_offboard();
         trigger_arm();
         if(currState_.mode == "OFFBOARD" && currState_.armed){
             has_trajectory_after_offboard_ = false;
+            captureLocalHoldPosition();
+            resetAttitudeHandoff();
             setDesiredStateToCurrentOdom();
-            ROS_INFO("OFFBOARD entered. Holding current pose until a fresh trajectory is received.");
+            ROS_INFO(
+                "OFFBOARD entered in PX4 local-position hold. Raw SE3 "
+                "attitude control remains disabled until a fresh planner "
+                "trajectory is received.");
             node_state_ = MISSION_EXECUTION;
             // last_ = ros::Time::now();
         }
@@ -254,6 +298,7 @@ void se3Ctrl::execFSMCallback(const ros::TimerEvent &e){
     case MISSION_EXECUTION:{
         if (!hasFreshState()) {
             has_trajectory_after_offboard_ = false;
+            resetAttitudeHandoff();
             se3_controller_.resetIntegral();
             ROS_ERROR_THROTTLE(
                 1.0,
@@ -266,35 +311,70 @@ void se3Ctrl::execFSMCallback(const ros::TimerEvent &e){
             (ros::WallTime::now() - last_trajectory_command_wall_time_).toSec()
                 > trajectory_command_timeout_) {
             has_trajectory_after_offboard_ = false;
+            resetAttitudeHandoff();
+            captureLocalHoldPosition();
             setDesiredStateToCurrentOdom();
             ROS_ERROR_THROTTLE(
                 1.0,
                 "[se3_controller] Planner command stream timed out; replacing "
-                "the moving setpoint with a zero-velocity current-pose hold. "
+                "raw attitude control with a PX4 local-position hold at the "
+                "current pose. "
                 "A later fresh gateway command may resume OFFBOARD.");
         }
         if(currState_.mode != "OFFBOARD" || !currState_.armed){
             has_trajectory_after_offboard_ = false;
+            resetAttitudeHandoff();
             se3_controller_.resetIntegral();
-            if (hasFreshOdom() && hasFreshImu()) {
-                pubLocalPose(odom_data_.p);
+            if (hasFreshOdom() && hasFreshLocalOdom() && hasFreshImu()) {
+                local_hold_position_ = local_odom_data_.p;
+                local_hold_orientation_ = local_odom_data_.q.normalized();
+                has_local_hold_position_ = true;
+                pubLocalPose(local_hold_position_, local_hold_orientation_);
                 setDesiredStateToCurrentOdom();
             } else {
-                ROS_ERROR_THROTTLE(1.0, "[se3_controller] No fresh odometry/IMU; not publishing an OFFBOARD warmup setpoint.");
+                ROS_ERROR_THROTTLE(1.0, "[se3_controller] No fresh world odometry, PX4 local odometry, or IMU; not publishing an OFFBOARD warmup setpoint.");
             }
             return;
         }
 
-        if (!hasFreshOdom() || !hasFreshImu()) {
+        if (!hasFreshOdom() || !hasFreshLocalOdom() || !hasFreshImu()) {
             has_trajectory_after_offboard_ = false;
+            resetAttitudeHandoff();
             se3_controller_.resetIntegral();
             if (hasFreshOdom()) {
                 setDesiredStateToCurrentOdom();
             }
             ROS_ERROR_THROTTLE(
                 1.0,
-                "[se3_controller] Odometry or IMU is stale/invalid; suppressing attitude/thrust output and requesting AUTO.LOITER.");
-            requestSafetyHold("stale or invalid odometry/IMU");
+                "[se3_controller] World odometry, PX4 local odometry, or IMU is stale/invalid; suppressing control output and requesting AUTO.LOITER.");
+            requestSafetyHold("stale or invalid world/local odometry or IMU");
+            return;
+        }
+
+        if (!has_trajectory_after_offboard_) {
+            if (!has_local_hold_position_ && !captureLocalHoldPosition()) {
+                requestSafetyHold("PX4 local hold position is unavailable");
+                return;
+            }
+            // Keep PX4's own position loop active while the vehicle is merely
+            // waiting for a goal. This avoids switching from AUTO.TAKEOFF to a
+            // raw attitude target and makes the Takeoff action bumpless.
+            pubLocalPose(local_hold_position_, local_hold_orientation_);
+            setDesiredStateToCurrentOdom();
+            desire_odom_pub_.publish(desire_odom_);
+            return;
+        }
+
+        if (!attitudeAlignmentIsStable()) {
+            has_trajectory_after_offboard_ = false;
+            captureLocalHoldPosition();
+            resetAttitudeHandoff();
+            setDesiredStateToCurrentOdom();
+            ROS_ERROR_THROTTLE(
+                1.0,
+                "[se3_controller] IMU-to-world attitude alignment changed "
+                "beyond the configured limit; refusing raw attitude output.");
+            requestSafetyHold("external-odometry attitude alignment changed");
             return;
         }
 
@@ -307,7 +387,8 @@ void se3Ctrl::execFSMCallback(const ros::TimerEvent &e){
         if(se3_controller_.calControl(
                odom_data_, imu_data_, desired_state_, output,
                odom_timeout_, imu_timeout_, control_dt,
-               align_attitude_with_imu_)){
+               align_attitude_with_imu_, attitude_alignment_q_)){
+            applyAttitudeHandoff(output);
             if (!send_cmd(output, true)) {
                 requestSafetyHold("non-finite controller output");
                 return;
@@ -423,15 +504,27 @@ bool se3Ctrl::send_cmd(const Controller_Output_t &output, bool angle){
     return true;
 }
 
-void se3Ctrl::pubLocalPose(const Eigen::Vector3d &pose) 
+void se3Ctrl::pubLocalPose(
+    const Eigen::Vector3d &pose,
+    const Eigen::Quaterniond &orientation)
 {
+    if (!pose.allFinite() || !se3_safety::isQuaternionValid(orientation)) {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[se3_controller] Refusing to publish an invalid PX4 local hold pose.");
+        return;
+    }
+    const Eigen::Quaterniond normalized_orientation = orientation.normalized();
     geometry_msgs::PoseStamped msg;
     msg.header.stamp = ros::Time::now();
     msg.header.frame_id = "map";
     msg.pose.position.x = pose[0];
     msg.pose.position.y = pose[1];
     msg.pose.position.z = pose[2];
-    msg.pose.orientation.w = 1.0;
+    msg.pose.orientation.w = normalized_orientation.w();
+    msg.pose.orientation.x = normalized_orientation.x();
+    msg.pose.orientation.y = normalized_orientation.y();
+    msg.pose.orientation.z = normalized_orientation.z();
 
     local_pos_pub_.publish(msg);
 }
@@ -439,6 +532,11 @@ void se3Ctrl::pubLocalPose(const Eigen::Vector3d &pose)
 bool se3Ctrl::hasFreshOdom() const
 {
     return has_odom_ && odom_data_.isFresh(odom_timeout_);
+}
+
+bool se3Ctrl::hasFreshLocalOdom() const
+{
+    return has_local_odom_ && local_odom_data_.isFresh(odom_timeout_);
 }
 
 bool se3Ctrl::hasFreshImu() const
@@ -484,6 +582,8 @@ void se3Ctrl::requestSafetyHold(const char *reason)
 void se3Ctrl::resetForDisarmedState()
 {
     has_trajectory_after_offboard_ = false;
+    has_local_hold_position_ = false;
+    resetAttitudeHandoff();
     land_mode_request_accepted_ = false;
     last_land_mode_request_ = ros::Time(0);
     last_safety_hold_request_ = ros::Time(0);
@@ -494,6 +594,85 @@ void se3Ctrl::resetForDisarmedState()
     if (hasFreshOdom()) {
         setDesiredStateToCurrentOdom();
     }
+}
+
+bool se3Ctrl::captureLocalHoldPosition()
+{
+    if (!hasFreshLocalOdom() || !local_odom_data_.p.allFinite()) {
+        return false;
+    }
+    local_hold_position_ = local_odom_data_.p;
+    local_hold_orientation_ = local_odom_data_.q.normalized();
+    has_local_hold_position_ = true;
+    return true;
+}
+
+void se3Ctrl::resetAttitudeHandoff()
+{
+    attitude_handoff_active_ = false;
+    attitude_alignment_valid_ = false;
+    attitude_handoff_started_at_ = ros::WallTime();
+    attitude_handoff_start_q_ = Eigen::Quaterniond::Identity();
+    attitude_alignment_q_ = Eigen::Quaterniond::Identity();
+    attitude_handoff_start_thrust_ = hover_percent_;
+}
+
+void se3Ctrl::startAttitudeHandoff()
+{
+    if (!hasFreshImu() || !se3_safety::isQuaternionValid(imu_data_.q)) {
+        resetAttitudeHandoff();
+        return;
+    }
+    attitude_handoff_start_q_ = imu_data_.q.normalized();
+    attitude_handoff_start_thrust_ = hover_percent_;
+    attitude_alignment_q_ = align_attitude_with_imu_
+        ? (imu_data_.q * odom_data_.q.inverse()).normalized()
+        : Eigen::Quaterniond::Identity();
+    attitude_alignment_valid_ =
+        se3_safety::isQuaternionValid(attitude_alignment_q_);
+    if (!attitude_alignment_valid_) {
+        resetAttitudeHandoff();
+        return;
+    }
+    attitude_handoff_started_at_ = ros::WallTime::now();
+    attitude_handoff_active_ = true;
+}
+
+void se3Ctrl::applyAttitudeHandoff(Controller_Output_t &output)
+{
+    if (!attitude_handoff_active_) {
+        return;
+    }
+    const double elapsed =
+        (ros::WallTime::now() - attitude_handoff_started_at_).toSec();
+    const double progress = elapsed / attitude_handoff_duration_;
+    output.q = se3_safety::interpolateAttitude(
+        attitude_handoff_start_q_, output.q, progress);
+    output.thrust = se3_safety::interpolateScalar(
+        attitude_handoff_start_thrust_, output.thrust, progress);
+    if (progress >= 1.0) {
+        attitude_handoff_active_ = false;
+        ROS_INFO(
+            "[se3_controller] Bumpless PX4-position to SE3-attitude "
+            "handoff completed in %.2f s.",
+            elapsed);
+    }
+}
+
+bool se3Ctrl::attitudeAlignmentIsStable() const
+{
+    if (!attitude_alignment_valid_ || !hasFreshOdom() || !hasFreshImu()) {
+        return false;
+    }
+    if (!align_attitude_with_imu_) {
+        return true;
+    }
+    const Eigen::Quaterniond live_alignment =
+        (imu_data_.q * odom_data_.q.inverse()).normalized();
+    const double error_rad = se3_safety::quaternionAngularDistance(
+        attitude_alignment_q_, live_alignment);
+    return std::isfinite(error_rad) &&
+        error_rad <= max_attitude_alignment_error_deg_ * M_PI / 180.0;
 }
 
 void se3Ctrl::setDesiredStateToCurrentOdom()
@@ -520,7 +699,8 @@ void se3Ctrl::syncDesiredOdomMessage(const ros::Time &stamp)
     // of leaving the last pre-OFFBOARD hold pose in the published cache.
     desire_odom_ = nav_msgs::Odometry();
     desire_odom_.header.stamp = stamp.isZero() ? ros::Time::now() : stamp;
-    desire_odom_.header.frame_id = "map";
+    desire_odom_.header.frame_id = "world";
+    desire_odom_.child_frame_id = "base_link";
     desire_odom_.pose.pose.position.x = desired_state_.p(0);
     desire_odom_.pose.pose.position.y = desired_state_.p(1);
     desire_odom_.pose.pose.position.z = desired_state_.p(2);
@@ -573,6 +753,14 @@ bool se3Ctrl::landCallback(std_srvs::SetBool::Request &request, std_srvs::SetBoo
 }
 
 void se3Ctrl::OdomCallback(const nav_msgs::Odometry::ConstPtr &msg){
+    if (!msg || msg->header.frame_id != "world" ||
+        msg->child_frame_id != "base_link") {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[se3_controller] Ignoring control odometry outside the required "
+            "world -> base_link contract.");
+        return;
+    }
     const bool recovered_from_stale_odom = has_odom_ && !odom_data_.isFresh(odom_timeout_);
     if (!odom_data_.feed(msg, enu_frame_, vel_in_body_)) {
         ROS_ERROR_THROTTLE(
@@ -589,8 +777,10 @@ void se3Ctrl::OdomCallback(const nav_msgs::Odometry::ConstPtr &msg){
     }
     if (recovered_from_stale_odom) {
         has_trajectory_after_offboard_ = false;
+        resetAttitudeHandoff();
+        captureLocalHoldPosition();
         setDesiredStateToCurrentOdom();
-        ROS_WARN("[se3_controller] Odometry recovered after a timeout. Holding the recovered pose until a fresh trajectory is received.");
+        ROS_WARN("[se3_controller] World odometry recovered after a timeout. Holding with PX4 local-position control until a fresh trajectory is received.");
     }
     bool judge_x = ((odom_data_.p(0) >= geo_fence_[0]) || (odom_data_.p(0) <= -geo_fence_[0]));
     bool judge_y = ((odom_data_.p(1) >= geo_fence_[1]) || (odom_data_.p(1) <= -geo_fence_[1]));
@@ -608,6 +798,38 @@ void se3Ctrl::OdomCallback(const nav_msgs::Odometry::ConstPtr &msg){
                 1.0,
                 "[se3_controller] Geofence exceeded; requesting AUTO.LAND.");
         }
+    }
+}
+
+void se3Ctrl::LocalOdomCallback(const nav_msgs::Odometry::ConstPtr &msg){
+    if (!msg || msg->header.frame_id != "map" ||
+        msg->child_frame_id != "base_link") {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[se3_controller] Ignoring PX4 local odometry outside the required "
+            "map -> base_link contract.");
+        return;
+    }
+    const bool recovered_from_stale_local_odom =
+        has_local_odom_ && !local_odom_data_.isFresh(odom_timeout_);
+    if (!local_odom_data_.feed(msg, enu_frame_, vel_in_body_)) {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[se3_controller] Ignoring PX4 local odometry with non-finite values or an invalid quaternion.");
+        return;
+    }
+    has_local_odom_ = true;
+    if (!hasFreshLocalOdom()) {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[se3_controller] Received PX4 local odometry with a stale/future source timestamp.");
+        return;
+    }
+    if (recovered_from_stale_local_odom && !has_trajectory_after_offboard_) {
+        captureLocalHoldPosition();
+        ROS_WARN(
+            "[se3_controller] PX4 local odometry recovered. Captured a new "
+            "local-position hold setpoint.");
     }
 }
 
@@ -629,6 +851,8 @@ void se3Ctrl::IMUCallback(const sensor_msgs::Imu::ConstPtr &msg){
     }
     if (recovered_from_stale_imu) {
         has_trajectory_after_offboard_ = false;
+        resetAttitudeHandoff();
+        captureLocalHoldPosition();
         if (hasFreshOdom()) {
             setDesiredStateToCurrentOdom();
         } else {
@@ -651,6 +875,8 @@ void se3Ctrl::StateCallback(const mavros_msgs::State::ConstPtr &msg){
     has_state_ = true;
     if (recovered_from_stale_state && hasFreshState()) {
         has_trajectory_after_offboard_ = false;
+        resetAttitudeHandoff();
+        captureLocalHoldPosition();
         if (hasFreshOdom()) {
             setDesiredStateToCurrentOdom();
         } else {
@@ -698,10 +924,18 @@ void se3Ctrl::multiDOFJointCallback(
         return;
     }
 
-    if (!hasFreshOdom() || !hasFreshImu()) {
+    if (!hasFreshOdom() || !hasFreshLocalOdom() || !hasFreshImu()) {
         ROS_WARN_THROTTLE(
             1.0,
-            "[se3_controller] Ignoring trajectory because odometry/IMU is unavailable, invalid, or stale.");
+            "[se3_controller] Ignoring trajectory because world odometry, PX4 local odometry, or IMU is unavailable, invalid, or stale.");
+        return;
+    }
+
+    if (msg.header.frame_id != "world") {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[se3_controller] Ignoring trajectory in frame '%s'; expected 'world'.",
+            msg.header.frame_id.c_str());
         return;
     }
 
@@ -762,7 +996,18 @@ void se3Ctrl::multiDOFJointCallback(
     desired_state_ = candidate;
     last_trajectory_command_wall_time_ = ros::WallTime::now();
     if (!has_trajectory_after_offboard_) {
-        ROS_INFO("[se3_controller] Fresh trajectory accepted after OFFBOARD.");
+        startAttitudeHandoff();
+        if (!attitude_handoff_active_) {
+            ROS_ERROR(
+                "[se3_controller] Fresh trajectory cannot start because the "
+                "current IMU attitude is unavailable; remaining in PX4 "
+                "local-position hold.");
+            return;
+        }
+        ROS_INFO(
+            "[se3_controller] Fresh world-frame trajectory accepted after "
+            "OFFBOARD; starting a %.2f s bumpless attitude handoff.",
+            attitude_handoff_duration_);
         has_trajectory_after_offboard_ = true;
     }
 

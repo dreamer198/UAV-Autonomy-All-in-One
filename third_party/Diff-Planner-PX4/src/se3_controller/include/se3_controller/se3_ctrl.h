@@ -28,7 +28,7 @@ class se3Ctrl{
 private:
     ros::NodeHandle nh_;
     ros::Publisher cmd_pub_, desire_odom_pub_, local_pos_pub_;
-    ros::Subscriber odom_sub_, imu_sub_, state_sub_;
+    ros::Subscriber odom_sub_, local_odom_sub_, imu_sub_, state_sub_;
     ros::Subscriber desire_angle_sub_, multiDOFJoint_sub_;
     ros::ServiceClient set_mode_client_;
     ros::ServiceClient arming_client_;
@@ -39,6 +39,7 @@ private:
     mavros_msgs::CommandBool arm_cmd;
     nav_msgs::Odometry desire_odom_;
     Odom_Data_t odom_data_;
+    Odom_Data_t local_odom_data_;
     Imu_Data_t imu_data_;
     Desired_State_t desired_state_;
     SE3_CONTROLLER se3_controller_;
@@ -47,12 +48,19 @@ private:
     bool enable_thrust_estimation_{false};
     bool use_acceleration_feedforward_{true}, use_yaw_rate_feedforward_{true};
     bool align_attitude_with_imu_{true};
-    bool has_odom_{false}, has_imu_{false}, has_state_{false};
+    bool has_odom_{false}, has_local_odom_{false}, has_imu_{false}, has_state_{false};
     bool has_trajectory_after_offboard_{false};
+    bool has_local_hold_position_{false};
+    bool attitude_handoff_active_{false};
+    bool attitude_alignment_valid_{false};
     bool land_mode_request_accepted_{false};
     double max_feedforward_acc_, odom_timeout_{0.2};
     double imu_timeout_{0.2}, state_timeout_{2.0};
     double trajectory_command_timeout_{0.08};
+    double attitude_handoff_duration_{1.5};
+    double max_attitude_alignment_error_deg_{10.0};
+    std::string odometry_topic_{"/localization/odom"};
+    std::string local_odometry_topic_{"/mavros/local_position/odom"};
     std::string command_publisher_node_{"/planner_gateway"};
     double land_retry_interval_{1.0}, safety_hold_retry_interval_{1.0};
     double ki_pz_{0.0}, int_limit_z_{5.0};
@@ -61,6 +69,12 @@ private:
     ros::Time last_land_mode_request_, last_safety_hold_request_;
     ros::Time last_offboard_request_, last_arm_request_;
     ros::WallTime last_trajectory_command_wall_time_;
+    ros::WallTime attitude_handoff_started_at_;
+    Eigen::Vector3d local_hold_position_{Eigen::Vector3d::Zero()};
+    Eigen::Quaterniond local_hold_orientation_{Eigen::Quaterniond::Identity()};
+    Eigen::Quaterniond attitude_handoff_start_q_{Eigen::Quaterniond::Identity()};
+    Eigen::Quaterniond attitude_alignment_q_{Eigen::Quaterniond::Identity()};
+    double attitude_handoff_start_thrust_{0.5};
 
     Eigen::Vector3d kp_p_, kp_v_, kp_a_, kp_q_, kp_w_, kd_p_, kd_v_, kd_a_, kd_q_, kd_w_;
     double limit_err_p_, limit_err_v_, limit_err_a_, limit_d_err_p_, limit_d_err_v_, limit_d_err_a_;
@@ -75,17 +89,26 @@ private:
     void execFSMCallback(const ros::TimerEvent &e);
 
     bool send_cmd(const Controller_Output_t &output, bool angle);
-    void pubLocalPose(const Eigen::Vector3d &pose); 
+    void pubLocalPose(
+        const Eigen::Vector3d &pose,
+        const Eigen::Quaterniond &orientation);
     bool hasFreshOdom() const;
+    bool hasFreshLocalOdom() const;
     bool hasFreshImu() const;
     bool hasFreshState() const;
     void setDesiredStateToCurrentOdom();
     void syncDesiredOdomMessage(const ros::Time &stamp);
     void requestSafetyHold(const char *reason);
     void resetForDisarmedState();
+    bool captureLocalHoldPosition();
+    void resetAttitudeHandoff();
+    void startAttitudeHandoff();
+    void applyAttitudeHandoff(Controller_Output_t &output);
+    bool attitudeAlignmentIsStable() const;
 
     bool landCallback(std_srvs::SetBool::Request &request, std_srvs::SetBool::Response &response);
     void OdomCallback(const nav_msgs::Odometry::ConstPtr &msg);
+    void LocalOdomCallback(const nav_msgs::Odometry::ConstPtr &msg);
     void IMUCallback(const sensor_msgs::Imu::ConstPtr &msg);
     void StateCallback(const mavros_msgs::State::ConstPtr &msg);
     void multiDOFJointCallback(

@@ -60,13 +60,13 @@ master_running() {
 }
 
 flight_nodes_running() {
-  docker_ros "rosnode list 2>/dev/null | grep -Eq '^/(mavros(/|$)|planning/backends/super/(planner|adapter)$|se3_controller_node$|interactive_goal_server$|flight_command_server$|drone_0_|fastlio_mapping$|livox_lidar_publisher|localization_guard$|odom_to_base$|odom_to_pose$|cloud_relay$|trajectory_msg_converter$|flight_recorder$)'"
+  docker_ros "rosnode list 2>/dev/null | grep -Eq '^/(mavros(/|$)|planning/backends/super/(planner|adapter)$|se3_controller_node$|interactive_goal_server$|flight_command_server$|drone_0_|fastlio_mapping$|livox_lidar_publisher|localization_guard$|odom_to_base$|external_odometry_bridge$|odom_to_pose$|cloud_relay$|trajectory_msg_converter$|flight_recorder$)'"
 }
 
 flight_processes_running() {
   container_running || return 1
   docker top "$CONTAINER_NAME" -eo args 2>/dev/null |
-    grep -Eq 'mavros_node|se3_controller_node|interactive_goal_server\.py|flight_command_server\.py|diff_planner_node|super_backend_adapter_node|super_planner/fsm_node|traj_server|fastlio_mapping|livox_ros_driver2_node|localization_guard\.py|trajectory_msg_converter\.py|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
+    grep -Eq 'mavros_node|se3_controller_node|interactive_goal_server\.py|flight_command_server\.py|diff_planner_node|super_backend_adapter_node|super_planner/fsm_node|traj_server|fastlio_mapping|livox_ros_driver2_node|localization_guard\.py|odom_to_mavros\.py|trajectory_msg_converter\.py|/rosbag[[:space:]]+record|/rosbag/record[[:space:]]'
 }
 
 write_master_marker() {

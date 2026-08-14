@@ -6,10 +6,22 @@ auto_land_on_geofence: false
 enable_thrust_estimation: false
 use_acceleration_feedforward: true
 use_yaw_rate_feedforward: true
-# Keep the legacy behavior unless a planner/vehicle overlay knows that odometry
-# and IMU attitudes come from the same estimator.
+# FAST-LIO world has an arbitrary startup heading. Latch its attitude relation
+# to the FCU IMU before the first raw-attitude handoff.
 align_attitude_with_imu: true
 max_feedforward_acc: 1.2
+
+# The planner and SE3 feedback must use the same FAST-LIO world frame.  MAVROS
+# local odometry is a separate PX4 earth-aligned frame and is used only for the
+# native local-position OFFBOARD hold before a planner trajectory is accepted.
+odometry_topic: /localization/odom
+local_odometry_topic: /mavros/local_position/odom
+# Blend the first raw-attitude command from the current measured attitude so
+# switching away from PX4 local-position control is bumpless.
+attitude_handoff_duration: 1.5
+# If the live IMU-to-FAST-LIO frame relation changes after it is latched, do
+# not rotate commands to follow the reset. Exit the raw-attitude handoff.
+max_attitude_alignment_error_deg: 10.0
 
 # 同时检查回调接收时间；消息时间戳非零时也检查源时间。
 odom_timeout: 0.2

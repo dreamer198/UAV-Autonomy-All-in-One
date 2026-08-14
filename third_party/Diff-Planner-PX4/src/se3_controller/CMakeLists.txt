@@ -54,6 +54,7 @@ target_link_libraries(se3_controller_node
 )
 
 if(CATKIN_ENABLE_TESTING)
+  find_package(rostest REQUIRED)
   catkin_add_gtest(test_se3_safety
     test/test_se3_safety.cpp
   )
@@ -62,4 +63,5 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES}
     )
   endif()
+  add_rostest(test/se3_handoff.test)
 endif()

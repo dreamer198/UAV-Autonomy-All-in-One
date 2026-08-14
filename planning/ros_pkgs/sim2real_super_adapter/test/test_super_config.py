@@ -93,7 +93,7 @@ class SuperConfigTest(unittest.TestCase):
         self.assertEqual(plugin_controller["kd_px"], 0.0)
         self.assertEqual(plugin_controller["kd_py"], 0.0)
         self.assertEqual(plugin_controller["kd_pz"], 0.0)
-        self.assertFalse(plugin_controller["align_attitude_with_imu"])
+        self.assertTrue(plugin_controller["align_attitude_with_imu"])
         self.assertTrue(rog_map["map_sliding"]["enable"])
         self.assertFalse(rog_map["ros_callback"]["publish_tf"])
         self.assertEqual(rog_map["virtual_ground_height"], -0.1)

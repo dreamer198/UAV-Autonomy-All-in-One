@@ -55,6 +55,69 @@ class ControllerGatewayContractTest(unittest.TestCase):
         ).read_text(encoding="utf-8"))
         self.assertIn("requestSafetyHold", source)
 
+    def test_controller_keeps_local_hold_and_planner_feedback_frames_separate(self):
+        config = yaml.safe_load(
+            (PROJECT_ROOT / "common" / "config" / "controller.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(config["odometry_topic"], "/localization/odom")
+        self.assertEqual(
+            config["local_odometry_topic"], "/mavros/local_position/odom"
+        )
+
+        source = SE3_SOURCE.read_text(encoding="utf-8")
+        self.assertIn('msg.header.frame_id != "world"', source)
+        self.assertIn('msg->header.frame_id != "map"', source)
+        self.assertIn("if (!has_trajectory_after_offboard_)", source)
+        self.assertIn(
+            "pubLocalPose(local_hold_position_, local_hold_orientation_)",
+            source,
+        )
+        self.assertIn(
+            "msg.pose.orientation.w = normalized_orientation.w()", source
+        )
+        self.assertIn("applyAttitudeHandoff(output)", source)
+        self.assertIn("attitudeAlignmentIsStable()", source)
+
+        frame_launch = ET.parse(
+            PROJECT_ROOT
+            / "deployment"
+            / "ros_pkgs"
+            / "sim2real_deployment"
+            / "launch"
+            / "frame_aliases.launch"
+        )
+        node_names = {
+            node.attrib.get("name")
+            for node in frame_launch.getroot().findall("node")
+        }
+        self.assertNotIn("real_world_map_tf", node_names)
+        self.assertIn("real_world_odom_tf", node_names)
+
+        real_launch = (PROJECT_ROOT / "launch" / "real.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("'/real_world_odom_tf'", real_launch)
+        self.assertNotIn("'/real_world_map_tf'", real_launch)
+
+    def test_attitude_handoff_has_a_nonzero_safety_duration(self):
+        config = yaml.safe_load(
+            (PROJECT_ROOT / "common" / "config" / "controller.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertGreaterEqual(float(config["attitude_handoff_duration"]), 1.0)
+        self.assertLessEqual(
+            float(config["max_attitude_alignment_error_deg"]), 10.0
+        )
+        super_config = yaml.safe_load(
+            (
+                PROJECT_ROOT / "planning" / "plugins" / "super" / "controller.yaml"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertIs(super_config["align_attitude_with_imu"], True)
+
     def test_gateway_allows_jitter_on_one_hz_mavros_state(self):
         launch = ET.parse(
             PROJECT_ROOT
