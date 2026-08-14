@@ -67,6 +67,12 @@ RUN sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" /et
 
 RUN /opt/ros/noetic/lib/mavros/install_geographiclib_datasets.sh
 
+# Keep planner selection metadata after the large, planner-independent system
+# dependency layers. Changing the enabled planner set must not invalidate and
+# reinstall the unchanged ROS/RViz base packages on Jetson.
+ARG PLANNER_WORKSPACES=interfaces,control,diff
+LABEL io.sim2real.enabled-planner-workspaces="${PLANNER_WORKSPACES}"
+
 WORKDIR /root
 
 RUN mkdir -p \
@@ -84,12 +90,17 @@ COPY third_party/Livox-SDK2 /tmp/src/Livox-SDK2
 COPY third_party/livox_ros_driver2 /root/livox_ws/src/livox_ros_driver2
 COPY third_party/FAST_LIO /root/localization_ws/src/FAST_LIO
 COPY third_party/Diff-Planner-PX4 /opt/uav-autonomy-aio/third_party/Diff-Planner-PX4
-COPY third_party/Fast-Planner /opt/uav-autonomy-aio/third_party/Fast-Planner
-COPY third_party/SUPER /opt/uav-autonomy-aio/third_party/SUPER
 COPY common /opt/uav-autonomy-aio/common
 COPY deployment/ros_pkgs/sim2real_deployment \
      /opt/uav-autonomy-aio/deployment/ros_pkgs/sim2real_deployment
-COPY planning /opt/uav-autonomy-aio/planning
+COPY planning/scripts /opt/uav-autonomy-aio/planning/scripts
+COPY planning/plugins/diff /opt/uav-autonomy-aio/planning/plugins/diff
+COPY planning/ros_pkgs/sim2real_planning_msgs \
+     /opt/uav-autonomy-aio/planning/ros_pkgs/sim2real_planning_msgs
+COPY planning/ros_pkgs/sim2real_planner_manager \
+     /opt/uav-autonomy-aio/planning/ros_pkgs/sim2real_planner_manager
+COPY planning/ros_pkgs/sim2real_diff_adapter \
+     /opt/uav-autonomy-aio/planning/ros_pkgs/sim2real_diff_adapter
 
 COPY deployment/config/rviz/jetson_real_stack.rviz /root/jetson_real_stack.rviz
 COPY deployment/config/livox/MID360s_config.json /root/livox_ws/src/livox_ros_driver2/config/MID360s_config.json
@@ -127,8 +138,9 @@ RUN source /opt/ros/noetic/setup.bash \
  && catkin config --extend /root/livox_ws/devel --cmake-args -DCMAKE_BUILD_TYPE=Release \
  && catkin build
 
-# Build public/control, Diff, Fast, and SUPER in independent catkin domains. Only the
-# interface and control setup files are sourced by /root/.bashrc at runtime.
+# The Jetson deployment is Diff-only by default. Build the common interfaces,
+# controller, and Diff domains before copying the optional planner sources so
+# changes to Fast/SUPER cannot invalidate this expensive C++ build layer.
 ARG BUILD_JOBS=2
 RUN /opt/uav-autonomy-aio/planning/scripts/build_planner_workspaces.sh \
       --project-root /opt/uav-autonomy-aio \
@@ -136,9 +148,48 @@ RUN /opt/uav-autonomy-aio/planning/scripts/build_planner_workspaces.sh \
       --underlay /root/localization_ws/devel \
       --flavor deployment \
       --jobs "$BUILD_JOBS" \
+      --workspaces interfaces,control,diff \
  && mkdir -p /root/catkin_ws/devel \
  && ln -s /opt/uav-autonomy-aio/planning/workspaces/control_ws/devel/setup.bash \
       /root/catkin_ws/devel/setup.bash
+
+# Keep the remaining planners available as an explicit maintenance build while
+# omitting them from normal Jetson compilation and the final source tree.
+COPY third_party/Fast-Planner /opt/uav-autonomy-aio/third_party/Fast-Planner
+COPY third_party/SUPER /opt/uav-autonomy-aio/third_party/SUPER
+COPY planning/plugins/fast-kino /opt/uav-autonomy-aio/planning/plugins/fast-kino
+COPY planning/plugins/fast-topo /opt/uav-autonomy-aio/planning/plugins/fast-topo
+COPY planning/plugins/super /opt/uav-autonomy-aio/planning/plugins/super
+COPY planning/ros_pkgs/sim2real_fast_adapter \
+     /opt/uav-autonomy-aio/planning/ros_pkgs/sim2real_fast_adapter
+COPY planning/ros_pkgs/sim2real_super_adapter \
+     /opt/uav-autonomy-aio/planning/ros_pkgs/sim2real_super_adapter
+
+RUN case "$PLANNER_WORKSPACES" in \
+      interfaces,control,diff) \
+        rm -rf \
+          /opt/uav-autonomy-aio/third_party/Fast-Planner \
+          /opt/uav-autonomy-aio/third_party/SUPER \
+          /opt/uav-autonomy-aio/planning/plugins/fast-kino \
+          /opt/uav-autonomy-aio/planning/plugins/fast-topo \
+          /opt/uav-autonomy-aio/planning/plugins/super \
+          /opt/uav-autonomy-aio/planning/ros_pkgs/sim2real_fast_adapter \
+          /opt/uav-autonomy-aio/planning/ros_pkgs/sim2real_super_adapter \
+        ;; \
+      interfaces,control,diff,fast,super) \
+        /opt/uav-autonomy-aio/planning/scripts/build_planner_workspaces.sh \
+          --project-root /opt/uav-autonomy-aio \
+          --workspace-root /opt/uav-autonomy-aio/planning/workspaces \
+          --underlay /root/localization_ws/devel \
+          --flavor deployment \
+          --jobs "$BUILD_JOBS" \
+          --workspaces fast,super \
+        ;; \
+      *) \
+        echo "Unsupported PLANNER_WORKSPACES: $PLANNER_WORKSPACES" >&2; \
+        exit 2 \
+        ;; \
+    esac
 
 WORKDIR /root
 

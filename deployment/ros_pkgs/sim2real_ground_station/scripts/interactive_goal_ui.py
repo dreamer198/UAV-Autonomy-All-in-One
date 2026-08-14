@@ -17,15 +17,11 @@ import actionlib
 import rospy
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.msg import ExtendedState, State
-from python_qt_binding.QtCore import QObject, Qt, QTimer, Signal, Slot
+from python_qt_binding.QtCore import QObject, QTimer, Signal, Slot
 from python_qt_binding.QtWidgets import (
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
-    QFormLayout,
     QLabel,
-    QMessageBox,
-    QProgressDialog,
     QVBoxLayout,
 )
 from sim2real_planning_msgs.msg import (
@@ -40,8 +36,8 @@ ACTION_NAME = "/ground_station/interactive_goal"
 FLIGHT_COMMAND_ACTION_NAME = "/ground_station/flight_command"
 CANDIDATE_TOPIC = "/ground_station/goal_candidate"
 STATE_TIMEOUT_SECONDS = 3.0
-TAKEOFF_HEIGHT_MIN = 0.5
-TAKEOFF_HEIGHT_MAX = 2.5
+FLIGHT_HEIGHT_MIN = 0.5
+FLIGHT_HEIGHT_MAX = 2.5
 
 _FLIGHT_STAGE_LABELS = {
     1: "正在验证飞行状态",
@@ -85,6 +81,7 @@ class InteractiveGoalUi(QObject):
         result_callback=None,
         flight_confirm_callback=None,
         flight_result_callback=None,
+        status_callback=None,
     ):
         super().__init__(parent)
         self._parent = parent
@@ -92,6 +89,7 @@ class InteractiveGoalUi(QObject):
         self._result_callback = result_callback
         self._flight_confirm_callback = flight_confirm_callback
         self._flight_result_callback = flight_result_callback
+        self._status_callback = status_callback
         self._lock = threading.Lock()
         self._state = None
         self._state_at = 0.0
@@ -104,9 +102,8 @@ class InteractiveGoalUi(QObject):
         self._active_flight_command = ""
         self._takeoff_action = None
         self._land_action = None
-        self._flight_progress = None
-        self._goal_height = 1.5
-        self._takeoff_height = 1.5
+        self._cancel_takeoff_action = None
+        self._height_control = None
 
         if not rospy.core.is_initialized():
             rospy.init_node(
@@ -181,18 +178,55 @@ class InteractiveGoalUi(QObject):
             self._extended_state_at = time.monotonic()
         self.vehicle_state_changed_for_ui.emit()
 
-    def bind_flight_actions(self, takeoff_action, land_action):
+    def bind_flight_actions(
+        self,
+        takeoff_action,
+        land_action,
+        cancel_takeoff_action=None,
+        status_callback=None,
+        height_control=None,
+    ):
         """Bind toolbar actions while keeping all QWidget access on Qt's thread."""
 
         self._takeoff_action = takeoff_action
         self._land_action = land_action
+        self._cancel_takeoff_action = cancel_takeoff_action
+        self._height_control = height_control
+        if status_callback is not None:
+            self._status_callback = status_callback
         takeoff_action.triggered.connect(
             lambda _checked=False: self.request_takeoff()
         )
         land_action.triggered.connect(
             lambda _checked=False: self.request_land()
         )
+        if cancel_takeoff_action is not None:
+            cancel_takeoff_action.setVisible(False)
+            cancel_takeoff_action.setEnabled(False)
+            cancel_takeoff_action.triggered.connect(
+                lambda _checked=False: self._cancel_takeoff()
+            )
         self._refresh_flight_action_state()
+
+    def _notify(self, level, message, timeout_ms=0):
+        """Report operator feedback without opening another top-level window."""
+
+        text = " ".join(str(message or "").split())
+        if not text:
+            return
+        if self._status_callback is not None:
+            try:
+                self._status_callback(str(level), text, int(timeout_ms))
+                return
+            except Exception as exc:
+                rospy.logerr("Ground-station status callback failed: %s", exc)
+        logger = {
+            "error": rospy.logerr,
+            "warning": rospy.logwarn,
+            "success": rospy.loginfo,
+            "info": rospy.loginfo,
+        }.get(str(level), rospy.loginfo)
+        logger("Ground station: %s", text)
 
     def _state_snapshot(self):
         with self._lock:
@@ -270,6 +304,11 @@ class InteractiveGoalUi(QObject):
 
     @Slot()
     def _refresh_flight_action_state(self):
+        if self._height_control is not None:
+            try:
+                self._height_control.setEnabled(not self._operation_busy())
+            except RuntimeError:
+                self._height_control = None
         if self._takeoff_action is None or self._land_action is None:
             return
         takeoff_ready, takeoff_reason = self._flight_action_availability(
@@ -285,7 +324,26 @@ class InteractiveGoalUi(QObject):
     def _command_title(command):
         return "起飞" if command == "takeoff" else "降落"
 
-    def _build_flight_dialog(self, command):
+    def _configured_height(self):
+        if self._height_control is None:
+            raise ValueError("统一飞行高度控件尚未就绪。")
+        try:
+            height = float(self._height_control.value())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            raise ValueError("无法读取统一飞行高度。")
+        if (
+            not math.isfinite(height)
+            or height < FLIGHT_HEIGHT_MIN
+            or height > FLIGHT_HEIGHT_MAX
+        ):
+            raise ValueError(
+                "统一飞行高度必须位于 {:.1f}–{:.1f} m。".format(
+                    FLIGHT_HEIGHT_MIN, FLIGHT_HEIGHT_MAX
+                )
+            )
+        return height
+
+    def _build_flight_dialog(self, command, height=0.0):
         title = self._command_title(command)
         dialog = QDialog(self._parent)
         dialog.setObjectName("flightCommandDialog")
@@ -296,22 +354,20 @@ class InteractiveGoalUi(QObject):
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(12)
 
-        takeoff_height = None
         if command == "takeoff":
-            form = QFormLayout()
-            takeoff_height = QDoubleSpinBox(dialog)
-            takeoff_height.setRange(TAKEOFF_HEIGHT_MIN, TAKEOFF_HEIGHT_MAX)
-            takeoff_height.setDecimals(2)
-            takeoff_height.setSingleStep(0.1)
-            takeoff_height.setValue(self._takeoff_height)
-            takeoff_height.setSuffix(" m")
-            form.addRow("自动起飞高度", takeoff_height)
-            root.addLayout(form)
+            height_label = QLabel(
+                "统一飞行高度：{:.2f} m（可在工具栏修改）".format(
+                    height
+                ),
+                dialog,
+            )
+            height_label.setObjectName("flightCommandHeightLabel")
+            root.addWidget(height_label)
             warning_text = (
                 "确认后，机载端将再次验证 MAVROS 与落地状态，自动解锁并执行 "
-                "AUTO.TAKEOFF，随后进入 OFFBOARD 保持。\n"
+                "AUTO.TAKEOFF 到 {:.2f} m，随后进入 OFFBOARD 保持。\n"
                 "请确认桨叶区域和上方航路安全，并保持遥控器可随时接管。"
-            )
+            ).format(height)
         else:
             warning_text = (
                 "确认后，机载端将请求 PX4 进入 AUTO.LAND。Action 成功只表示 "
@@ -341,7 +397,7 @@ class InteractiveGoalUi(QObject):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         root.addWidget(buttons)
-        return dialog, takeoff_height
+        return dialog
 
     @Slot()
     def request_takeoff(self):
@@ -354,10 +410,12 @@ class InteractiveGoalUi(QObject):
     def _request_flight_command(self, command):
         ready, reason = self._flight_action_availability(command)
         if not ready:
-            QMessageBox.warning(
-                self._parent,
-                "{}被拒绝".format(self._command_title(command)),
-                reason,
+            self._notify(
+                "warning",
+                "{}被拒绝：{}".format(
+                    self._command_title(command), reason
+                ),
+                8000,
             )
             return
 
@@ -376,13 +434,14 @@ class InteractiveGoalUi(QObject):
             rejection = self._flight_state_rejection(command)
             if rejection:
                 raise ValueError(rejection)
+            height = self._configured_height() if command == "takeoff" else 0.0
             if not self._flight_client.wait_for_server(rospy.Duration(0.2)):
                 raise ValueError("机载起飞/降落服务未连接。")
 
-            dialog, takeoff_height = self._build_flight_dialog(command)
+            dialog = self._build_flight_dialog(command, height)
             if self._flight_confirm_callback is not None:
                 self._flight_confirm_callback(
-                    dialog, command, takeoff_height
+                    dialog, command, height
                 )
             if dialog.exec_() != QDialog.Accepted:
                 return
@@ -391,16 +450,15 @@ class InteractiveGoalUi(QObject):
             rejection = self._flight_state_rejection(command)
             if rejection:
                 raise ValueError(rejection)
-            height = 0.0
-            if takeoff_height is not None:
-                height = float(takeoff_height.value())
-                self._takeoff_height = height
+            height = self._configured_height() if command == "takeoff" else 0.0
             self._send_flight_command(command, height)
         except (ValueError, rospy.ROSException) as exc:
-            QMessageBox.warning(
-                self._parent,
-                "{}被拒绝".format(self._command_title(command)),
-                str(exc),
+            self._notify(
+                "warning",
+                "{}被拒绝：{}".format(
+                    self._command_title(command), exc
+                ),
+                8000,
             )
         finally:
             with self._lock:
@@ -419,7 +477,7 @@ class InteractiveGoalUi(QObject):
         with self._lock:
             self._flight_action_active = True
             self._active_flight_command = command
-        self._open_flight_progress(command)
+        self._begin_flight_status(command)
         self.vehicle_state_changed_for_ui.emit()
         try:
             self._flight_client.send_goal(
@@ -435,35 +493,21 @@ class InteractiveGoalUi(QObject):
             with self._lock:
                 self._flight_action_active = False
                 self._active_flight_command = ""
-            self._close_flight_progress()
+            self._end_flight_status()
             self.vehicle_state_changed_for_ui.emit()
             raise ValueError("无法发送飞行指令：{}".format(exc))
 
-    def _open_flight_progress(self, command):
-        self._close_flight_progress()
+    def _begin_flight_status(self, command):
+        self._end_flight_status()
         title = self._command_title(command)
-        cancel_text = "取消起飞" if command == "takeoff" else ""
-        progress = QProgressDialog(
-            "正在等待机载端处理{}指令…".format(title),
-            cancel_text,
-            0,
-            0,
-            self._parent,
+        if self._cancel_takeoff_action is not None:
+            is_takeoff = command == "takeoff"
+            self._cancel_takeoff_action.setVisible(is_takeoff)
+            self._cancel_takeoff_action.setEnabled(is_takeoff)
+        self._notify(
+            "info",
+            "{}：正在等待机载端处理指令…".format(title),
         )
-        progress.setObjectName("flightCommandProgress")
-        progress.setWindowTitle("正在执行{}".format(title))
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setMinimumDuration(0)
-        progress.setWindowModality(Qt.NonModal)
-        if command == "takeoff":
-            progress.canceled.connect(self._cancel_takeoff)
-        else:
-            # Once AUTO.LAND is requested the UI must not imply that closing a
-            # dialog can safely switch PX4 back to another mode.
-            progress.setCancelButton(None)
-        progress.show()
-        self._flight_progress = progress
 
     @Slot()
     def _cancel_takeoff(self):
@@ -474,19 +518,18 @@ class InteractiveGoalUi(QObject):
             )
         if not active_takeoff:
             return
-        if self._flight_progress is not None:
-            self._flight_progress.setLabelText(
-                "正在取消起飞并等待机载端完成安全恢复…"
-            )
-            self._flight_progress.setCancelButton(None)
+        if self._cancel_takeoff_action is not None:
+            self._cancel_takeoff_action.setEnabled(False)
+            self._cancel_takeoff_action.setVisible(False)
+        self._notify(
+            "warning", "取消起飞：正在等待机载端完成安全恢复…"
+        )
         self._flight_client.cancel_goal()
 
-    def _close_flight_progress(self):
-        progress = self._flight_progress
-        self._flight_progress = None
-        if progress is not None:
-            progress.close()
-            progress.deleteLater()
+    def _end_flight_status(self):
+        if self._cancel_takeoff_action is not None:
+            self._cancel_takeoff_action.setEnabled(False)
+            self._cancel_takeoff_action.setVisible(False)
 
     def _flight_feedback_callback(self, command, feedback):
         stage = int(getattr(feedback, "stage", 0))
@@ -504,8 +547,11 @@ class InteractiveGoalUi(QObject):
                 self._flight_action_active
                 and self._active_flight_command == command
             )
-        if is_current and self._flight_progress is not None:
-            self._flight_progress.setLabelText(message)
+        if is_current:
+            self._notify(
+                "info",
+                "{}：{}".format(self._command_title(command), message),
+            )
 
     def _flight_done_callback(self, command, state, result):
         success = bool(result and result.success and int(state) == 3)
@@ -523,21 +569,28 @@ class InteractiveGoalUi(QObject):
                 return
             self._flight_action_active = False
             self._active_flight_command = ""
-        self._close_flight_progress()
+        self._end_flight_status()
         self._refresh_flight_action_state()
         if self._flight_result_callback is not None:
             self._flight_result_callback(command, bool(success), str(message))
             return
-        title = self._command_title(command)
         if success:
             if command == "land":
-                result_title = "降落指令已接受"
+                summary = (
+                    "降落：AUTO.LAND 已确认，请持续观察直至落地。"
+                )
             else:
-                result_title = "起飞流程已完成"
-            QMessageBox.information(self._parent, result_title, message)
+                summary = "起飞：已完成并进入 OFFBOARD 悬停。"
+            self._notify(
+                "success", "{} {}".format(summary, message), 7000
+            )
         else:
-            QMessageBox.warning(
-                self._parent, "{}失败".format(title), message
+            self._notify(
+                "error",
+                "{}失败：{}".format(
+                    self._command_title(command), message
+                ),
+                12000,
             )
 
     def _vehicle_kind(self):
@@ -566,110 +619,121 @@ class InteractiveGoalUi(QObject):
             raise ValueError("无法确认无人机处于地面，禁止自动解锁。")
         return "disarmed_ground"
 
+    def _build_ground_goal_dialog(self, target, height):
+        dialog = QDialog(self._parent)
+        dialog.setObjectName("interactiveGoalDialog")
+        dialog.setWindowTitle("确认自动起飞并发送目标")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(440)
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(12)
+
+        target_label = QLabel(
+            (
+                "目标位置：X={:.2f} m  Y={:.2f} m  Z={:.2f} m  "
+                "航向={:.1f}°"
+            ).format(
+                target.pose.position.x,
+                target.pose.position.y,
+                height,
+                _yaw_degrees(target.pose.orientation),
+            ),
+            dialog,
+        )
+        target_label.setWordWrap(True)
+        root.addWidget(target_label)
+
+        height_label = QLabel(
+            "统一飞行高度：{:.2f} m（可在工具栏修改）".format(height),
+            dialog,
+        )
+        height_label.setObjectName("interactiveGoalHeightLabel")
+        root.addWidget(height_label)
+
+        warning = QLabel(
+            "无人机当前未解锁且位于地面。确认后将自动解锁，以 "
+            "AUTO.TAKEOFF 起飞到统一高度，再进入 OFFBOARD 飞向目标。\n"
+            "请确认飞行区域安全，并保持遥控器可随时接管。",
+            dialog,
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet(
+            "QLabel { color: #fbbf24; background: #422006; "
+            "border: 1px solid #92400e; border-radius: 5px; padding: 9px; }"
+        )
+        root.addWidget(warning)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog
+        )
+        send_button = buttons.button(QDialogButtonBox.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.Cancel)
+        send_button.setText("确认起飞并发送")
+        cancel_button.setText("取消")
+        send_button.setAutoDefault(False)
+        send_button.setDefault(False)
+        cancel_button.setAutoDefault(True)
+        cancel_button.setDefault(True)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        root.addWidget(buttons)
+        return dialog
+
+    def _send_interactive_goal(self, target, vehicle_kind, height):
+        target.header.stamp = rospy.Time.now()
+        target.header.frame_id = "world"
+        target.pose.position.z = height
+        goal = InteractiveGoalGoal()
+        goal.target = target
+        goal.takeoff_height = height
+        goal.auto_arm_if_grounded = vehicle_kind == "disarmed_ground"
+        with self._lock:
+            self._action_active = True
+        self.vehicle_state_changed_for_ui.emit()
+        try:
+            self._client.send_goal(goal, done_cb=self._done_callback)
+        except Exception as exc:
+            with self._lock:
+                self._action_active = False
+            raise ValueError("无法发送目标请求：{}".format(exc))
+        self._notify("info", "目标：正在等待机载端校验…")
+
     @Slot(object)
     def _show_candidate_dialog(self, target):
         try:
             vehicle_kind = self._vehicle_kind()
+            height = self._configured_height()
             if not self._client.wait_for_server(rospy.Duration(0.2)):
                 raise ValueError("机载目标服务未连接。")
 
-            dialog = QDialog(self._parent)
-            dialog.setObjectName("interactiveGoalDialog")
-            dialog.setWindowTitle("发送无人机目标")
-            dialog.setModal(True)
-            dialog.setMinimumWidth(420)
-            root = QVBoxLayout(dialog)
-            root.setContentsMargins(18, 16, 18, 16)
-            root.setSpacing(12)
-
-            target_label = QLabel(
-                "目标位置：X={:.2f} m  Y={:.2f} m  航向={:.1f}°".format(
-                    target.pose.position.x,
-                    target.pose.position.y,
-                    _yaw_degrees(target.pose.orientation),
-                ),
-                dialog,
-            )
-            target_label.setWordWrap(True)
-            root.addWidget(target_label)
-
-            form = QFormLayout()
-            goal_height = QDoubleSpinBox(dialog)
-            goal_height.setRange(0.5, 2.5)
-            goal_height.setDecimals(2)
-            goal_height.setSingleStep(0.1)
-            goal_height.setValue(self._goal_height)
-            goal_height.setSuffix(" m")
-            form.addRow("目标高度", goal_height)
-
-            takeoff_height = QDoubleSpinBox(dialog)
-            takeoff_height.setRange(0.5, 2.5)
-            takeoff_height.setDecimals(2)
-            takeoff_height.setSingleStep(0.1)
-            takeoff_height.setValue(self._takeoff_height)
-            takeoff_height.setSuffix(" m")
-            takeoff_height.setEnabled(vehicle_kind == "disarmed_ground")
-            form.addRow("自动起飞高度", takeoff_height)
-            root.addLayout(form)
-
             if vehicle_kind == "disarmed_ground":
-                warning_text = (
-                    "无人机当前未解锁且位于地面。发送后将自动解锁，"
-                    "以 AUTO.TAKEOFF 起飞到设定高度，再进入 OFFBOARD 飞向目标。\n"
-                    "请确认飞行区域安全，并保持遥控器可随时接管。"
-                )
+                dialog = self._build_ground_goal_dialog(target, height)
+                if self._confirm_callback is not None:
+                    self._confirm_callback(
+                        dialog,
+                        target,
+                        vehicle_kind,
+                        height,
+                        height,
+                    )
+                if dialog.exec_() != QDialog.Accepted:
+                    return
+                # The modal may have remained open while vehicle state changed.
+                vehicle_kind = self._vehicle_kind()
+                height = self._configured_height()
             else:
-                warning_text = "无人机已处于 OFFBOARD；确认后将发送新的飞行目标。"
-            warning = QLabel(warning_text, dialog)
-            warning.setWordWrap(True)
-            warning.setStyleSheet(
-                "QLabel { color: #fbbf24; background: #422006; "
-                "border: 1px solid #92400e; border-radius: 5px; padding: 9px; }"
-            )
-            root.addWidget(warning)
-
-            buttons = QDialogButtonBox(
-                QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog
-            )
-            send_button = buttons.button(QDialogButtonBox.Ok)
-            cancel_button = buttons.button(QDialogButtonBox.Cancel)
-            send_button.setText("确认发送")
-            cancel_button.setText("取消")
-            send_button.setAutoDefault(False)
-            send_button.setDefault(False)
-            cancel_button.setAutoDefault(True)
-            cancel_button.setDefault(True)
-            buttons.accepted.connect(dialog.accept)
-            buttons.rejected.connect(dialog.reject)
-            root.addWidget(buttons)
-
-            if self._confirm_callback is not None:
-                self._confirm_callback(
-                    dialog,
-                    target,
-                    vehicle_kind,
-                    goal_height,
-                    takeoff_height,
+                self._notify(
+                    "info",
+                    (
+                        "目标：使用统一高度 {:.2f} m，正在提交…"
+                    ).format(height),
                 )
-            if dialog.exec_() != QDialog.Accepted:
-                return
-            # Recheck state after the operator may have left the modal open.
-            vehicle_kind = self._vehicle_kind()
-            self._goal_height = goal_height.value()
-            self._takeoff_height = takeoff_height.value()
-            target.header.stamp = rospy.Time.now()
-            target.header.frame_id = "world"
-            target.pose.position.z = self._goal_height
-            goal = InteractiveGoalGoal()
-            goal.target = target
-            goal.takeoff_height = self._takeoff_height
-            goal.auto_arm_if_grounded = vehicle_kind == "disarmed_ground"
-            with self._lock:
-                self._action_active = True
-            self.vehicle_state_changed_for_ui.emit()
-            self._client.send_goal(goal, done_cb=self._done_callback)
-        except ValueError as exc:
-            QMessageBox.warning(self._parent, "目标发送被拒绝", str(exc))
+            self._send_interactive_goal(target, vehicle_kind, height)
+        except (ValueError, rospy.ROSException) as exc:
+            self._notify(
+                "warning", "目标发送被拒绝：{}".format(exc), 10000
+            )
         finally:
             with self._lock:
                 self._dialog_open = False
@@ -693,14 +757,22 @@ class InteractiveGoalUi(QObject):
             self._result_callback(bool(success), str(message))
             return
         if success:
-            QMessageBox.information(self._parent, "目标已接受", message)
+            self._notify(
+                "success",
+                (
+                    "目标：规划器已接受请求（不表示已经到达）。 {}"
+                ).format(message),
+                7000,
+            )
         else:
-            QMessageBox.warning(self._parent, "目标执行失败", message)
+            self._notify(
+                "error", "目标执行失败：{}".format(message), 12000
+            )
 
     @Slot()
     def shutdown(self):
         self._state_freshness_timer.stop()
-        self._close_flight_progress()
+        self._end_flight_status()
         # Closing a visualization client must never preempt a lifecycle command
         # that the operator already confirmed and handed to the onboard server.
         for subscriber in (

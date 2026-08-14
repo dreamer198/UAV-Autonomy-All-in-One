@@ -8,6 +8,11 @@ RUNTIME_DIR="$(realpath -m "${RUNTIME_DIR:-$PROJECT_ROOT/runtime}")"
 PLANNER_ID="${REAL_PLANNER:-}"
 PLANNER_PROFILE="${REAL_PLANNER_PROFILE:-}"
 PLANNING_PROJECT_ROOT="${REAL_PROJECT_ROOT_CONTAINER:-/opt/uav-autonomy-aio}"
+# The control overlay already extends interfaces -> localization -> Livox ->
+# ROS Noetic. Runtime shells source this highest common overlay exactly once.
+# A login shell would also load .profile/.bashrc and repeat every catkin setup,
+# adding tens of seconds on a busy Jetson.
+CONTAINER_RUNTIME_SETUP="$PLANNING_PROJECT_ROOT/planning/workspaces/control_ws/devel/setup.bash"
 PLANNER_MANIFEST_ROOT="$PLANNING_PROJECT_ROOT/planning/plugins"
 PLANNER_MANIFEST_TOOL_HOST="$PROJECT_ROOT/planning/scripts/planner_manifest.py"
 PLANNER_WORKSPACE_SETUP_REL=""
@@ -19,7 +24,7 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 LIVOX_LAUNCH="${LIVOX_LAUNCH:-msg_MID360s.launch}"
 FASTLIO_RVIZ="${FASTLIO_RVIZ:-false}"
 START_TIMEOUT="${START_TIMEOUT:-45}"
-WAIT_INTERVAL="${WAIT_INTERVAL:-1}"
+WAIT_INTERVAL="${WAIT_INTERVAL:-0.25}"
 ODOM_RAW_TOPIC="${ODOM_RAW_TOPIC:-/Odometry}"
 LOCALIZATION_ODOM_TOPIC="${LOCALIZATION_ODOM_TOPIC:-/localization/odom}"
 RAW_REGISTERED_CLOUD_TOPIC="${RAW_REGISTERED_CLOUD_TOPIC:-/cloud_registered}"
@@ -231,6 +236,16 @@ validate_start_settings() {
   require_bool START_FLIGHT_COMMAND "$START_FLIGHT_COMMAND"
   require_bool START_ROSBAG "$START_ROSBAG"
   require_bool ROSBAG_RECORD_RAW_LIDAR "$ROSBAG_RECORD_RAW_LIDAR"
+  if ! [[ "$START_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ERROR] START_TIMEOUT must be a positive integer (got: $START_TIMEOUT)." >&2
+    return 1
+  fi
+  if ! python3 -c \
+    'import math,sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and 0.05 <= value <= 5.0 else 1)' \
+    "$WAIT_INTERVAL" 2>/dev/null; then
+    echo "[ERROR] WAIT_INTERVAL must be finite and between 0.05 and 5 seconds." >&2
+    return 1
+  fi
   ros_master_port >/dev/null
   if ! [[ "$GROUND_VIZ_CLOUD_TOPIC" =~ ^/([A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*$ ]]; then
     echo "[ERROR] GROUND_VIZ_CLOUD_TOPIC must be a valid absolute ROS topic." >&2
@@ -454,18 +469,23 @@ docker_exec_shell() {
     -e "ROS_MASTER_URI=$ROS_MASTER_URI" \
     -e "ROS_IP=$ROS_IP" \
     -e "ROS_LOG_DIR=$CONTAINER_ROS_LOG_DIR" \
-    "$CONTAINER_NAME" bash -lc "unset ROS_HOSTNAME && source ~/.bashrc && mkdir -p \"\$ROS_LOG_DIR\" && $inner_cmd"
+    -e "SIM2REAL_PROJECT_ROOT=$PLANNING_PROJECT_ROOT" \
+    -e "SIM2REAL_RUNTIME_SETUP=$CONTAINER_RUNTIME_SETUP" \
+    -e "DRONE_ID=0" \
+    "$CONTAINER_NAME" bash -c "unset ROS_HOSTNAME && source \"\$SIM2REAL_RUNTIME_SETUP\" && mkdir -p \"\$ROS_LOG_DIR\" && $inner_cmd"
 }
 
 docker_tmux_cmd() {
   local inner_cmd="$1"
-  printf "docker exec -it -e ROS_MASTER_URI=%q -e ROS_IP=%q -e ROS_LOG_DIR=%q -e SIM2REAL_PLANNER_CONFIG=%q %q bash -lc %q" \
+  printf "docker exec -it -e ROS_MASTER_URI=%q -e ROS_IP=%q -e ROS_LOG_DIR=%q -e SIM2REAL_PROJECT_ROOT=%q -e SIM2REAL_RUNTIME_SETUP=%q -e SIM2REAL_PLANNER_CONFIG=%q -e DRONE_ID=0 %q bash -c %q" \
     "$ROS_MASTER_URI" \
     "$ROS_IP" \
     "$CONTAINER_ROS_LOG_DIR" \
+    "$PLANNING_PROJECT_ROOT" \
+    "$CONTAINER_RUNTIME_SETUP" \
     "$PLANNER_CONFIG" \
     "$CONTAINER_NAME" \
-    "unset ROS_HOSTNAME && source ~/.bashrc && mkdir -p \"\$ROS_LOG_DIR\" && $inner_cmd"
+    "unset ROS_HOSTNAME && source \"\$SIM2REAL_RUNTIME_SETUP\" && mkdir -p \"\$ROS_LOG_DIR\" && $inner_cmd"
 }
 
 managed_rosbag_pids() {
@@ -473,7 +493,7 @@ managed_rosbag_pids() {
   docker exec -i \
     -e "ROSBAG_STATE_FILE=$ROSBAG_STATE_FILE" \
     -e "ROSBAG_NODE_REMAP=__name:=${ROSBAG_NODE_NAME#/}" \
-    "$CONTAINER_NAME" bash -lc '
+    "$CONTAINER_NAME" bash -c '
       [ -s "$ROSBAG_STATE_FILE" ] || exit 1
       IFS= read -r expected_prefix < "$ROSBAG_STATE_FILE"
       [ -n "$expected_prefix" ] || exit 1
@@ -524,7 +544,7 @@ rosbag_node_process_running() {
   docker_container_exists && docker_container_running || return 1
   docker exec -i \
     -e "ROSBAG_NODE_REMAP=__name:=${ROSBAG_NODE_NAME#/}" \
-    "$CONTAINER_NAME" bash -lc '
+    "$CONTAINER_NAME" bash -c '
       for cmdline in /proc/[0-9]*/cmdline; do
         [ -r "$cmdline" ] || continue
         argv=()
@@ -559,7 +579,7 @@ current_rosbag_output_prefix() {
   docker_container_exists && docker_container_running || return 1
   docker exec -i \
     -e "ROSBAG_STATE_FILE=$ROSBAG_STATE_FILE" \
-    "$CONTAINER_NAME" bash -lc '
+    "$CONTAINER_NAME" bash -c '
       [ -s "$ROSBAG_STATE_FILE" ] || exit 1
       IFS= read -r prefix < "$ROSBAG_STATE_FILE"
       [ -n "$prefix" ] || exit 1
@@ -572,7 +592,7 @@ write_rosbag_state() {
   docker exec -i \
     -e "RECORDING_PREFIX=$output_prefix" \
     -e "ROSBAG_STATE_FILE=$ROSBAG_STATE_FILE" \
-    "$CONTAINER_NAME" bash -lc '
+    "$CONTAINER_NAME" bash -c '
       mkdir -p "$(dirname "$ROSBAG_STATE_FILE")"
       state_tmp="${ROSBAG_STATE_FILE}.tmp.$$"
       printf "%s\n" "$RECORDING_PREFIX" > "$state_tmp"
@@ -587,7 +607,7 @@ finalize_indexed_active_bags() {
   docker exec -i \
     -e "BAG_PREFIX=$output_prefix" \
     -e "ROSBAG_STATE_FILE=$ROSBAG_STATE_FILE" \
-    "$CONTAINER_NAME" bash -lc '
+    "$CONTAINER_NAME" bash -c '
       source /opt/ros/noetic/setup.bash
       failed=false
       for active in "${BAG_PREFIX}"_*.bag.active; do
@@ -635,20 +655,20 @@ stop_rosbag_gracefully() {
 
   echo "[INFO] Requesting managed rosbag recorder shutdown; timeout ${timeout}s ..."
   managed_rosbag_pids |
-    docker exec -i "$CONTAINER_NAME" bash -lc \
+    docker exec -i "$CONTAINER_NAME" bash -c \
       'while IFS= read -r pid; do [[ "$pid" =~ ^[0-9]+$ ]] && kill -INT "$pid" 2>/dev/null || true; done'
 
   while rosbag_record_process_running; do
     if [ "$waited" -ge "$timeout" ]; then
       echo "[WARN] Managed rosbag did not exit within ${timeout}s; sending TERM." >&2
       managed_rosbag_pids |
-        docker exec -i "$CONTAINER_NAME" bash -lc \
+        docker exec -i "$CONTAINER_NAME" bash -c \
           'while IFS= read -r pid; do [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true; done'
       sleep 2
       if rosbag_record_process_running; then
         echo "[WARN] Managed rosbag still did not exit; sending KILL to that recorder only." >&2
         managed_rosbag_pids |
-          docker exec -i "$CONTAINER_NAME" bash -lc \
+          docker exec -i "$CONTAINER_NAME" bash -c \
             'while IFS= read -r pid; do [[ "$pid" =~ ^[0-9]+$ ]] && kill -KILL "$pid" 2>/dev/null || true; done'
       fi
       break
@@ -677,7 +697,7 @@ container_processes_running() {
     return 1
   fi
 
-  docker exec -i "$CONTAINER_NAME" bash -lc "pgrep -af \"$PROCESS_GREP_PATTERN\" | grep -v 'pgrep -af' >/dev/null"
+  docker exec -i "$CONTAINER_NAME" bash -c "pgrep -af \"$PROCESS_GREP_PATTERN\" | grep -v 'pgrep -af' >/dev/null"
 }
 
 cleanup_container_processes() {
@@ -685,7 +705,7 @@ cleanup_container_processes() {
     return 0
   fi
 
-  docker exec -i "$CONTAINER_NAME" bash -lc '
+  docker exec -i "$CONTAINER_NAME" bash -c '
     kill_matching() {
       local signal="$1"
       local pattern="$2"
@@ -830,7 +850,7 @@ cleanup_container_processes() {
   while container_processes_running; do
     if [ "$waited" -ge 15 ]; then
       echo "[WARN] Some container processes are still running after cleanup:"
-      docker exec -i "$CONTAINER_NAME" bash -lc "pgrep -af \"$PROCESS_GREP_PATTERN\" | grep -v 'pgrep -af' || true"
+      docker exec -i "$CONTAINER_NAME" bash -c "pgrep -af \"$PROCESS_GREP_PATTERN\" | grep -v 'pgrep -af' || true"
       break
     fi
     sleep 1
@@ -841,16 +861,22 @@ cleanup_container_processes() {
 wait_for_condition() {
   local stage="$1"
   local check_cmd="$2"
-  local waited=0
+  local start_seconds=$SECONDS
+  local start_millis now_millis elapsed elapsed_millis next_report=1
+  start_millis="$(date +%s%3N)"
 
   echo "[INFO] Waiting for $stage ..."
   while true; do
     if docker_exec_shell "$check_cmd" >/dev/null 2>&1; then
-      echo "[INFO] $stage is ready."
+      now_millis="$(date +%s%3N)"
+      elapsed_millis=$((now_millis - start_millis))
+      printf '[INFO] %s is ready in %d.%03d s.\n' \
+        "$stage" "$((elapsed_millis / 1000))" "$((elapsed_millis % 1000))"
       return 0
     fi
 
-    if [ "$waited" -ge "$START_TIMEOUT" ]; then
+    elapsed=$((SECONDS - start_seconds))
+    if [ "$elapsed" -ge "$START_TIMEOUT" ]; then
       echo "[ERROR] Timed out while waiting for $stage."
       echo "Run '$0 status' or '$0 attach' to inspect current logs."
       echo "Host tmux logs: $HOST_LOG_DIR"
@@ -859,8 +885,11 @@ wait_for_condition() {
     fi
 
     sleep "$WAIT_INTERVAL"
-    waited=$((waited + WAIT_INTERVAL))
-    echo "[INFO] Still waiting for $stage ... ${waited}/${START_TIMEOUT}s"
+    elapsed=$((SECONDS - start_seconds))
+    if [ "$elapsed" -ge "$next_report" ]; then
+      echo "[INFO] Still waiting for $stage ... ${elapsed}/${START_TIMEOUT}s"
+      next_report=$((elapsed + 5))
+    fi
   done
 }
 
@@ -932,11 +961,12 @@ real_stack_active() {
 
 mavros_state_snapshot() {
   docker_container_exists && docker_container_running || return 1
-  docker exec -i "$CONTAINER_NAME" bash -lc '
+  docker exec -i \
+    -e "SIM2REAL_RUNTIME_SETUP=$CONTAINER_RUNTIME_SETUP" \
+    "$CONTAINER_NAME" bash -c '
     export ROS_MASTER_URI=http://127.0.0.1:11312
     unset ROS_HOSTNAME
-    source /opt/ros/noetic/setup.bash
-    [ ! -f /root/catkin_ws/devel/setup.bash ] || source /root/catkin_ws/devel/setup.bash
+    source "$SIM2REAL_RUNTIME_SETUP"
     timeout 4 rostopic echo -n 1 /mavros/state 2>/dev/null
   '
 }
@@ -1190,6 +1220,12 @@ create_window() {
   enable_window_logging "$window_name"
 }
 
+create_mavros_window() {
+  tmux new-window -t "$SESSION_NAME" -n mavros \
+    "docker exec -it -e ROS_MASTER_URI='$ROS_MASTER_URI' -e ROS_IP='$ROS_IP' -e ROS_LOG_DIR='$CONTAINER_ROS_LOG_DIR' -e SIM2REAL_PROJECT_ROOT='$PLANNING_PROJECT_ROOT' -e SIM2REAL_RUNTIME_SETUP='$CONTAINER_RUNTIME_SETUP' -e DRONE_ID=0 -e HOST_FCU_URL='$FCU_URL' -e HOST_GCS_URL='$GCS_URL' '$CONTAINER_NAME' bash -c 'unset ROS_HOSTNAME && source \"\$SIM2REAL_RUNTIME_SETUP\" && mkdir -p \"\$ROS_LOG_DIR\" && if [ -n \"\$HOST_FCU_URL\" ]; then export FCU_URL=\"\$HOST_FCU_URL\"; fi && if [ -n \"\$HOST_GCS_URL\" ]; then export GCS_URL=\"\$HOST_GCS_URL\"; fi && roslaunch mavros px4.launch fcu_url:=\"\$FCU_URL\" gcs_url:=\"\$GCS_URL\" tgt_system:=$MAVROS_TGT_SYSTEM'"
+  enable_window_logging "mavros"
+}
+
 cleanup_failed_start() {
   local status="$1"
   trap - ERR
@@ -1207,6 +1243,8 @@ cleanup_failed_start() {
 }
 
 start_stack() {
+  local startup_start_millis startup_end_millis startup_elapsed_millis
+  startup_start_millis="$(date +%s%3N)"
   resolve_selected_planner
   ensure_prereqs
   acquire_start_lock
@@ -1227,6 +1265,13 @@ start_stack() {
   if ! docker exec -i "$CONTAINER_NAME" \
     test -f "$container_setup"; then
     echo "[ERROR] Selected planner workspace is missing in the image: $PLANNER_WORKSPACE_SETUP_REL" >&2
+    echo "[ERROR] The Jetson image is Diff-only by default. For Diff use '--planner diff'." >&2
+    echo "[ERROR] To deploy every planner, export REAL_PLANNER_SET=all, then rebuild and recreate the container." >&2
+    return 1
+  fi
+  if ! docker exec -i "$CONTAINER_NAME" \
+    test -f "$CONTAINER_RUNTIME_SETUP"; then
+    echo "[ERROR] Common runtime setup is missing in the image: $CONTAINER_RUNTIME_SETUP" >&2
     echo "[ERROR] Rebuild it with '$SCRIPT_DIR/real_container.sh build'." >&2
     return 1
   fi
@@ -1272,114 +1317,105 @@ start_stack() {
 
   wait_for_condition "ROS master" "rosparam get /run_id >/dev/null"
 
-  # Clean up publishers created by older versions of real_rviz.sh, then make
-  # the frame aliases part of the Jetson-owned runtime instead of the UI.
+  # Clean up publishers created by older versions of real_rviz.sh. The sensor,
+  # localization adapters, visualization throttle, and MAVROS are independent
+  # ROS subscribers/processes, so start them together and then retain the same
+  # fail-closed readiness checks. This overlaps serial/Fast-LIO initialization
+  # with the FCU handshake instead of placing both on the critical path.
   docker_exec_shell "rosnode kill /jetson_rviz_world_camera_init_tf /jetson_rviz_world_map_tf >/dev/null 2>&1 || true"
   create_window "frame_aliases" \
-    "source ~/.bashrc && roslaunch sim2real_deployment frame_aliases.launch"
+    "exec roslaunch sim2real_deployment frame_aliases.launch"
+  create_window "mid360" \
+    "exec roslaunch livox_ros_driver2 $LIVOX_LAUNCH"
+  create_window "fast_lio" \
+    "exec roslaunch fast_lio mapping_mid360.launch rviz:=$FASTLIO_RVIZ"
+  create_window "odom_to_base" \
+    "exec rosrun sim2real_deployment odom_to_base.py _input_topic:=$ODOM_RAW_TOPIC _output_topic:=$LOCALIZATION_ODOM_TOPIC _output_frame_id:=world _output_child_frame_id:=base_link _mount_x:=$MOUNT_X _mount_y:=$MOUNT_Y _mount_z:=$MOUNT_Z _mount_roll_deg:=$MOUNT_ROLL_DEG _mount_pitch_deg:=$MOUNT_PITCH_DEG _mount_yaw_deg:=$MOUNT_YAW_DEG"
+  create_window "cloud_adapter" \
+    "exec rosrun sim2real_deployment cloud_relay.py _input_topic:=$RAW_REGISTERED_CLOUD_TOPIC _output_topic:=$LOCALIZATION_CLOUD_TOPIC _frame_id:=world"
+  create_window "ground_viz_cloud" \
+    "exec rosrun topic_tools throttle messages '$LOCALIZATION_CLOUD_TOPIC' '$GROUND_VIZ_CLOUD_RATE' '$GROUND_VIZ_CLOUD_TOPIC' __name:=ground_station_cloud_throttle"
+  create_mavros_window
 
   wait_for_condition "static frame aliases" \
     "rosnode list | grep -qx '/real_world_camera_init_tf' && rosnode list | grep -qx '/real_world_odom_tf'"
-
-  create_window "mid360" \
-    "source /opt/ros/noetic/setup.bash && source ~/livox_ws/devel/setup.bash && roslaunch livox_ros_driver2 $LIVOX_LAUNCH"
-
   wait_for_condition "Mid-360S topics" "rostopic list | grep -q '^/livox/lidar$' && rostopic list | grep -q '^/livox/imu$' && [ \"\$(rostopic type /livox/lidar)\" = 'livox_ros_driver2/CustomMsg' ]"
-
-  create_window "fast_lio" \
-    "source ~/.bashrc && roslaunch fast_lio mapping_mid360.launch rviz:=$FASTLIO_RVIZ"
-
   wait_for_condition "FAST-LIO odometry" "rostopic list | grep -qx '$ODOM_RAW_TOPIC'"
-
-  create_window "odom_to_base" \
-    "source ~/.bashrc && rosrun sim2real_deployment odom_to_base.py _input_topic:=$ODOM_RAW_TOPIC _output_topic:=$LOCALIZATION_ODOM_TOPIC _output_frame_id:=world _output_child_frame_id:=base_link _mount_x:=$MOUNT_X _mount_y:=$MOUNT_Y _mount_z:=$MOUNT_Z _mount_roll_deg:=$MOUNT_ROLL_DEG _mount_pitch_deg:=$MOUNT_PITCH_DEG _mount_yaw_deg:=$MOUNT_YAW_DEG"
-
   wait_for_condition "shared localization odometry" "timeout 5s rostopic echo -n 1 '$LOCALIZATION_ODOM_TOPIC/header' >/dev/null"
   wait_for_condition "world to base_link TF" \
     "timeout 5s rosrun tf tf_echo world base_link 2>&1 | grep -q 'Translation:'"
-
-  create_window "cloud_adapter" \
-    "source ~/.bashrc && rosrun sim2real_deployment cloud_relay.py _input_topic:=$RAW_REGISTERED_CLOUD_TOPIC _output_topic:=$LOCALIZATION_CLOUD_TOPIC _frame_id:=world"
-
   wait_for_condition "shared registered point cloud" "timeout 5s rostopic echo -n 1 '$LOCALIZATION_CLOUD_TOPIC/header' >/dev/null"
-
-  create_window "ground_viz_cloud" \
-    "source ~/.bashrc && exec rosrun topic_tools throttle messages '$LOCALIZATION_CLOUD_TOPIC' '$GROUND_VIZ_CLOUD_RATE' '$GROUND_VIZ_CLOUD_TOPIC' __name:=ground_station_cloud_throttle"
 
   wait_for_condition "rate-limited ground visualization cloud" \
     "rostopic list | grep -qx '$GROUND_VIZ_CLOUD_TOPIC'"
-
-  tmux new-window -t "$SESSION_NAME" -n mavros \
-    "docker exec -it -e ROS_MASTER_URI='$ROS_MASTER_URI' -e ROS_IP='$ROS_IP' -e ROS_LOG_DIR='$CONTAINER_ROS_LOG_DIR' -e HOST_FCU_URL='$FCU_URL' -e HOST_GCS_URL='$GCS_URL' '$CONTAINER_NAME' bash -lc 'unset ROS_HOSTNAME && source ~/.bashrc && mkdir -p \"\$ROS_LOG_DIR\" && if [ -n \"\$HOST_FCU_URL\" ]; then export FCU_URL=\"\$HOST_FCU_URL\"; fi && if [ -n \"\$HOST_GCS_URL\" ]; then export GCS_URL=\"\$HOST_GCS_URL\"; fi && roslaunch mavros px4.launch fcu_url:=\"\$FCU_URL\" gcs_url:=\"\$GCS_URL\" tgt_system:=$MAVROS_TGT_SYSTEM'"
-  enable_window_logging "mavros"
-
   wait_for_condition "MAVROS connection" "rostopic list | grep -q '^/mavros/state$' && timeout 3s rostopic echo -n 1 /mavros/state | grep -q 'connected: True'"
-
-  wait_for_condition "MAVROS external-odometry frame transforms" \
-    "timeout 5s rosrun tf tf_echo odom_ned world 2>&1 | grep -q 'Translation:' && timeout 5s rosrun tf tf_echo base_link_frd base_link 2>&1 | grep -q 'Translation:'"
 
   # FAST-LIO starts in an arbitrary local heading.  MAVROS' odometry plugin
   # emits MAVLink ODOMETRY with MAV_FRAME_LOCAL_FRD, allowing PX4 EKF2 to
   # rotate that local frame into its earth frame.  VISION_POSITION_ESTIMATE
   # would incorrectly label the same measurements as magnetic NED.
+  # The post-bootstrap nodes can also initialize together. The lifecycle lock
+  # remains held until every check below succeeds, so early Action availability
+  # cannot execute a takeoff/goal/land command during partial startup.
   create_window "external_odom" \
-    "source ~/.bashrc && rosrun sim2real_deployment odom_to_mavros.py _input_topic:=$LOCALIZATION_ODOM_TOPIC _output_topic:=/mavros/odometry/out _expected_frame_id:=world _expected_child_frame_id:=base_link _max_input_age:=0.2"
-
-  wait_for_condition "MAVROS LOCAL_FRD external odometry bridge" \
-    "rosnode list | grep -qx '/external_odometry_bridge' && sample=\$(timeout 5s rostopic echo -n 1 /mavros/odometry/out 2>/dev/null) && grep -q 'frame_id: \"world\"' <<<\"\$sample\" && grep -q 'child_frame_id: \"base_link\"' <<<\"\$sample\" && rostopic info /mavros/odometry/out 2>/dev/null | grep -Eq '^[[:space:]]*\\*[[:space:]]+/mavros([[:space:](]|$)'"
-
-  # This exact stack-lifetime guard also runs in simulation. A localization
-  # outage or impossible odometry value is latched until a full stack restart;
-  # an autonomous flight is changed to AUTO.LAND immediately.
+    "exec rosrun sim2real_deployment odom_to_mavros.py _input_topic:=$LOCALIZATION_ODOM_TOPIC _output_topic:=/mavros/odometry/out _expected_frame_id:=world _expected_child_frame_id:=base_link _max_input_age:=0.2"
   create_window "localization_guard" \
-    "source ~/.bashrc && rosrun sim2real_common localization_guard.py _odometry_topic:=$LOCALIZATION_ODOM_TOPIC"
-
-  wait_for_condition "localization safety guard" \
-    "rosnode list | grep -qx '/localization_guard'"
+    "exec rosrun sim2real_common localization_guard.py _odometry_topic:=$LOCALIZATION_ODOM_TOPIC"
 
   if [ "$START_PLANNER" = "true" ]; then
     local planner_cmd
     printf -v planner_cmd \
-      'source ~/.bashrc && exec roslaunch sim2real_planner_manager planner_gateway.launch planner_id:=%q planner_profile:=%q runtime_mode:=real manifest_root:=%q repository_root:=%q require_offboard:=true goal_topic:=/goal mavros_state_topic:=/mavros/state output_topic:=%q' \
+      'exec roslaunch sim2real_planner_manager planner_gateway.launch planner_id:=%q planner_profile:=%q runtime_mode:=real manifest_root:=%q repository_root:=%q require_offboard:=true goal_topic:=/goal mavros_state_topic:=/mavros/state output_topic:=%q' \
       "$PLANNER_ID" "$PLANNER_PROFILE" "$PLANNER_MANIFEST_ROOT" "$PLANNING_PROJECT_ROOT" "$TRAJ_CONVERTER_OUTPUT_TOPIC"
     create_window "planner" \
       "$planner_cmd"
-
-    wait_for_condition "$PLANNER_ID planner gateway" \
-      "rostopic list | grep -qx '/planning/status' && rostopic list | grep -qx '/planning/capabilities' && rosnode list | grep -qx '/planner_gateway' && rosnode list | grep -qx '/planner_visualization'"
-    wait_for_condition "$PLANNER_ID READY state" \
-      "status=\$(timeout 5 rostopic echo -n 1 /planning/status 2>/dev/null) && grep -Eq '^state: 1$' <<<\"\$status\" && grep -Eq '^odom_ready: True$' <<<\"\$status\" && grep -Eq '^map_ready: True$' <<<\"\$status\""
   else
     echo "[INFO] Planner startup skipped because START_PLANNER=false."
   fi
 
   if [ "$START_SE3_CONTROLLER" = "true" ]; then
     create_window "se3_controller" \
-      "source ~/.bashrc && roslaunch sim2real_common controller.launch planner_config:=$PLANNER_CONTROLLER_CONFIG vehicle_config:=$CONTROLLER_CONFIG"
-
-    wait_for_condition "SE3 controller" "rosnode list | grep -qx '$SE3_NODE_NAME' && rostopic list | grep -qx '$MAVROS_ATTITUDE_TOPIC'"
+      "exec roslaunch sim2real_common controller.launch planner_config:=$PLANNER_CONTROLLER_CONFIG vehicle_config:=$CONTROLLER_CONFIG"
   else
     echo "[INFO] SE3 controller startup skipped because START_SE3_CONTROLLER=false."
   fi
 
   if [ "$START_INTERACTIVE_GOAL" = "true" ]; then
     create_window "interactive_goal" \
-      "source ~/.bashrc && exec rosrun sim2real_common interactive_goal_server.py _action_name:=/ground_station/interactive_goal _lock_path:=/root/tmp/real.lifecycle.lock _preflight_timeout:=$REAL_PREFLIGHT_TIMEOUT _command_timeout:=$REAL_COMMAND_TIMEOUT _takeoff_timeout:=$REAL_TAKEOFF_TIMEOUT _takeoff_tolerance:=$REAL_TAKEOFF_TOLERANCE _takeoff_stable_time:=$REAL_TAKEOFF_STABLE_TIME _takeoff_max_vertical_speed:=$REAL_TAKEOFF_MAX_VERTICAL_SPEED _odometry_topic:=$LOCALIZATION_ODOM_TOPIC _controller_node:=$SE3_NODE_NAME _attitude_setpoint_topic:=$MAVROS_ATTITUDE_TOPIC"
-
-    wait_for_condition "guarded interactive-goal action" \
-      "rosnode list | grep -qx '/interactive_goal_server' && rostopic list | grep -qx '/ground_station/interactive_goal/status'"
+      "exec rosrun sim2real_common interactive_goal_server.py _action_name:=/ground_station/interactive_goal _lock_path:=/root/tmp/real.lifecycle.lock _preflight_timeout:=$REAL_PREFLIGHT_TIMEOUT _command_timeout:=$REAL_COMMAND_TIMEOUT _takeoff_timeout:=$REAL_TAKEOFF_TIMEOUT _takeoff_tolerance:=$REAL_TAKEOFF_TOLERANCE _takeoff_stable_time:=$REAL_TAKEOFF_STABLE_TIME _takeoff_max_vertical_speed:=$REAL_TAKEOFF_MAX_VERTICAL_SPEED _odometry_topic:=$LOCALIZATION_ODOM_TOPIC _controller_node:=$SE3_NODE_NAME _attitude_setpoint_topic:=$MAVROS_ATTITUDE_TOPIC"
   else
     echo "[INFO] Interactive ground-station goal action skipped because START_INTERACTIVE_GOAL=false."
   fi
 
   if [ "$START_FLIGHT_COMMAND" = "true" ]; then
     create_window "flight_command" \
-      "source ~/.bashrc && exec rosrun sim2real_common flight_command_server.py _action_name:=/ground_station/flight_command _lock_path:=/root/tmp/real.lifecycle.lock _preflight_timeout:=$REAL_PREFLIGHT_TIMEOUT _command_timeout:=$REAL_COMMAND_TIMEOUT _takeoff_timeout:=$REAL_TAKEOFF_TIMEOUT _takeoff_tolerance:=$REAL_TAKEOFF_TOLERANCE _takeoff_stable_time:=$REAL_TAKEOFF_STABLE_TIME _takeoff_max_vertical_speed:=$REAL_TAKEOFF_MAX_VERTICAL_SPEED _odometry_topic:=$LOCALIZATION_ODOM_TOPIC _controller_node:=$SE3_NODE_NAME _attitude_setpoint_topic:=$MAVROS_ATTITUDE_TOPIC"
-
-    wait_for_condition "guarded takeoff/landing action" \
-      "rosnode list | grep -qx '/flight_command_server' && rostopic list | grep -qx '/ground_station/flight_command/status'"
+      "exec rosrun sim2real_common flight_command_server.py _action_name:=/ground_station/flight_command _lock_path:=/root/tmp/real.lifecycle.lock _preflight_timeout:=$REAL_PREFLIGHT_TIMEOUT _command_timeout:=$REAL_COMMAND_TIMEOUT _takeoff_timeout:=$REAL_TAKEOFF_TIMEOUT _takeoff_tolerance:=$REAL_TAKEOFF_TOLERANCE _takeoff_stable_time:=$REAL_TAKEOFF_STABLE_TIME _takeoff_max_vertical_speed:=$REAL_TAKEOFF_MAX_VERTICAL_SPEED _odometry_topic:=$LOCALIZATION_ODOM_TOPIC _controller_node:=$SE3_NODE_NAME _attitude_setpoint_topic:=$MAVROS_ATTITUDE_TOPIC"
   else
     echo "[INFO] Ground-station Takeoff/Land action skipped because START_FLIGHT_COMMAND=false."
+  fi
+
+  wait_for_condition "MAVROS external-odometry frame transforms" \
+    "timeout 5s rosrun tf tf_echo odom_ned world 2>&1 | grep -q 'Translation:' && timeout 5s rosrun tf tf_echo base_link_frd base_link 2>&1 | grep -q 'Translation:'"
+  wait_for_condition "MAVROS LOCAL_FRD external odometry bridge" \
+    "rosnode list | grep -qx '/external_odometry_bridge' && sample=\$(timeout 5s rostopic echo -n 1 /mavros/odometry/out 2>/dev/null) && grep -q 'frame_id: \"world\"' <<<\"\$sample\" && grep -q 'child_frame_id: \"base_link\"' <<<\"\$sample\" && rostopic info /mavros/odometry/out 2>/dev/null | grep -Eq '^[[:space:]]*\\*[[:space:]]+/mavros([[:space:](]|$)'"
+  wait_for_condition "localization safety guard" \
+    "rosnode list | grep -qx '/localization_guard'"
+  if [ "$START_PLANNER" = "true" ]; then
+    wait_for_condition "$PLANNER_ID planner gateway" \
+      "rostopic list | grep -qx '/planning/status' && rostopic list | grep -qx '/planning/capabilities' && rosnode list | grep -qx '/planner_gateway' && rosnode list | grep -qx '/planner_visualization'"
+    wait_for_condition "$PLANNER_ID READY state" \
+      "status=\$(timeout 5 rostopic echo -n 1 /planning/status 2>/dev/null) && grep -Eq '^state: 1$' <<<\"\$status\" && grep -Eq '^odom_ready: True$' <<<\"\$status\" && grep -Eq '^map_ready: True$' <<<\"\$status\""
+  fi
+  if [ "$START_SE3_CONTROLLER" = "true" ]; then
+    wait_for_condition "SE3 controller" "rosnode list | grep -qx '$SE3_NODE_NAME' && rostopic list | grep -qx '$MAVROS_ATTITUDE_TOPIC'"
+  fi
+  if [ "$START_INTERACTIVE_GOAL" = "true" ]; then
+    wait_for_condition "guarded interactive-goal action" \
+      "rosnode list | grep -qx '/interactive_goal_server' && rostopic list | grep -qx '/ground_station/interactive_goal/status'"
+  fi
+  if [ "$START_FLIGHT_COMMAND" = "true" ]; then
+    wait_for_condition "guarded takeoff/landing action" \
+      "rosnode list | grep -qx '/flight_command_server' && rostopic list | grep -qx '/ground_station/flight_command/status'"
   fi
 
   if [ "$START_ROSBAG" = "true" ]; then
@@ -1401,7 +1437,7 @@ start_stack() {
 
     write_rosbag_state "$ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}"
     create_window "rosbag" \
-      "source ~/.bashrc && mkdir -p '$ROSBAG_DIR' && exec nice -n '$ROSBAG_NICE_LEVEL' rosbag record --lz4 --split --size='$ROSBAG_SPLIT_SIZE_MB' --max-splits='$ROSBAG_MAX_SPLITS' --repeat-latched $rosbag_min_space_arg -O '$ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}' __name:='${ROSBAG_NODE_NAME#/}'$ROSBAG_TOPICS_QUOTED$ROSBAG_EXTRA_ARGS_QUOTED"
+      "mkdir -p '$ROSBAG_DIR' && exec nice -n '$ROSBAG_NICE_LEVEL' rosbag record --lz4 --split --size='$ROSBAG_SPLIT_SIZE_MB' --max-splits='$ROSBAG_MAX_SPLITS' --repeat-latched $rosbag_min_space_arg -O '$ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}' __name:='${ROSBAG_NODE_NAME#/}'$ROSBAG_TOPICS_QUOTED$ROSBAG_EXTRA_ARGS_QUOTED"
 
     wait_for_condition "rosbag recorder" "rosnode list | grep -qx '$ROSBAG_NODE_NAME'"
     echo "[INFO] Recording split bags with prefix (container) $ROSBAG_DIR/${ROSBAG_PREFIX}_${RUN_ID}"
@@ -1410,7 +1446,10 @@ start_stack() {
     echo "[INFO] rosbag recording skipped because START_ROSBAG=false."
   fi
 
-  echo "[INFO] Real-flight stack started successfully."
+  startup_end_millis="$(date +%s%3N)"
+  startup_elapsed_millis=$((startup_end_millis - startup_start_millis))
+  printf '[INFO] Real-flight stack started successfully in %d.%03d s.\n' \
+    "$((startup_elapsed_millis / 1000))" "$((startup_elapsed_millis % 1000))"
   echo "[INFO] Use '$0 attach' to inspect tmux windows."
   echo "[INFO] Host tmux logs: $HOST_LOG_DIR"
   echo "[INFO] Container ROS logs: $CONTAINER_ROS_LOG_DIR"

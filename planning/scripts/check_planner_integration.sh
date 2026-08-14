@@ -251,6 +251,21 @@ grep -q '^[[:space:]]*rsync[[:space:]\\]*$' "$PROJECT_ROOT/deployment/Dockerfile
   fail "real image is missing rsync for the staged SUPER source tree"
 grep -q '^COPY third_party/SUPER ' "$PROJECT_ROOT/deployment/Dockerfile" ||
   fail "real image does not include the pinned SUPER snapshot"
+grep -Fq 'ARG PLANNER_WORKSPACES=interfaces,control,diff' \
+  "$PROJECT_ROOT/deployment/Dockerfile" ||
+  fail "real image must default to the Diff-only workspace set"
+grep -Fq -- '--workspaces interfaces,control,diff' \
+  "$PROJECT_ROOT/deployment/Dockerfile" ||
+  fail "real image does not explicitly build the Diff-only core"
+grep -Fq -- '--workspaces fast,super' \
+  "$PROJECT_ROOT/deployment/Dockerfile" ||
+  fail "real image does not retain an explicit all-planner opt-in path"
+grep -Fq 'PLANNER_BUILD_SET="${REAL_PLANNER_SET:-diff}"' \
+  "$PROJECT_ROOT/launch/real_container.sh" ||
+  fail "real container launcher must default to the Diff-only image set"
+grep -Fq 'io.sim2real.enabled-planner-workspaces' \
+  "$PROJECT_ROOT/launch/real_container.sh" ||
+  fail "real container launcher does not verify the enabled workspace set"
 grep -Fxq 'planning/workspaces' "$PROJECT_ROOT/.dockerignore" ||
   fail "generated planner workspaces must be excluded from Docker build contexts"
 grep -Fq 'SELECTED_WORKSPACES="interfaces,control,diff,fast,super"' \

@@ -88,9 +88,14 @@ SIM_TAKEOFF_HEIGHT=1.5 ./launch/sim.sh arm
 真机状态而无需安装 ROS2 `onboard_msgs`。嵌入
 `swarm-uav-mapping` 的三维地面站使用 `embedded_rviz.sh`和受保护的
 `/ground_station/interactive_goal`、`/ground_station/flight_command` Action。
-RViz 工具栏在 `2D Nav Goal` 后提供 `Takeoff`、`Land`：独立起飞完成后进入
+RViz 工具栏在 `2D Nav Goal` 后提供默认 `1.00 m` 的统一高度设置以及
+`Takeoff`、`Land`；起飞和目标点共用该高度，修改后无需在每次操作时重复输入。
+独立起飞完成后进入
 OFFBOARD 原地悬停，在收到首个目标前由 PX4 本地位置环保持位置和航向；
 收到轨迹后再平滑切入 SE3 姿态控制。独立降落只请求并确认 PX4 `AUTO.LAND`。
+Jetson 真机镜像默认只编译并安装 Diff 所需的 `interfaces + control + diff` 工作空间，
+不会编译 Fast Kino、Fast Topo 或 SUPER；本地仿真仍保留四个规划器。需要完整 Jetson
+镜像时可显式设置 `REAL_PLANNER_SET=all`，具体命令见[真机部署指南](docs/deployment.md#jetson机载容器)。
 
 ## 目录
 

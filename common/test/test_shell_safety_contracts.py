@@ -28,7 +28,9 @@ class ShellSafetyContractsTest(unittest.TestCase):
         with open(path, "r", encoding="utf-8") as stream:
             return stream.read()
 
-    def run_real_container_with_fake_docker(self, action, docker_body):
+    def run_real_container_with_fake_docker(
+        self, action, docker_body, *, extra_env=None
+    ):
         launcher = os.path.join(PROJECT_ROOT, "launch", "real_container.sh")
         if not os.path.isfile(launcher):
             self.skipTest("repository real-container launcher is not mounted")
@@ -52,6 +54,9 @@ class ShellSafetyContractsTest(unittest.TestCase):
             env["RUNTIME_DIR"] = runtime_dir
             env["CONTAINER_NAME"] = "fake_real_container"
             env["REAL_SESSION_NAME"] = "fake_real_session"
+            env.pop("REAL_PLANNER_SET", None)
+            if extra_env:
+                env.update(extra_env)
             completed = subprocess.run(
                 [launcher, action],
                 cwd=PROJECT_ROOT,
@@ -62,8 +67,10 @@ class ShellSafetyContractsTest(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
-            with open(docker_log, "r", encoding="utf-8") as stream:
-                docker_calls = stream.read()
+            docker_calls = ""
+            if os.path.isfile(docker_log):
+                with open(docker_log, "r", encoding="utf-8") as stream:
+                    docker_calls = stream.read()
             runtime_children = []
             if os.path.isdir(runtime_dir):
                 runtime_children = os.listdir(runtime_dir)
@@ -532,18 +539,31 @@ esac
         goal_ui = self.read(
             "deployment/ros_pkgs/sim2real_ground_station/scripts/interactive_goal_ui.py"
         )
-        self.assertIn('cancel_text = "取消起飞"', goal_ui)
         self.assertIn("self._flight_client.cancel_goal()", goal_ui)
-        self.assertIn("progress.setCancelButton(None)", goal_ui)
-        progress_body = goal_ui[
-            goal_ui.index("def _open_flight_progress") : goal_ui.index(
-                "def _cancel_takeoff"
-            )
-        ]
-        self.assertEqual(progress_body.count("progress.setCancelButton(None)"), 1)
-        self.assertGreater(
-            progress_body.index("progress.setCancelButton(None)"),
-            progress_body.index("else:"),
+        self.assertIn("self._cancel_takeoff_action", goal_ui)
+        self.assertIn("self._status_callback", goal_ui)
+        self.assertIn(
+            'summary = "起飞：已完成并进入 OFFBOARD 悬停。"', goal_ui
+        )
+        self.assertIn("目标：规划器已接受请求", goal_ui)
+        self.assertNotIn("QProgressDialog", goal_ui)
+        self.assertNotIn("QMessageBox.information", goal_ui)
+        self.assertNotIn("QMessageBox.warning", goal_ui)
+        self.assertIn("class ToolbarStatusPresenter", source)
+        self.assertIn("class UnifiedFlightHeightControl", source)
+        self.assertIn("FLIGHT_HEIGHT_DEFAULT = 1.0", source)
+        self.assertIn('"groundStationFlightHeightSpinBox"', source)
+        self.assertIn("QSettings", source)
+        self.assertIn('"groundStationStatusLabel"', source)
+        self.assertIn('"groundStationCancelTakeoffAction"', source)
+        self.assertIn("status_presenter.show", source)
+        self.assertNotIn("self._goal_height", goal_ui)
+        self.assertNotIn("self._takeoff_height", goal_ui)
+        self.assertNotIn("QDoubleSpinBox", goal_ui)
+        self.assertIn("target.pose.position.z = height", goal_ui)
+        self.assertIn("goal.takeoff_height = height", goal_ui)
+        self.assertIn(
+            'vehicle_kind == "disarmed_ground"', goal_ui
         )
 
     def test_live_rviz_helpers_are_owned_by_the_embedding_session(self):
@@ -659,6 +679,7 @@ esac
                 """
 case "$*" in
   *'io.sim2real.planner-workspaces'*) printf 'v2\n' ;;
+  *'io.sim2real.enabled-planner-workspaces'*) printf 'interfaces,control,diff\n' ;;
   *'io.uav-autonomy-aio.real-source-sha256'*) printf 'stale-source\n' ;;
 esac
 """,
@@ -668,6 +689,209 @@ esac
         self.assertIn("missing or stale", completed.stdout)
         self.assertNotIn("build ", docker_calls)
         self.assertEqual([], runtime_children)
+
+    def test_real_image_build_is_diff_only_by_default_and_all_is_opt_in(self):
+        dockerfile = self.read("deployment/Dockerfile")
+        launcher = self.read("launch/real_container.sh")
+
+        self.assertIn(
+            "ARG PLANNER_WORKSPACES=interfaces,control,diff", dockerfile
+        )
+        planner_arg = dockerfile.index(
+            "ARG PLANNER_WORKSPACES=interfaces,control,diff"
+        )
+        system_dependencies = dockerfile.index(
+            "apt-get -o Acquire::Retries=5 --fix-missing install"
+        )
+        geographiclib = dockerfile.index(
+            "install_geographiclib_datasets.sh"
+        )
+        self.assertLess(system_dependencies, planner_arg)
+        self.assertLess(geographiclib, planner_arg)
+        core_build = dockerfile.index("--workspaces interfaces,control,diff")
+        optional_sources = dockerfile.index("COPY third_party/Fast-Planner")
+        self.assertLess(core_build, optional_sources)
+        self.assertIn("--workspaces fast,super", dockerfile)
+        self.assertIn(
+            'PLANNER_BUILD_SET="${REAL_PLANNER_SET:-diff}"', launcher
+        )
+        self.assertIn(
+            'if [ "$PLANNER_BUILD_SET" = "all" ]; then', launcher
+        )
+        self.assertIn("planning/plugins/diff", launcher)
+
+        default_build, default_calls, _ = (
+            self.run_real_container_with_fake_docker("build", "exit 0\n")
+        )
+        self.assertEqual(0, default_build.returncode, default_build.stdout)
+        self.assertIn(
+            "build --build-arg "
+            "PLANNER_WORKSPACES=interfaces,control,diff",
+            default_calls,
+        )
+
+        all_build, all_calls, _ = self.run_real_container_with_fake_docker(
+            "build", "exit 0\n", extra_env={"REAL_PLANNER_SET": "all"}
+        )
+        self.assertEqual(0, all_build.returncode, all_build.stdout)
+        self.assertIn(
+            "build --build-arg "
+            "PLANNER_WORKSPACES=interfaces,control,diff,fast,super",
+            all_calls,
+        )
+
+    def test_real_image_rejects_unknown_planner_build_set_before_docker(self):
+        completed, docker_calls, _ = self.run_real_container_with_fake_docker(
+            "build", "exit 0\n", extra_env={"REAL_PLANNER_SET": "unknown"}
+        )
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("must be 'diff' or 'all'", completed.stdout)
+        self.assertEqual("", docker_calls)
+
+    def test_real_start_parallelizes_bootstrap_without_relaxing_readiness(self):
+        source = self.read("launch/real.sh")
+        start_body = source[
+            source.index("start_stack()") : source.index("stop_stack()")
+        ]
+        first_readiness = start_body.index(
+            'wait_for_condition "static frame aliases"'
+        )
+        for launch_marker in (
+            'create_window "frame_aliases"',
+            'create_window "mid360"',
+            'create_window "fast_lio"',
+            'create_window "odom_to_base"',
+            'create_window "cloud_adapter"',
+            'create_window "ground_viz_cloud"',
+            "create_mavros_window",
+        ):
+            self.assertLess(start_body.index(launch_marker), first_readiness)
+
+        post_bootstrap_wait = start_body.index(
+            'wait_for_condition "MAVROS external-odometry frame transforms"'
+        )
+        for launch_marker in (
+            'create_window "external_odom"',
+            'create_window "localization_guard"',
+            'create_window "planner"',
+            'create_window "se3_controller"',
+            'create_window "interactive_goal"',
+            'create_window "flight_command"',
+        ):
+            self.assertLess(start_body.index(launch_marker), post_bootstrap_wait)
+
+        for readiness in (
+            "Mid-360S topics",
+            "shared localization odometry",
+            "shared registered point cloud",
+            "MAVROS connection",
+            "MAVROS LOCAL_FRD external odometry bridge",
+            "localization safety guard",
+            "planner gateway",
+            "READY state",
+            "SE3 controller",
+            "guarded interactive-goal action",
+            "guarded takeoff/landing action",
+        ):
+            self.assertIn(readiness, start_body)
+        self.assertLess(
+            start_body.index("acquire_start_lock"),
+            start_body.index('create_window "frame_aliases"'),
+        )
+        self.assertGreater(
+            start_body.rindex("release_start_lock"),
+            start_body.index("guarded takeoff/landing action"),
+        )
+        self.assertIn('WAIT_INTERVAL="${WAIT_INTERVAL:-0.25}"', source)
+        self.assertIn("SECONDS - start_seconds", source)
+        self.assertIn("Real-flight stack started successfully in", source)
+
+    def test_real_runtime_shell_does_not_repeat_catkin_environment_setup(self):
+        source = self.read("launch/real.sh")
+        self.assertIn(
+            'CONTAINER_RUNTIME_SETUP="$PLANNING_PROJECT_ROOT/'
+            'planning/workspaces/control_ws/devel/setup.bash"',
+            source,
+        )
+        self.assertNotIn("bash -lc", source)
+        self.assertNotIn("source ~/.bashrc", source)
+
+        exec_body = source[
+            source.index("docker_exec_shell()") : source.index(
+                "docker_tmux_cmd()"
+            )
+        ]
+        tmux_body = source[
+            source.index("docker_tmux_cmd()") : source.index(
+                "managed_rosbag_pids()"
+            )
+        ]
+        for body in (exec_body, tmux_body):
+            self.assertIn('bash -c', body)
+            self.assertIn('source \\\"\\$SIM2REAL_RUNTIME_SETUP\\\"', body)
+
+        start_body = source[
+            source.index("start_stack()") : source.index("stop_stack()")
+        ]
+        self.assertIn(
+            'test -f "$CONTAINER_RUNTIME_SETUP"', start_body
+        )
+        self.assertNotIn("source /opt/ros/noetic/setup.bash", start_body)
+        self.assertNotIn("source ~/livox_ws/devel/setup.bash", start_body)
+
+    def test_container_hash_and_context_ignore_upstream_media(self):
+        helper = os.path.join(
+            PROJECT_ROOT, "launch", "container_source_hash.sh"
+        )
+        dockerignore = self.read(".dockerignore")
+        helper_source = self.read("launch/container_source_hash.sh")
+        ignored_directories = (
+            "third_party/FAST_LIO/doc",
+            "third_party/Diff-Planner-PX4/images",
+            "third_party/Diff-Planner-PX4/src/se3_controller/attachments",
+        )
+        for relative in ignored_directories:
+            self.assertIn(relative, dockerignore)
+            self.assertIn("--exclude='{}'".format(relative), helper_source)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            code_path = os.path.join(
+                temp_dir, "third_party", "FAST_LIO", "src", "mapping.cpp"
+            )
+            media_path = os.path.join(
+                temp_dir, "third_party", "FAST_LIO", "doc", "demo.gif"
+            )
+            os.makedirs(os.path.dirname(code_path), exist_ok=True)
+            os.makedirs(os.path.dirname(media_path), exist_ok=True)
+
+            def write(path, value):
+                with open(path, "w", encoding="utf-8") as stream:
+                    stream.write(value)
+
+            def source_hash():
+                completed = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; compute_container_source_hash "$2" "$3"',
+                        "bash",
+                        helper,
+                        temp_dir,
+                        "third_party/FAST_LIO",
+                    ],
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                )
+                return completed.stdout.strip()
+
+            write(code_path, "int mapping = 1;\n")
+            write(media_path, "first media revision\n")
+            initial_hash = source_hash()
+            write(media_path, "second, much larger media revision\n")
+            self.assertEqual(initial_hash, source_hash())
+            write(code_path, "int mapping = 2;\n")
+            self.assertNotEqual(initial_hash, source_hash())
 
     def test_real_build_is_rejected_before_docker_build_when_stack_active(self):
         completed, docker_calls, _runtime_children = (
@@ -744,6 +968,91 @@ esac
         self.assertIn(
             '[[ "$workspace" == "$WORKSPACE_ROOT/"*_ws ]]', source
         )
+        for workspace in ("interfaces", "control", "diff", "fast", "super"):
+            self.assertIn(f"if selected {workspace}; then", source)
+
+    def test_diff_only_workspace_build_does_not_require_optional_sources(self):
+        builder = os.path.join(
+            PROJECT_ROOT, "planning", "scripts", "build_planner_workspaces.sh"
+        )
+        if not os.path.isfile(builder):
+            self.skipTest("planner workspace builder is not mounted")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = os.path.join(temp_dir, "project")
+            workspace = os.path.join(temp_dir, "workspaces")
+            underlay = os.path.join(temp_dir, "underlay")
+            bin_dir = os.path.join(temp_dir, "bin")
+            required_dirs = (
+                "planning/ros_pkgs/sim2real_planning_msgs",
+                "planning/ros_pkgs/sim2real_planner_manager",
+                "planning/ros_pkgs/sim2real_diff_adapter",
+                "common",
+                "deployment/ros_pkgs/sim2real_deployment",
+                "third_party/Diff-Planner-PX4/src/se3_controller",
+                "third_party/Diff-Planner-PX4/src/diff_planner/plan_env",
+                "third_party/Diff-Planner-PX4/src/diff_planner/path_searching",
+                "third_party/Diff-Planner-PX4/src/diff_planner/traj_utils",
+                "third_party/Diff-Planner-PX4/src/diff_planner/traj_opt",
+                "third_party/Diff-Planner-PX4/src/diff_planner/plan_manage",
+                "third_party/Diff-Planner-PX4/src/Utils/quadrotor_msgs",
+            )
+            for relative in required_dirs:
+                os.makedirs(os.path.join(project, relative), exist_ok=True)
+            os.makedirs(underlay)
+            os.makedirs(bin_dir)
+            with open(
+                os.path.join(underlay, "setup.bash"), "w", encoding="utf-8"
+            ) as stream:
+                stream.write(":\n")
+
+            fake_catkin = os.path.join(bin_dir, "catkin")
+            with open(fake_catkin, "w", encoding="utf-8") as stream:
+                stream.write(
+                    "#!/usr/bin/env bash\n"
+                    "set -eu\n"
+                    "if [ \"${1:-}\" = build ]; then\n"
+                    "  mkdir -p \"$PWD/devel\"\n"
+                    "  printf ':\\n' > \"$PWD/devel/setup.bash\"\n"
+                    "fi\n"
+                )
+            os.chmod(fake_catkin, 0o755)
+            fake_rospack = os.path.join(bin_dir, "rospack")
+            with open(fake_rospack, "w", encoding="utf-8") as stream:
+                stream.write("#!/usr/bin/env bash\nexit 0\n")
+            os.chmod(fake_rospack, 0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            completed = subprocess.run(
+                [
+                    builder,
+                    "--project-root",
+                    project,
+                    "--workspace-root",
+                    workspace,
+                    "--underlay",
+                    underlay,
+                    "--flavor",
+                    "deployment",
+                    "--jobs",
+                    "1",
+                    "--workspaces",
+                    "interfaces,control,diff",
+                ],
+                env=env,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertEqual(0, completed.returncode, completed.stdout)
+            self.assertFalse(
+                os.path.exists(os.path.join(workspace, "fast_ws"))
+            )
+            self.assertFalse(
+                os.path.exists(os.path.join(workspace, "super_ws"))
+            )
 
     def test_fast_planner_node_waits_for_generated_message_headers(self):
         source = self.read(

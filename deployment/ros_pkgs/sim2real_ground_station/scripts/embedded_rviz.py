@@ -2,17 +2,19 @@
 """Run a dark, presentation-focused RViz window for the Qt ground station."""
 
 import argparse
+import math
 import os
 import signal
 import sys
 
 from rviz import bindings as rviz
-from python_qt_binding.QtCore import Qt, QTimer
+from python_qt_binding.QtCore import QSettings, Qt, QTimer
 from python_qt_binding.QtGui import QColor, QFont, QFontDatabase, QPalette
 from python_qt_binding.QtWidgets import (
     QAction,
     QApplication,
     QDockWidget,
+    QDoubleSpinBox,
     QLabel,
     QStyle,
     QToolBar,
@@ -28,12 +30,143 @@ from interactive_goal_ui import InteractiveGoalUi
 
 
 TARGET_PANEL_TITLE = "Target Control"
+FLIGHT_HEIGHT_MIN = 0.5
+FLIGHT_HEIGHT_MAX = 2.5
+FLIGHT_HEIGHT_DEFAULT = 1.0
+FLIGHT_HEIGHT_SETTINGS_ORGANIZATION = "UAV-Autonomy-All-in-One"
+FLIGHT_HEIGHT_SETTINGS_APPLICATION = "EmbeddedGroundStation"
+FLIGHT_HEIGHT_SETTINGS_KEY = "flight/height_m"
 CJK_FONT_FAMILIES = (
     "Noto Sans CJK SC",
     "Noto Sans SC",
     "WenQuanYi Micro Hei",
     "WenQuanYi Zen Hei",
 )
+
+
+class UnifiedFlightHeightControl:
+    """Persistent toolbar height shared by Takeoff and 2D Nav Goal."""
+
+    def __init__(self, toolbar, before_action=None, settings=None):
+        self._settings = (
+            settings
+            if settings is not None
+            else QSettings(
+                FLIGHT_HEIGHT_SETTINGS_ORGANIZATION,
+                FLIGHT_HEIGHT_SETTINGS_APPLICATION,
+            )
+        )
+        self._label = QLabel("高度", toolbar)
+        self._label.setObjectName("groundStationFlightHeightLabel")
+        self._label.setToolTip("起飞和目标点共用的飞行高度")
+
+        self._spin_box = QDoubleSpinBox(toolbar)
+        self._spin_box.setObjectName("groundStationFlightHeightSpinBox")
+        self._spin_box.setRange(FLIGHT_HEIGHT_MIN, FLIGHT_HEIGHT_MAX)
+        self._spin_box.setDecimals(2)
+        self._spin_box.setSingleStep(0.1)
+        self._spin_box.setSuffix(" m")
+        self._spin_box.setMinimumWidth(82)
+        self._spin_box.setMaximumWidth(96)
+        self._spin_box.setToolTip(
+            "统一飞行高度：Takeoff 与 2D Nav Goal 均使用此值"
+        )
+        self._spin_box.setValue(self._load_height())
+        self._spin_box.valueChanged.connect(self._save_height)
+
+        if before_action is None:
+            self._label_action = toolbar.addWidget(self._label)
+            self._spin_box_action = toolbar.addWidget(self._spin_box)
+        else:
+            self._label_action = toolbar.insertWidget(
+                before_action, self._label
+            )
+            self._spin_box_action = toolbar.insertWidget(
+                before_action, self._spin_box
+            )
+
+    @property
+    def spin_box(self):
+        return self._spin_box
+
+    def _load_height(self):
+        raw_value = self._settings.value(
+            FLIGHT_HEIGHT_SETTINGS_KEY, FLIGHT_HEIGHT_DEFAULT
+        )
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return FLIGHT_HEIGHT_DEFAULT
+        if (
+            not math.isfinite(value)
+            or value < FLIGHT_HEIGHT_MIN
+            or value > FLIGHT_HEIGHT_MAX
+        ):
+            return FLIGHT_HEIGHT_DEFAULT
+        return value
+
+    def _save_height(self, value):
+        self._settings.setValue(FLIGHT_HEIGHT_SETTINGS_KEY, float(value))
+        self._settings.sync()
+
+
+class ToolbarStatusPresenter:
+    """Compact, non-modal feedback for goals and flight commands."""
+
+    _COLORS = {
+        "info": ("#bae6fd", "#0c4a6e", "#0369a1"),
+        "success": ("#bbf7d0", "#14532d", "#16a34a"),
+        "warning": ("#fde68a", "#422006", "#b45309"),
+        "error": ("#fecaca", "#450a0a", "#dc2626"),
+    }
+
+    def __init__(self, toolbar, before_action=None):
+        self._label = QLabel("", toolbar)
+        self._label.setObjectName("groundStationStatusLabel")
+        self._label.setMaximumWidth(390)
+        self._label.setMinimumHeight(30)
+        self._label.setMargin(0)
+        self._label.setVisible(False)
+        self._clear_timer = QTimer(self._label)
+        self._clear_timer.setSingleShot(True)
+        self._clear_timer.timeout.connect(self.clear)
+        if before_action is None:
+            toolbar.addWidget(self._label)
+        else:
+            toolbar.insertWidget(before_action, self._label)
+
+    @staticmethod
+    def _compact_text(message, limit=52):
+        text = " ".join(str(message or "").split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
+
+    def show(self, level, message, timeout_ms=0):
+        full_text = " ".join(str(message or "").split())
+        if not full_text:
+            self.clear()
+            return
+        foreground, background, border = self._COLORS.get(
+            str(level), self._COLORS["info"]
+        )
+        self._clear_timer.stop()
+        self._label.setText(self._compact_text(full_text))
+        self._label.setToolTip(full_text)
+        self._label.setStyleSheet(
+            "QLabel { color: %s; background: %s; border: 1px solid %s; "
+            "border-radius: 4px; padding: 4px 8px; }"
+            % (foreground, background, border)
+        )
+        self._label.setVisible(True)
+        if int(timeout_ms) > 0:
+            self._clear_timer.start(int(timeout_ms))
+
+    def clear(self):
+        self._clear_timer.stop()
+        self._label.clear()
+        self._label.setToolTip("")
+        self._label.setVisible(False)
 
 
 def _normalized_action_text(action):
@@ -83,6 +216,18 @@ def install_flight_command_actions(frame, goal_ui):
     land_action.setCheckable(False)
     land_action.setEnabled(False)
 
+    cancel_takeoff_action = QAction(
+        frame.style().standardIcon(QStyle.SP_DialogCancelButton),
+        "Cancel Takeoff",
+        toolbar,
+    )
+    cancel_takeoff_action.setObjectName(
+        "groundStationCancelTakeoffAction"
+    )
+    cancel_takeoff_action.setCheckable(False)
+    cancel_takeoff_action.setEnabled(False)
+    cancel_takeoff_action.setVisible(False)
+
     actions = toolbar.actions()
     goal_index = actions.index(goal_action)
     following_action = (
@@ -91,11 +236,24 @@ def install_flight_command_actions(frame, goal_ui):
     if following_action is None:
         toolbar.addAction(takeoff_action)
         toolbar.addAction(land_action)
+        toolbar.addAction(cancel_takeoff_action)
     else:
         toolbar.insertAction(following_action, takeoff_action)
         toolbar.insertAction(following_action, land_action)
+        toolbar.insertAction(following_action, cancel_takeoff_action)
 
-    goal_ui.bind_flight_actions(takeoff_action, land_action)
+    height_control = UnifiedFlightHeightControl(toolbar, takeoff_action)
+    status_presenter = ToolbarStatusPresenter(toolbar, following_action)
+    goal_ui.bind_flight_actions(
+        takeoff_action,
+        land_action,
+        cancel_takeoff_action,
+        status_callback=status_presenter.show,
+        height_control=height_control.spin_box,
+    )
+    # Keep Python wrappers alive for the lifetime of the RViz frame.
+    frame._ground_station_height_control = height_control
+    frame._ground_station_status_presenter = status_presenter
     return takeoff_action, land_action
 
 

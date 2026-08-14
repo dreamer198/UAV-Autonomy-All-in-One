@@ -14,7 +14,10 @@ GCS_URL="${GCS_URL:-}"
 RUNTIME_DIR="$(realpath -m "${RUNTIME_DIR:-$PROJECT_ROOT/runtime}")"
 EXTRA_DOCKER_ARGS="${EXTRA_DOCKER_ARGS:-}"
 PLANNER_PLUGIN_PATH="${SIM2REAL_PLANNER_PLUGIN_PATH:-}"
+PLANNER_BUILD_SET="${REAL_PLANNER_SET:-diff}"
+PLANNER_WORKSPACES=""
 IMAGE_LAYOUT_VERSION="v2"
+IMAGE_WORKSPACES_LABEL="io.sim2real.enabled-planner-workspaces"
 IMAGE_SOURCE_LABEL="io.uav-autonomy-aio.real-source-sha256"
 LIFECYCLE_LOCK_PATH="$RUNTIME_DIR/tmp/real.lifecycle.lock"
 LIFECYCLE_LOCK_FD=""
@@ -31,6 +34,11 @@ run is idempotent when the existing container layout is current. Commands that
 would stop, replace or remove a container refuse while a real-flight stack or
 recorder is active. --force is reserved for emergency recovery or maintenance
 after the aircraft has been made safe by the pilot.
+
+Planner image sets:
+  REAL_PLANNER_SET=diff  Build only interfaces, control, and Diff (default).
+  REAL_PLANNER_SET=all   Also build Fast Kino/Topo and SUPER. Keep this value
+                         exported for subsequent run/verify/start commands.
 EOF
 }
 
@@ -49,6 +57,20 @@ die() {
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"
+}
+
+resolve_planner_build_set() {
+  case "$PLANNER_BUILD_SET" in
+    diff)
+      PLANNER_WORKSPACES="interfaces,control,diff"
+      ;;
+    all)
+      PLANNER_WORKSPACES="interfaces,control,diff,fast,super"
+      ;;
+    *)
+      die "REAL_PLANNER_SET must be 'diff' or 'all' (got: $PLANNER_BUILD_SET)."
+      ;;
+  esac
 }
 
 acquire_lifecycle_lock() {
@@ -83,6 +105,7 @@ with_lifecycle_lock() {
 }
 
 ensure_prereqs() {
+  resolve_planner_build_set
   need_cmd docker
   need_cmd flock
   need_cmd realpath
@@ -202,27 +225,44 @@ prepare_runtime_dirs() {
 compute_image_source_hash() {
   # shellcheck source=launch/container_source_hash.sh
   source "$SOURCE_HASH_HELPER"
-  compute_container_source_hash \
-    "$PROJECT_ROOT" \
-    .dockerignore \
-    deployment/Dockerfile \
-    deployment/docker \
-    deployment/config/rviz/jetson_real_stack.rviz \
-    deployment/config/livox/MID360s_config.json \
-    deployment/config/controller.yaml \
-    third_party/Livox-SDK2 \
-    third_party/livox_ros_driver2 \
-    third_party/FAST_LIO \
-    third_party/Diff-Planner-PX4 \
-    third_party/Fast-Planner \
-    third_party/SUPER \
-    common \
-    deployment/ros_pkgs/sim2real_deployment \
-    planning
+  resolve_planner_build_set
+  local -a source_paths=(
+    .dockerignore
+    deployment/Dockerfile
+    deployment/docker
+    deployment/config/rviz/jetson_real_stack.rviz
+    deployment/config/livox/MID360s_config.json
+    deployment/config/controller.yaml
+    third_party/Livox-SDK2
+    third_party/livox_ros_driver2
+    third_party/FAST_LIO
+    third_party/Diff-Planner-PX4
+    common
+    deployment/ros_pkgs/sim2real_deployment
+    planning/scripts
+    planning/plugins/diff
+    planning/ros_pkgs/sim2real_planning_msgs
+    planning/ros_pkgs/sim2real_planner_manager
+    planning/ros_pkgs/sim2real_diff_adapter
+  )
+  if [ "$PLANNER_BUILD_SET" = "all" ]; then
+    source_paths+=(
+      third_party/Fast-Planner
+      third_party/SUPER
+      planning/plugins/fast-kino
+      planning/plugins/fast-topo
+      planning/plugins/super
+      planning/ros_pkgs/sim2real_fast_adapter
+      planning/ros_pkgs/sim2real_super_adapter
+    )
+  fi
+  compute_container_source_hash "$PROJECT_ROOT" "${source_paths[@]}"
 }
 
 image_layout_current() {
-  local planner_layout="" expected_source_hash actual_source_hash
+  local planner_layout="" enabled_workspaces=""
+  local expected_source_hash actual_source_hash
+  resolve_planner_build_set
   expected_source_hash="$(compute_image_source_hash)"
   planner_layout="$(
     docker image inspect \
@@ -230,6 +270,12 @@ image_layout_current() {
       "$IMAGE_NAME" 2>/dev/null || true
   )"
   [ "$planner_layout" = "$IMAGE_LAYOUT_VERSION" ] || return 1
+  enabled_workspaces="$(
+    docker image inspect \
+      -f "{{index .Config.Labels \"$IMAGE_WORKSPACES_LABEL\"}}" \
+      "$IMAGE_NAME" 2>/dev/null || true
+  )"
+  [ "$enabled_workspaces" = "$PLANNER_WORKSPACES" ] || return 1
   actual_source_hash="$(
     docker image inspect \
       -f "{{index .Config.Labels \"$IMAGE_SOURCE_LABEL\"}}" \
@@ -296,6 +342,8 @@ container_layout_current() {
     grep -qx 'DRONE_ID=0' || return 1
   docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" |
     grep -Fxqx "SIM2REAL_PLANNER_PLUGIN_PATH=$PLANNER_PLUGIN_PATH" || return 1
+  docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" |
+    grep -Fxqx "SIM2REAL_PLANNER_WORKSPACES=$PLANNER_WORKSPACES" || return 1
   # Docker inspect keeps printing the configured source path even if that
   # directory was removed and recreated.  Compare the live filesystem object
   # so host CLI commands and onboard Action servers cannot silently flock
@@ -307,8 +355,9 @@ build_image() {
   local source_hash
   ensure_prereqs
   source_hash="$(compute_image_source_hash)"
-  info "Building image: $IMAGE_NAME"
+  info "Building image: $IMAGE_NAME (planner set: $PLANNER_BUILD_SET; workspaces: $PLANNER_WORKSPACES)"
   docker build \
+    --build-arg "PLANNER_WORKSPACES=$PLANNER_WORKSPACES" \
     --label "$IMAGE_SOURCE_LABEL=$source_hash" \
     -t "$IMAGE_NAME" \
     -f "$PROJECT_ROOT/deployment/Dockerfile" \
@@ -344,6 +393,7 @@ create_container() {
     --privileged
     -e "DRONE_ID=0"
     -e "SIM2REAL_PLANNER_PLUGIN_PATH=$PLANNER_PLUGIN_PATH"
+    -e "SIM2REAL_PLANNER_WORKSPACES=$PLANNER_WORKSPACES"
     -e "SIM2REAL_RUNTIME_MODE=real"
     -e "DISPLAY=$DISPLAY_VALUE"
     -e "QT_X11_NO_MITSHM=1"
@@ -455,6 +505,7 @@ shell_container() {
 
 status_container() {
   ensure_prereqs
+  info "Requested planner set: $PLANNER_BUILD_SET ($PLANNER_WORKSPACES)"
   docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 }
 

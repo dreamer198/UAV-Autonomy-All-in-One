@@ -61,6 +61,12 @@ compute_container_source_hash() {
       --exclude='runtime/*' \
       --exclude='planning/workspaces' \
       --exclude='planning/workspaces/*' \
+      --exclude='third_party/FAST_LIO/doc' \
+      --exclude='third_party/FAST_LIO/doc/*' \
+      --exclude='third_party/Diff-Planner-PX4/images' \
+      --exclude='third_party/Diff-Planner-PX4/images/*' \
+      --exclude='third_party/Diff-Planner-PX4/src/se3_controller/attachments' \
+      --exclude='third_party/Diff-Planner-PX4/src/se3_controller/attachments/*' \
       --exclude='*.bag' \
       -cf - -- "$@" |
       sha256sum |

@@ -15,3 +15,9 @@ planning/workspaces
 **/devel
 **/logs
 **/*.bag
+
+# Upstream documentation/media is not compiled or used at runtime. Excluding
+# it removes roughly 180 MiB from the Jetson build context and source scan.
+third_party/FAST_LIO/doc
+third_party/Diff-Planner-PX4/images
+third_party/Diff-Planner-PX4/src/se3_controller/attachments

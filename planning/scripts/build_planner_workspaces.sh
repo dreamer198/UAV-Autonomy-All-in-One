@@ -16,8 +16,10 @@ usage() {
   cat <<'EOF'
 Usage: build_planner_workspaces.sh [OPTIONS]
 
-Build the five isolated ROS planner workspaces. Generated products live below
-planning/workspaces and are intentionally not source files.
+Build selected isolated ROS planner workspaces. Generated products live below
+planning/workspaces and are intentionally not source files. The generic
+builder keeps the complete set as its default; deployment images can pass a
+smaller explicit set such as interfaces,control,diff.
 
 Options:
   --project-root PATH       Repository root (default: inferred from script)
@@ -174,59 +176,73 @@ configure_sources() {
   local super_ws="$WORKSPACE_ROOT/super_ws"
   local ros_pkgs="$PROJECT_ROOT/planning/ros_pkgs"
 
-  ensure_source_link "$interfaces_ws" sim2real_planning_msgs \
-    "$ros_pkgs/sim2real_planning_msgs"
-
-  ensure_source_link "$control_ws" sim2real_planner_manager \
-    "$ros_pkgs/sim2real_planner_manager"
-  ensure_source_link "$control_ws" sim2real_common "$PROJECT_ROOT/common"
-  ensure_source_link "$control_ws" se3_controller \
-    "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/se3_controller"
-
   case "$FLAVOR" in
-    simulation)
-      ensure_source_link "$control_ws" sim2real_simulation \
-        "$PROJECT_ROOT/simulation/ros_pkgs/sim2real_simulation"
-      ;;
-    deployment)
-      ensure_source_link "$control_ws" sim2real_deployment \
-        "$PROJECT_ROOT/deployment/ros_pkgs/sim2real_deployment"
-      ;;
-    none) ;;
+    simulation|deployment|none) ;;
     *) die "--flavor must be simulation, deployment, or none (got: $FLAVOR)" ;;
   esac
 
-  # Keep unrelated upstream tools/controllers out of the Diff plugin domain.
-  # In particular, several Utils packages rely on undeclared build-order
-  # dependencies and are not part of the runtime planner bundle.
-  remove_managed_source_link "$diff_ws" Diff-Planner-PX4
-  ensure_source_link "$diff_ws" plan_env \
-    "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/diff_planner/plan_env"
-  ensure_source_link "$diff_ws" path_searching \
-    "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/diff_planner/path_searching"
-  ensure_source_link "$diff_ws" traj_utils \
-    "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/diff_planner/traj_utils"
-  ensure_source_link "$diff_ws" traj_opt \
-    "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/diff_planner/traj_opt"
-  ensure_source_link "$diff_ws" diff_planner \
-    "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/diff_planner/plan_manage"
-  ensure_source_link "$diff_ws" quadrotor_msgs \
-    "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/Utils/quadrotor_msgs"
-  ensure_source_link "$diff_ws" sim2real_diff_adapter \
-    "$ros_pkgs/sim2real_diff_adapter"
+  if selected interfaces; then
+    ensure_source_link "$interfaces_ws" sim2real_planning_msgs \
+      "$ros_pkgs/sim2real_planning_msgs"
+  fi
 
-  ensure_source_link "$fast_ws" Fast-Planner \
-    "$PROJECT_ROOT/third_party/Fast-Planner"
-  ensure_source_link "$fast_ws" sim2real_fast_adapter \
-    "$ros_pkgs/sim2real_fast_adapter"
+  if selected control; then
+    ensure_source_link "$control_ws" sim2real_planner_manager \
+      "$ros_pkgs/sim2real_planner_manager"
+    ensure_source_link "$control_ws" sim2real_common "$PROJECT_ROOT/common"
+    ensure_source_link "$control_ws" se3_controller \
+      "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/se3_controller"
 
-  # SUPER writes logs below its source tree and uses workspace-relative
-  # generated-message includes. Stage the pinned, selected snapshot into this
-  # generated writable domain instead of mounting the tracked vendor tree.
-  sync_managed_source_tree "$super_ws" SUPER \
-    "$PROJECT_ROOT/third_party/SUPER"
-  ensure_source_link "$super_ws" sim2real_super_adapter \
-    "$ros_pkgs/sim2real_super_adapter"
+    case "$FLAVOR" in
+      simulation)
+        ensure_source_link "$control_ws" sim2real_simulation \
+          "$PROJECT_ROOT/simulation/ros_pkgs/sim2real_simulation"
+        ;;
+      deployment)
+        ensure_source_link "$control_ws" sim2real_deployment \
+          "$PROJECT_ROOT/deployment/ros_pkgs/sim2real_deployment"
+        ;;
+      none) ;;
+    esac
+  fi
+
+  if selected diff; then
+    # Keep unrelated upstream tools/controllers out of the Diff plugin domain.
+    # In particular, several Utils packages rely on undeclared build-order
+    # dependencies and are not part of the runtime planner bundle.
+    remove_managed_source_link "$diff_ws" Diff-Planner-PX4
+    ensure_source_link "$diff_ws" plan_env \
+      "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/diff_planner/plan_env"
+    ensure_source_link "$diff_ws" path_searching \
+      "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/diff_planner/path_searching"
+    ensure_source_link "$diff_ws" traj_utils \
+      "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/diff_planner/traj_utils"
+    ensure_source_link "$diff_ws" traj_opt \
+      "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/diff_planner/traj_opt"
+    ensure_source_link "$diff_ws" diff_planner \
+      "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/diff_planner/plan_manage"
+    ensure_source_link "$diff_ws" quadrotor_msgs \
+      "$PROJECT_ROOT/third_party/Diff-Planner-PX4/src/Utils/quadrotor_msgs"
+    ensure_source_link "$diff_ws" sim2real_diff_adapter \
+      "$ros_pkgs/sim2real_diff_adapter"
+  fi
+
+  if selected fast; then
+    ensure_source_link "$fast_ws" Fast-Planner \
+      "$PROJECT_ROOT/third_party/Fast-Planner"
+    ensure_source_link "$fast_ws" sim2real_fast_adapter \
+      "$ros_pkgs/sim2real_fast_adapter"
+  fi
+
+  if selected super; then
+    # SUPER writes logs below its source tree and uses workspace-relative
+    # generated-message includes. Stage the pinned, selected snapshot into this
+    # generated writable domain instead of mounting the tracked vendor tree.
+    sync_managed_source_tree "$super_ws" SUPER \
+      "$PROJECT_ROOT/third_party/SUPER"
+    ensure_source_link "$super_ws" sim2real_super_adapter \
+      "$ros_pkgs/sim2real_super_adapter"
+  fi
 }
 
 build_workspace() {

@@ -152,8 +152,25 @@ FCU_DEVICE=/dev/ttyACM0 ./launch/real_container.sh run
 ./launch/real_container.sh status
 ```
 
-`build` 构建完整真机镜像；`run` 创建或启动容器，并把 `FCU_DEVICE` 指定的宿主串口
-映射到容器。容器准备完成后，通过 `real.sh` 启动真机 ROS 栈。
+`build` 默认只编译真机实际使用的 `interfaces`、`control` 和 `diff` 工作空间；
+Fast Kino、Fast Topo 与 SUPER 不参与 Jetson 默认编译。`run` 创建或启动容器，并把
+`FCU_DEVICE` 指定的宿主串口映射到容器。容器准备完成后，通过 `real.sh` 启动真机
+ROS 栈。仓库和仿真镜像仍保留全部四个规划器。
+
+如以后需要在 Jetson 上临时部署全部规划器，必须显式使用同一个镜像集合设置完成
+构建、建容器和启动：
+
+```bash
+export REAL_PLANNER_SET=all
+./launch/real_container.sh build
+./launch/real_container.sh run
+./launch/real_container.sh verify
+./launch/real.sh --planner fast-kino start
+```
+
+正常真机使用不要设置该变量，或显式设置 `REAL_PLANNER_SET=diff`。镜像标签和源码哈希
+会记录实际工作空间集合，避免误把 diff-only 容器当成完整容器；默认哈希也不再受
+Fast-Planner、SUPER 及其 adapter 源码变化影响。
 
 `FCU_DEVICE` 与后续 `FCU_URL` 的职责不同：
 
@@ -186,7 +203,8 @@ JSON，因此 `swarm-uav-mapping --aio-real` 不依赖 ROS2 `onboard_msgs` 或
 ./launch/real.sh planners
 ```
 
-`start` 和 `restart` 必须指定 `diff`、`fast-kino`、`fast-topo` 或 `super`。下面是完整
+`planners` 会列出仓库支持的 `diff`、`fast-kino`、`fast-topo` 和 `super`；默认 Jetson
+镜像只安装 `diff`。`start` 和 `restart` 仍必须显式指定规划器。下面是默认镜像的完整
 启动示例，地址和系统 ID 必须替换为现场值：
 
 ```bash
@@ -216,7 +234,25 @@ MAVROS_TGT_SYSTEM=2 \
 ```
 
 启动器依次启动坐标系别名、Livox、FAST-LIO、里程计/点云适配、MAVROS、
-外部视觉位姿桥、定位保护、所选规划器、SE3 和 rosbag。任一关键阶段失败都会清理本次启动产生的部分进程。
+外部视觉位姿桥、定位保护、所选规划器、SE3 和 rosbag。任一关键阶段失败都会清理
+本次启动产生的部分进程。
+
+为了缩短 Jetson 冷启动时间，Livox/FAST-LIO/坐标适配/MAVROS 会先并行初始化；首批
+定位与飞控链路就绪后，外部视觉桥、定位保护、规划器、SE3 和两个地面站 Action 也会
+并行初始化。启动器仍逐项验证原有的消息、TF、规划器 `READY`、控制器和 Action 条件，
+并且在所有检查完成前始终持有飞行命令锁。默认轮询间隔为 `0.25 s`，每个阶段及总启动
+时间都会直接打印，例如：
+
+```text
+[INFO] MAVROS connection is ready in 0.184 s.
+[INFO] diff READY state is ready in 2.436 s.
+[INFO] Real-flight stack started successfully in 9.821 s.
+```
+
+`START_TIMEOUT` 是单项失败超时，不是固定延迟；不要通过删除就绪检查来追求更短时间。
+需要排查慢点时，直接观察哪一行 `is ready in ...` 耗时最长，再结合
+`./launch/real.sh attach` 查看对应 tmux 窗口。镜像哈希和 Docker 构建上下文会忽略
+FAST-LIO/Diff 上游仓库中不参与编译的 GIF、PDF、截图等媒体文件。
 
 ## 飞前检查
 
@@ -293,11 +329,15 @@ NED 状态的正常形式，不能用它判断传入 PX4 的 MID360 坐标系。
 `ROS_MASTER_PORT` 默认为 `11312`，维护时可显式覆盖。`swarm-uav-mapping` 使用不带伪终端的
 `./launch/embedded_rviz.sh`，取得 X11 窗口 ID 后嵌入其三维模式。
 
-嵌入窗口隐藏 RViz 侧栏；工具栏保留 `2D Nav Goal`，并在其后依次显示
-`Takeoff`、`Land`。`2D Nav Goal` 只生成候选 x/y/yaw，随后弹窗设置目标高度
-和必要时的起飞高度，范围均为 0.5–2.5 m，默认 1.5 m。请求通过
-`/ground_station/interactive_goal` Action 提交，并显示校验、解锁、
-`AUTO.TAKEOFF`、OFFBOARD 交接和目标发布结果。
+嵌入窗口隐藏 RViz 侧栏；工具栏保留 `2D Nav Goal`，并在其后依次显示统一的
+`高度` 设置、`Takeoff`、`Land`。高度范围为 0.5–2.5 m，默认 `1.00 m`，修改后会在
+下一次正常启动时继续使用。`Takeoff` 与 `2D Nav Goal` 始终读取这一处设置，不再分别
+弹出高度输入框。`2D Nav Goal` 生成候选 x/y/yaw 后通过
+`/ground_station/interactive_goal` Action 提交：无人机已经在 OFFBOARD 飞行时直接
+发送；无人机位于地面时只弹出一次不含输入框的自动起飞安全确认。校验、解锁、
+`AUTO.TAKEOFF`、OFFBOARD 交接和目标发布结果显示在 RViz 工具栏的非模态状态提示中，
+不再额外弹出进度框或成功提示框。独立起飞执行期间，工具栏会临时显示
+`Cancel Takeoff`；降落一旦发送则不会提供可能误导操作者的取消按钮。
 
 - 已解锁且处于 OFFBOARD：校验后直接发送；
 - 已解锁但不在 OFFBOARD：拒绝，不自动切换模式；
@@ -306,11 +346,12 @@ NED 状态的正常形式，不能用它判断传入 PX4 的 MID360 坐标系。
 
 机载端在解锁前调用 `/planning/validate_goal`，并与 `real.sh arm/goal/mission`
 以及工具栏起飞/降落共用同一个生命周期文件锁。目标被接受后保持 OFFBOARD，
-不自动降落；界面提示“目标已接受”只表示规划器已接收目标，不表示已经到达。
+不自动降落；工具栏提示“目标已接受”只表示规划器已接收目标，不表示已经到达。
 
 `Takeoff` 通过 `/ground_station/flight_command` 发送独立起飞命令。它仅在收到
-新鲜 MAVROS 状态、飞行器未解锁且明确为 `ON_GROUND` 时启用；确认后执行解锁、
-PX4 `AUTO.TAKEOFF`，到达 0.5–2.5 m 范围内设置的高度后进入经过验证的
+新鲜 MAVROS 状态、飞行器未解锁且明确为 `ON_GROUND` 时启用；确认对话框只显示当前
+统一高度，不再要求重复输入。确认后执行解锁、PX4 `AUTO.TAKEOFF`，到达工具栏设置的
+高度后进入经过验证的
 OFFBOARD 悬停，不会发布规划目标。此阶段由 PX4 本地位置环保持切换瞬间的
 位置和航向，SE3 不发原始姿态/推力。使用 `2D Nav Goal` 产生首条有效轨迹后，
 再通过锁存的 FAST-LIO-world 到飞控姿态对齐，在 1.5 s 内平滑切入 SE3 控制。
@@ -457,11 +498,17 @@ RViz 显示。地面站通过专用离线入口连接该回放环境。
 
 #### 重建 Jetson
 
+默认只重建 Diff 真机镜像：
+
 ```bash
 ./launch/real.sh stop
 ./launch/real_container.sh build
 FCU_DEVICE=/dev/ttyACM0 ./launch/real_container.sh restart
+./launch/real_container.sh verify
 ```
+
+不要为正常 Diff 部署设置 `REAL_PLANNER_SET=all`。只有确实需要 Fast/SUPER 时，才在
+上述所有命令以及后续 `real.sh` 命令所在终端先执行 `export REAL_PLANNER_SET=all`。
 
 容器重建完成后，按[启动真机栈](#启动真机栈)重新传入设备、网络、外参和规划器参数，
 启动 ROS 栈。
@@ -484,10 +531,10 @@ FCU_DEVICE=/dev/ttyACM0 ./launch/real_container.sh restart
 
 ```bash
 PLANNER_CONFIG=/root/tmp/FILE.yaml \
-./launch/real.sh --planner fast-kino start
+./launch/real.sh --planner diff start
 ```
 
-Diff、Fast Kino/Topo 与 SUPER 的配置格式分别以本节表中的默认文件为准。
+完整镜像中的 Diff、Fast Kino/Topo 与 SUPER 配置格式分别以本节表中的默认文件为准。
 
 ## 常见问题
 
