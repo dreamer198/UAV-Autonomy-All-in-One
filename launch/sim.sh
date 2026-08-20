@@ -1267,7 +1267,7 @@ custom_mode: 'AUTO.LAND'\" >/dev/null"
 request_land() {
   acquire_start_lock
   local status=0
-  request_land_locked "$@" || status=$?
+  request_land_locked || status=$?
   release_start_lock
   return "$status"
 }
@@ -1462,7 +1462,7 @@ arm_vehicle_locked() {
 arm_vehicle() {
   acquire_start_lock
   local status=0
-  arm_vehicle_locked "$@" || status=$?
+  arm_vehicle_locked || status=$?
   release_start_lock
   return "$status"
 }

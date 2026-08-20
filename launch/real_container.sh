@@ -223,7 +223,7 @@ prepare_runtime_dirs() {
 }
 
 compute_image_source_hash() {
-  # shellcheck source=launch/container_source_hash.sh
+  # shellcheck disable=SC1090,SC1091
   source "$SOURCE_HASH_HELPER"
   resolve_planner_build_set
   local -a source_paths=(
